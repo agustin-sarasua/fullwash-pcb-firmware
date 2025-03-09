@@ -2,8 +2,13 @@
 #include <Arduino.h>
 #include <PubSubClient.h>
 
+#include "certs/AmazonRootCA.h"
+#include "certs/AWSClientCertificate.h"
+#include "certs/AWSClientPrivateKey.h"
+
 // Define modem model for TinyGSM
 #define TINY_GSM_MODEM_SIM7600
+// #define TINY_GSM_RX_BUFFER 1024  // Set RX buffer to 1Kb
 
 #include <TinyGsmClient.h>
 // TCA9535 I2C address 
@@ -66,18 +71,44 @@ const char gprsUser[] = "";
 const char gprsPass[] = "";
 const char pin[] = "3846";
 
+// AWS MQTT settings
+const char* AWS_BROKER = "a3foc0mc6v7ap0-ats.iot.us-east-1.amazonaws.com";
+const uint16_t AWS_BROKER_PORT = 8883;
+const char* AWS_CLIENT_ID = "fullwash-machine-001";
+const char* MQTT_CLIENT_ID = 0;  // Client ID used in AT commands
+
+#define PUBLISH_TOPIC       "device/data"           // Topic to publish to
+#define SUBSCRIBE_TOPIC     "device/commands"       // Topic to subscribe to
+
+// MQTT state variables
+unsigned long lastMqttCheck = 0;
+bool mqttConnected = false;
+
 // Initialize GSM modem and clients
 TinyGsm modem(SerialAT);
-TinyGsmClient client(modem);
+// TinyGsmClient client(modem);
+TinyGsmClientSecure client(modem, 0);
+// Set up PubSubClient with TinyGSM client
+// We'll configure security through AT commands
+PubSubClient mqtt(client);
 
 // Button states
 bool buttonState = false;
 bool lastButtonState = false;
 
+void clearModemBuffer() {
+  delay(100);
+  while (SerialAT.available()) {
+    SerialAT.read();
+  }
+}
+
 // Add this helper function for AT command testing
 bool testModemAT() {
   SerialMon.println("Testing direct AT communication with modem...");
   
+  clearModemBuffer();
+
   // Flush any pending data
   while (SerialAT.available()) {
     SerialAT.read();
@@ -125,16 +156,18 @@ void powerOnModem() {
   
   // SIM7600G power on sequence (based on datasheet)
   digitalWrite(MODEM_PWRKEY, LOW);  // Ensure PWRKEY starts LOW
-  delay(500);
+  delay(1000);
   
   digitalWrite(MODEM_PWRKEY, HIGH); // Pull PWRKEY HIGH
-  delay(1500);                      // Hold for >1 second
+  delay(2000);                      // Hold for >1 second
   
   digitalWrite(MODEM_PWRKEY, LOW);  // Release PWRKEY
   
   SerialMon.println("Waiting for modem to initialize...");
-  delay(7000);  // Wait longer for the modem to boot
+  delay(10000);  // Wait longer for the modem to boot
   
+  clearModemBuffer();
+
   // Test AT command communication
   bool atSuccess = testModemAT();
   
@@ -143,10 +176,12 @@ void powerOnModem() {
     
     // Alternative power on sequence sometimes needed for SIM7600
     digitalWrite(MODEM_PWRKEY, HIGH);
-    delay(200);
+    delay(3000);
     digitalWrite(MODEM_PWRKEY, LOW);
-    delay(2000);
+    delay(5000);
     
+    clearModemBuffer();
+
     // Test AT command again
     atSuccess = testModemAT();
     
@@ -345,6 +380,128 @@ bool readButton(uint8_t button) {
   return !(portValue & (1 << button)); // Buttons are active LOW
 }
 
+// Callback for incoming MQTT messages
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  Serial.print("Message received on topic: ");
+  Serial.println(topic);
+  
+  Serial.print("Payload: ");
+  for (unsigned int i = 0; i < length; i++) {
+    Serial.print((char)payload[i]);
+  }
+  Serial.println();
+  
+  // Process the message based on the topic
+  if (String(topic) == SUBSCRIBE_TOPIC) {
+    // Example: Check if the message is a command to control a relay
+    // This assumes messages are in format: "relay:state" (e.g., "1:on")
+    String message = "";
+    for (unsigned int i = 0; i < length; i++) {
+      message += (char)payload[i];
+    }
+    
+    if (message.indexOf(":") > 0) {
+      int relayNum = message.substring(0, message.indexOf(":")).toInt();
+      String state = message.substring(message.indexOf(":") + 1);
+      
+      // Control the relay based on the command
+      if (relayNum >= 1 && relayNum <= 7) {
+        if (state == "on") {
+          setRelay(relayNum - 1, true);  // Adjust for 0-indexed relay array
+          Serial.print("Turned ON relay ");
+          Serial.println(relayNum);
+        } else if (state == "off") {
+          setRelay(relayNum - 1, false);
+          Serial.print("Turned OFF relay ");
+          Serial.println(relayNum);
+        }
+      }
+    }
+  }
+}
+
+boolean mqttConnect()
+{
+    SerialMon.print("Connecting to ");
+    SerialMon.print(AWS_BROKER);
+
+    // Connect to MQTT Broker
+    boolean status = mqtt.connect("GsmClientTest");
+
+    // Or, if you want to authenticate MQTT:
+    // boolean status = mqtt.connect("GsmClientName", "mqtt_user", "mqtt_pass");
+
+    if (status == false) {
+        SerialMon.println(" fail");
+        return false;
+    }
+    SerialMon.println(" success");
+    mqtt.publish(PUBLISH_TOPIC, "GsmClientTest started");
+    mqtt.subscribe(SUBSCRIBE_TOPIC);
+    return mqtt.connected();
+}
+
+// bool connectToMQTT() {
+//   // First make sure MQTT is properly closed if it was open
+//   SerialAT.println("AT+CMQTTDISC=0,120");
+//   delay(2000);
+//   SerialAT.println("AT+CMQTTREL=0");
+//   delay(2000);
+//   SerialAT.println("AT+CMQTTSTOP");
+//   delay(2000);
+  
+//   // Now start the MQTT service
+//   SerialAT.println("AT+CMQTTSTART");
+//   delay(3000);
+  
+//   // Get response
+//   String response = "";
+//   while (SerialAT.available()) {
+//     char c = SerialAT.read();
+//     response += c;
+//     Serial.write(c);
+//   }
+  
+//   if (response.indexOf("OK") == -1) {
+//     Serial.println("Failed to start MQTT service");
+//     return false;
+//   }
+  
+//   // Create a client
+//   SerialAT.print("AT+CMQTTACCQ=0,\"");
+//   SerialAT.print(AWS_CLIENT_ID);
+//   SerialAT.println("\",1");
+//   delay(3000);
+  
+//   // Configure SSL for this connection
+//   SerialAT.println("AT+CMQTTSSL=0,1,0");
+//   delay(2000);
+  
+//   // Connect to AWS IoT
+//   SerialAT.print("AT+CMQTTCONNECT=0,\"tcp://");
+//   SerialAT.print(AWS_BROKER);
+//   SerialAT.print(":");
+//   SerialAT.print(AWS_BROKER_PORT);
+//   SerialAT.println("\",60,1");
+//   delay(5000);
+  
+//   // Check response
+//   response = "";
+//   while (SerialAT.available()) {
+//     char c = SerialAT.read();
+//     response += c;
+//     Serial.write(c);
+//   }
+  
+//   if (response.indexOf("+CMQTTCONNECT: 0,0") != -1) {
+//     Serial.println("Successfully connected to AWS IoT MQTT broker");
+//     return true;
+//   } else {
+//     Serial.println("Failed to connect to AWS IoT MQTT broker");
+//     return false;
+//   }
+// }
+
 void setup() {
   Serial.begin(115200);
   delay(1000); // Give time for serial to initialize
@@ -409,15 +566,34 @@ void setup() {
   }
 
   // Initialize modem serial with proper parameters
+  // SerialAT.begin(115200, SERIAL_8N1, MODEM_TX, MODEM_RX);
   SerialAT.begin(115200, SERIAL_8N1, MODEM_TX, MODEM_RX);
   delay(1000);
   
   // Power on the modem with improved sequence
   powerOnModem();
-  
+
   // Try to initialize and connect the modem
   bool modemInitialized = initModemAndConnectNetwork();
-  
+  if (modemInitialized) {
+    // Set up SSL/TLS on the SIM7600G modem
+    // client.setCertificate(AWSClientCertificate, AWSClientPrivateKey, AmazonRootCA);
+    client.setCACert(AmazonRootCA);
+    client.setCertificate(AWSClientCertificate);
+    client.setPrivateKey(AWSClientPrivateKey);
+
+    mqtt.setServer(AWS_BROKER, AWS_BROKER_PORT);
+    mqtt.setCallback(mqttCallback);
+
+    // if (!setupSslOnModem()) {
+    //   Serial.println("Failed to set up SSL/TLS on modem, continuing without AWS IoT");
+    // }
+    // If modem connection is successful, connect to MQTT
+    // if (connectToMQTT()) {
+    //   Serial.println("Ready to exchange MQTT messages with AWS IoT");
+    // }
+  }
+
   if (!modemInitialized) {
     SerialMon.println("Trying alternative baud rate (9600)...");
     SerialMon.flush();
@@ -444,6 +620,7 @@ void loop() {
   static bool connected = false;
   static unsigned long lastConnectionAttempt = 0;
   static unsigned long lastStatusCheck = 0;
+  uint32_t lastReconnectAttempt = 0;
   
   // Print debug info every 3 seconds
   if (!connected && (millis() - lastConnectionAttempt > 30000)) {
@@ -455,6 +632,22 @@ void loop() {
 
     if (connected) {
       SerialMon.println("Successfully connected to the internet!");
+
+      if (!mqtt.connected()) {
+          SerialMon.println("=== MQTT NOT CONNECTED ===");
+          // Reconnect every 10 seconds
+          uint32_t t = millis();
+          if (t - lastReconnectAttempt > 10000L) {
+              lastReconnectAttempt = t;
+              if (mqttConnect()) {
+                  lastReconnectAttempt = 0;
+              }
+          }
+          delay(100);
+          return;
+      }
+
+      mqtt.loop();
       // Blink the built-in LED to also indicate success
       for (int i = 0; i < 5; i++) {
         digitalWrite(LED_PIN, LOW);
