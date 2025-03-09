@@ -5,6 +5,10 @@
 // Define modem model for TinyGSM
 #define TINY_GSM_MODEM_SIM7600
 
+#include "certs/AWSClientCertificate.h"
+#include "certs/AWSClientPrivateKey.h"
+#include "certs/AmazonRootCA.h"
+
 #include <TinyGsmClient.h>
 // TCA9535 I2C address 
 // Scanner found the device at address 0x24
@@ -40,6 +44,8 @@
 // Set serial for AT commands (to the module)
 #define SerialAT Serial1
 
+#define SSL_SESSION_ID 0  // Session ID for SSL connection
+#define MAX_MSG_LEN 512   // Maximum message length for MQTT payloads
 
 
 // Define button and relay pins on TCA9535
@@ -66,13 +72,113 @@ const char gprsUser[] = "";
 const char gprsPass[] = "";
 const char pin[] = "3846";
 
-// Initialize GSM modem and clients
+#define BROKER  "a3foc0mc6v7ap0-ats.iot.us-east-1.amazonaws.com"
+#define  BROKER_PORT  8883
+#define  CLIENT_ID  "fullwash-machine-001"
+
+// TinyGSM initialization
 TinyGsm modem(SerialAT);
 TinyGsmClient client(modem);
+PubSubClient mqtt(client);
 
 // Button states
 bool buttonState = false;
 bool lastButtonState = false;
+
+// Helper function to wait for modem responses
+bool waitForMQTTResponse(String prefix, int timeout, String &response) {
+  unsigned long start = millis();
+  response = "";
+  bool found = false;
+  
+  while (millis() - start < timeout) {
+    if (SerialAT.available()) {
+      String line = SerialAT.readStringUntil('\n');
+      line.trim();
+      
+      if (line.startsWith(prefix)) {
+        response = line;
+        found = true;
+        break;
+      }
+    }
+    delay(10);
+  }
+  
+  return found;
+}
+
+// Connect using MQTT protocol over the established SSL connection
+void connectMQTT() {
+  SerialMon.println("Connecting to MQTT...");
+  
+  // Prepare MQTT CONNECT packet
+  String clientId = CLIENT_ID;
+  
+  // Calculate MQTT packet length
+  int remainingLength = 10 + clientId.length();
+  
+  // Variable header + payload length
+  String connectPacket = "";
+  
+  // Fixed header
+  connectPacket += (char)0x10;  // CONNECT packet type
+  connectPacket += (char)remainingLength;  // Remaining Length
+  
+  // Variable header
+  connectPacket += (char)0x00;  // Protocol Name Length MSB
+  connectPacket += (char)0x04;  // Protocol Name Length LSB
+  connectPacket += "MQTT";      // Protocol Name
+  connectPacket += (char)0x04;  // Protocol Level (3.1.1)
+  connectPacket += (char)0x02;  // Connect Flags (Clean Session)
+  connectPacket += (char)0x00;  // Keep Alive MSB (0)
+  connectPacket += (char)0x3C;  // Keep Alive LSB (60 seconds)
+  
+  // Payload - Client ID
+  connectPacket += (char)0x00;  // Client ID length MSB
+  connectPacket += (char)clientId.length();  // Client ID length LSB
+  connectPacket += clientId;    // Client ID
+  
+  // Send the MQTT CONNECT packet over the SSL connection
+  SerialMon.println("Sending MQTT CONNECT packet...");
+  
+  // Use CCHSEND to send data
+  String sendCmd = "+CCHSEND=" + String(SSL_SESSION_ID) + "," + String(connectPacket.length());
+  modem.sendAT(sendCmd);
+  
+  if (modem.waitResponse(5000L, ">") != 1) {
+    SerialMon.println("Failed to get prompt for sending data");
+    return;
+  }
+  
+  // Send the actual MQTT packet
+  for (int i = 0; i < connectPacket.length(); i++) {
+    SerialAT.write(connectPacket[i]);
+  }
+  
+  if (modem.waitResponse(10000L) != 1) {
+    SerialMon.println("Failed to send MQTT CONNECT packet");
+    return;
+  }
+  
+  // Wait for and process CONNACK
+  String response = "";
+  if (waitForMQTTResponse("+CCHRECV:", 10000, response)) {
+    SerialMon.println("Received response: " + response);
+    // Parse the response to check for successful connection
+    // In a real implementation, you would need to parse the MQTT CONNACK packet
+  } else {
+    SerialMon.println("No CONNACK received");
+    return;
+  }
+  
+  SerialMon.println("MQTT connection established!");
+  
+  // Subscribe to a topic
+  // subscribeTopic("device/command");
+}
+
+
 
 // Add this helper function for AT command testing
 bool testModemAT() {
@@ -345,6 +451,177 @@ bool readButton(uint8_t button) {
   return !(portValue & (1 << button)); // Buttons are active LOW
 }
 
+// Add this function to check MQTT connection status
+void checkMQTTStatus() {
+  int status = mqtt.state();
+  SerialMon.print("MQTT status code: ");
+  SerialMon.print(status);
+  SerialMon.print(" - ");
+  
+  // Translate the status code
+  switch(status) {
+    case -4: 
+      SerialMon.println("Connection timeout");
+      break;
+    case -3: 
+      SerialMon.println("Connection lost");
+      break;
+    case -2: 
+      SerialMon.println("Connect failed");
+      break;
+    case -1: 
+      SerialMon.println("Disconnected");
+      break;
+    case 0: 
+      SerialMon.println("Connected");
+      break;
+    case 1: 
+      SerialMon.println("Bad protocol");
+      break;
+    case 2: 
+      SerialMon.println("Bad client ID");
+      break;
+    case 3: 
+      SerialMon.println("Unavailable");
+      break;
+    case 4: 
+      SerialMon.println("Bad credentials");
+      break;
+    case 5: 
+      SerialMon.println("Unauthorized");
+      break;
+    default: 
+      SerialMon.println("Unknown error");
+  }
+}
+
+// void connectToAWS() {
+//   SerialMon.println("Setting up SSL/TLS for AWS IoT...");
+  
+//   // Print responses to debug AT commands
+//   modem.sendAT("+CSSLCFG=\"sslversion\",0,4"); // TLS 1.2
+//   SerialMon.print("SSL version response: ");
+//   SerialMon.println(modem.waitResponse());
+  
+//   modem.sendAT("+CSSLCFG=\"authmode\",0,2"); // Server auth mode
+//   SerialMon.print("Auth mode response: ");
+//   SerialMon.println(modem.waitResponse());
+  
+//   // Check if certificates are properly set
+//   modem.sendAT("+CSSLCFG?");
+//   String response = "";
+//   modem.waitResponse(10000L, response);
+//   SerialMon.println("Current SSL config: " + response);
+  
+//   SerialMon.println("Setting up MQTT connection...");
+//   mqtt.setServer(BROKER, BROKER_PORT);
+  
+//   // Implement a basic callback function
+//   mqtt.setCallback([](char* topic, byte* payload, unsigned int length) {
+//     SerialMon.print("Message arrived [");
+//     SerialMon.print(topic);
+//     SerialMon.print("]: ");
+//     for (int i = 0; i < length; i++) {
+//       SerialMon.print((char)payload[i]);
+//     }
+//     SerialMon.println();
+//   });
+  
+//   // Connect to MQTT
+//   SerialMon.print("Connecting to MQTT broker...");
+  
+//   int attempts = 0;
+//   while (!mqtt.connected() && attempts < 3) {
+//     attempts++;
+//     SerialMon.print("Attempt ");
+//     SerialMon.print(attempts);
+//     SerialMon.print(": ");
+    
+//     // Attempt to connect with will message
+//     if (mqtt.connect(CLIENT_ID)) {
+//       SerialMon.println("connected");
+//       mqtt.subscribe("device/command");
+//       return;
+//     } else {
+//       checkMQTTStatus(); // Print detailed status
+//       SerialMon.println(" trying again in 5 seconds");
+//       delay(5000);
+//     }
+//   }
+  
+//   SerialMon.println("Failed to connect to MQTT after multiple attempts");
+//   // Try to get more diagnostic info from the modem
+//   modem.sendAT("+CMQTTSTART?");
+//   modem.waitResponse(5000L, response);
+//   SerialMon.println("MQTT service status: " + response);
+// }
+
+// Modified connectToAWS function using direct AT commands instead of PubSubClient
+void connectToAWS() {
+  SerialMon.println("Setting up SSL/TLS for AWS IoT...");
+  
+  // Configure SSL
+  modem.sendAT("+CSSLCFG=\"sslversion\",0,4"); // TLS 1.2
+  SerialMon.print("SSL version response: ");
+  SerialMon.println(modem.waitResponse());
+  
+  // Set authentication mode to verify server certificate
+  modem.sendAT("+CSSLCFG=\"authmode\",0,2");
+  SerialMon.print("Auth mode response: ");
+  SerialMon.println(modem.waitResponse());
+  
+  // Set the CA certificate
+  modem.sendAT("+CSSLCFG=\"cacert\",0,\"" + String(AmazonRootCA) + "\"");
+  SerialMon.print("CA cert response: ");
+  SerialMon.println(modem.waitResponse());
+  
+  // Set client certificate
+  modem.sendAT("+CSSLCFG=\"clientcert\",0,\"" + String(AWSClientCertificate) + "\"");
+  SerialMon.print("Client cert response: ");
+  SerialMon.println(modem.waitResponse());
+  
+  // Set client private key
+  modem.sendAT("+CSSLCFG=\"clientkey\",0,\"" + String(AWSClientPrivateKey) + "\"");
+  SerialMon.print("Client key response: ");
+  SerialMon.println(modem.waitResponse());
+  
+  // Initialize HTTP channel
+  modem.sendAT("+CCHSET=1");
+  SerialMon.print("CCHSET response: ");
+  SerialMon.println(modem.waitResponse());
+  
+  // Start HTTP service
+  modem.sendAT("+CCHSTART");
+  SerialMon.print("CCHSTART response: ");
+  SerialMon.println(modem.waitResponse());
+  
+  // Configure SSL for HTTP channel
+  modem.sendAT("+CCHSSLCFG=" + String(SSL_SESSION_ID) + ",0");
+  SerialMon.print("CCHSSLCFG response: ");
+  SerialMon.println(modem.waitResponse());
+  
+  // Open HTTPS connection to AWS IoT
+  String openCmd = "+CCHOPEN=" + String(SSL_SESSION_ID) + ",\"" + 
+                   String(BROKER) + "\"," + String(BROKER_PORT) + ",2";
+  SerialMon.println("Opening connection: " + openCmd);
+  modem.sendAT(openCmd);
+  int openResponse = modem.waitResponse(30000L);
+  SerialMon.print("CCHOPEN response: ");
+  SerialMon.println(openResponse);
+  
+  if (openResponse != 1) {
+    SerialMon.println("Failed to open connection to AWS IoT broker");
+    return;
+  }
+  
+  SerialMon.println("Connection to AWS IoT broker established!");
+  
+  // Now use MQTT over the established SSL connection
+  // This is a simplified example - you'll need to implement full MQTT protocol
+  connectMQTT();
+}
+
+
 void setup() {
   Serial.begin(115200);
   delay(1000); // Give time for serial to initialize
@@ -417,8 +694,11 @@ void setup() {
   
   // Try to initialize and connect the modem
   bool modemInitialized = initModemAndConnectNetwork();
-  
-  if (!modemInitialized) {
+  if (modemInitialized) {
+    SerialMon.println("Successfully connected to the cellular network!");
+    // Connect to AWS IoT Core
+    connectToAWS();
+  } else {
     SerialMon.println("Trying alternative baud rate (9600)...");
     SerialMon.flush();
     SerialAT.updateBaudRate(9600);
@@ -445,94 +725,139 @@ void loop() {
   static unsigned long lastConnectionAttempt = 0;
   static unsigned long lastStatusCheck = 0;
   
-  // Print debug info every 3 seconds
-  if (!connected && (millis() - lastConnectionAttempt > 30000)) {
-    lastConnectionAttempt = millis();
-    lastPrintTime = millis();
-
-    SerialMon.println("Attempting to connect to cellular network...");
-    connected = initModemAndConnectNetwork();
-
-    if (connected) {
-      SerialMon.println("Successfully connected to the internet!");
-      // Blink the built-in LED to also indicate success
-      for (int i = 0; i < 5; i++) {
-        digitalWrite(LED_PIN, LOW);
-        delay(100);
-        digitalWrite(LED_PIN, HIGH);
-        delay(100);
-      }
-    }
-
-    Serial.println("==== Debug Info ====");
+  static unsigned long lastCheckTime = 0;
+  // static bool connected = true;
+  
+  // Check connection status every 30 seconds
+  if (millis() - lastCheckTime > 30000) {
+    lastCheckTime = millis();
     
-    // Read and print all button states
-    uint8_t portValue = readRegister(INPUT_PORT0);
-    Serial.print("Port 0 Value: 0b");
-    for (int i = 7; i >= 0; i--) {
-      Serial.print((portValue & (1 << i)) ? "1" : "0");
-    }
-    Serial.println();
-    
-    // Try reading a specific button
-    Serial.print("Button 1 state: ");
-    Serial.println(readButton(BUTTON1) ? "PRESSED" : "NOT PRESSED");
-    
-    // Read and print relay states
-    uint8_t relayState = readRegister(OUTPUT_PORT1);
-    Serial.print("Port 1 Value: 0b");
-    for (int i = 7; i >= 0; i--) {
-      Serial.print((relayState & (1 << i)) ? "1" : "0");
-    }
-    Serial.println();
-    
-    // Blink the LED to show the program is running
-    digitalWrite(LED_PIN, LOW);
-    delay(50);
-    digitalWrite(LED_PIN, HIGH);
-  }
-
-  if (connected && (millis() - lastStatusCheck > 10000)) {
-    lastStatusCheck = millis();
-    
-    if (modem.isGprsConnected()) {
-      SerialMon.println("Still connected to cellular network");
-    } else {
-      SerialMon.println("Lost connection to cellular network. Will attempt to reconnect.");
+    if (!modem.isGprsConnected() || !mqtt.connected()) {
+      SerialMon.println("Connection lost, attempting to reconnect...");
       connected = false;
       
       // Turn off the lighting relay to indicate lost connection
-      // setRelay(RELAY7, false);
-      // SerialMon.println("Lighting relay turned OFF to indicate lost connection");
-    }
-  }
-  
-  // Read button state (BT1)
-  uint8_t portValue = readRegister(INPUT_PORT0);
-  buttonState = !(portValue & (1 << BUTTON1)); // Buttons are active LOW
-  
-  // Check if button state changed from not pressed to pressed
-  if (buttonState && !lastButtonState) {
-    Serial.println("Button pressed! Toggling Relay 1 (clear water)");
-    
-    // Toggle Relay 1
-    uint8_t relayState = readRegister(OUTPUT_PORT1);
-    if (relayState & (1 << RELAY1)) {
-      // Turn off relay
-      relayState &= ~(1 << RELAY1);
-      Serial.println("Relay OFF");
+      setRelay(RELAY7, false);
+      
+      // Attempt to reconnect
+      if (!modem.isGprsConnected()) {
+        if (initModemAndConnectNetwork()) {
+          connectToAWS();
+          connected = true;
+        }
+      } else if (!mqtt.connected()) {
+        connectToAWS();
+        connected = mqtt.connected();
+      }
+      
+      // Turn on the lighting relay if reconnected
+      if (connected) {
+        setRelay(RELAY7, true);
+      }
     } else {
-      // Turn on relay
-      relayState |= (1 << RELAY1);
-      Serial.println("Relay ON");
+      SerialMon.println("Connection status: OK");
     }
-    
-    // Write new relay state
-    writeRegister(OUTPUT_PORT1, relayState);
   }
   
-  // Save last button state
-  lastButtonState = buttonState;
+  // Publish data every 30 seconds if connected
+  // if (connected && (millis() - lastPublishTime > publishInterval)) {
+  //   lastPublishTime = millis();
+  //   publishData();
+  // }
+  
+  // Handle incoming MQTT messages
+  if (connected) {
+    mqtt.loop();
+  }
+
+  // // Print debug info every 3 seconds
+  // if (!connected && (millis() - lastConnectionAttempt > 30000)) {
+  //   lastConnectionAttempt = millis();
+  //   lastPrintTime = millis();
+
+  //   SerialMon.println("Attempting to connect to cellular network...");
+  //   connected = initModemAndConnectNetwork();
+
+  //   if (connected) {
+  //     SerialMon.println("Successfully connected to the internet!");
+  //     // Blink the built-in LED to also indicate success
+  //     for (int i = 0; i < 5; i++) {
+  //       digitalWrite(LED_PIN, LOW);
+  //       delay(100);
+  //       digitalWrite(LED_PIN, HIGH);
+  //       delay(100);
+  //     }
+  //   }
+
+  //   Serial.println("==== Debug Info ====");
+    
+  //   // Read and print all button states
+  //   uint8_t portValue = readRegister(INPUT_PORT0);
+  //   Serial.print("Port 0 Value: 0b");
+  //   for (int i = 7; i >= 0; i--) {
+  //     Serial.print((portValue & (1 << i)) ? "1" : "0");
+  //   }
+  //   Serial.println();
+    
+  //   // Try reading a specific button
+  //   Serial.print("Button 1 state: ");
+  //   Serial.println(readButton(BUTTON1) ? "PRESSED" : "NOT PRESSED");
+    
+  //   // Read and print relay states
+  //   uint8_t relayState = readRegister(OUTPUT_PORT1);
+  //   Serial.print("Port 1 Value: 0b");
+  //   for (int i = 7; i >= 0; i--) {
+  //     Serial.print((relayState & (1 << i)) ? "1" : "0");
+  //   }
+  //   Serial.println();
+    
+  //   // Blink the LED to show the program is running
+  //   digitalWrite(LED_PIN, LOW);
+  //   delay(50);
+  //   digitalWrite(LED_PIN, HIGH);
+  // }
+
+  // if (connected && (millis() - lastStatusCheck > 10000)) {
+  //   lastStatusCheck = millis();
+    
+  //   if (modem.isGprsConnected()) {
+  //     SerialMon.println("Still connected to cellular network");
+  //   } else {
+  //     SerialMon.println("Lost connection to cellular network. Will attempt to reconnect.");
+  //     connected = false;
+      
+  //     // Turn off the lighting relay to indicate lost connection
+  //     // setRelay(RELAY7, false);
+  //     // SerialMon.println("Lighting relay turned OFF to indicate lost connection");
+  //   }
+  // }
+  
+  // // Read button state (BT1)
+  // uint8_t portValue = readRegister(INPUT_PORT0);
+  // buttonState = !(portValue & (1 << BUTTON1)); // Buttons are active LOW
+  
+  // // Check if button state changed from not pressed to pressed
+  // if (buttonState && !lastButtonState) {
+  //   Serial.println("Button pressed! Toggling Relay 1 (clear water)");
+    
+  //   // Toggle Relay 1
+  //   uint8_t relayState = readRegister(OUTPUT_PORT1);
+  //   if (relayState & (1 << RELAY1)) {
+  //     // Turn off relay
+  //     relayState &= ~(1 << RELAY1);
+  //     Serial.println("Relay OFF");
+  //   } else {
+  //     // Turn on relay
+  //     relayState |= (1 << RELAY1);
+  //     Serial.println("Relay ON");
+  //   }
+    
+  //   // Write new relay state
+  //   writeRegister(OUTPUT_PORT1, relayState);
+  // }
+  
+  // // Save last button state
+  // lastButtonState = buttonState;
   
   // Small delay to debounce button
   delay(50);
