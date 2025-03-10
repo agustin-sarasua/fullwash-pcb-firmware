@@ -1,3 +1,6 @@
+#ifndef UTILITIES_H
+#define UTILITIES_H
+
 // Define modem model for TinyGSM
 #define TINY_GSM_MODEM_SIM7600
 // #define TINY_GSM_RX_BUFFER 1024  // Set RX buffer to 1Kb
@@ -57,3 +60,5 @@
 #define RELAY7           6   // P16 - lighting
 
 #define GSM_PIN          "3846"
+
+#endif // UTILITIES_H
