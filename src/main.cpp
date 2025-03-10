@@ -1,5 +1,6 @@
 #include <Wire.h>
 #include <Arduino.h>
+#include "SSLClient.h"
 #include <PubSubClient.h>
 #include <ArduinoHttpClient.h>
 
@@ -18,27 +19,77 @@ const char resource[] = "/topics/fullwash-machine-001%2Ftest";
 const char* AWS_CLIENT_ID = "fullwash-machine-001";
 const int  port       = 8443;
 
+
+const char* BROKER = "a3foc0mc6v7ap0-ats.iot.us-east-1.amazonaws.com";
+const uint16_t BROKER_PORT = 8883;
+
 // GSM connection settings
 const char apn[] = "internet"; // Replace with your carrier's APN if needed
 const char gprsUser[] = "";
 const char gprsPass[] = "";
 const char pin[] = "3846";
 
-// #define DUMP_AT_COMMANDS
-#ifdef DUMP_AT_COMMANDS
-#include <StreamDebugger.h>
-StreamDebugger debugger(SerialAT, SerialMon);
-TinyGsm        modem(debugger);
-#else
-TinyGsm        modem(SerialAT);
-#endif
+// // #define DUMP_AT_COMMANDS
+// #ifdef DUMP_AT_COMMANDS
+// #include <StreamDebugger.h>
+// StreamDebugger debugger(SerialAT, SerialMon);
+// TinyGsm        modem(debugger);
+// #else
+// TinyGsm        modem(SerialAT);
+// #endif
 
-TinyGsmClientSecure client(modem, 0);
-HttpClient          http(client, server, port);
+// TinyGsmClientSecure client(modem, 0);
+// HttpClient          http(client, server, port);
+
+// Layers stack
+TinyGsm modem(SerialAT);
+TinyGsmClient gsm_transpor_layer(modem);
+SSLClient secure_presentation_layer(&gsm_transpor_layer);
+PubSubClient client(secure_presentation_layer);
 
 // Button states
 bool buttonState = false;
 bool lastButtonState = false;
+
+
+// For read the MQTT events
+void callback(char *topic, byte *payload, unsigned int length)
+{
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
+  for (int i = 0; i < length; i++)
+  {
+    Serial.print((char)payload[i]);
+  }
+  Serial.println();
+}
+
+// To connect to the broker
+void reconnect()
+{
+  // Loop until we're reconnected
+  while (!client.connected())
+  {
+    Serial.print("Attempting MQTT connection...");
+    // Attempt to connect
+    if (client.connect(AWS_CLIENT_ID))
+    {
+      Serial.println("connected");
+      // Once connected, publish an announcement...
+      client.publish("machines/machine001/data", "hello world");
+      // ... and resubscribe
+      client.subscribe("machines/machine001/test");
+    }
+    else
+    {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println("...try again in 5 seconds");
+      delay(5000);
+    }
+  }
+}
 
 void clearModemBuffer() {
   delay(100);
@@ -399,67 +450,71 @@ void setup() {
   bool modemInitialized = initModemAndConnectNetwork();
   if (modemInitialized) {
     // Set up SSL/TLS on the SIM7600G modem
-    client.setCACert(AmazonRootCA);
-    client.setCertificate(AWSClientCertificate);
-    client.setPrivateKey(AWSClientPrivateKey);
+    secure_presentation_layer.setCACert(AmazonRootCA);
+    secure_presentation_layer.setCertificate(AWSClientCertificate);
+    secure_presentation_layer.setPrivateKey(AWSClientPrivateKey);
 
 
     // Define the JSON payload for the POST request
     const char* postData = "{\"test\":\"test\"}";
     int postDataLength = strlen(postData);
     
-    SerialMon.print(F("Performing HTTPS POST request... "));
-    http.connectionKeepAlive();  // Currently, this is needed for HTTPS
+
+    // MQTT init
+    client.setServer(BROKER, BROKER_PORT);
+    client.setCallback(callback);
+    // SerialMon.print(F("Performing HTTPS POST request... "));
+    // http.connectionKeepAlive();  // Currently, this is needed for HTTPS
     
-    // Use the startRequest method that takes all parameters at once
-    // This includes URL, method, content type, content length, and body
-    int err = http.startRequest(
-        resource,
-        HTTP_METHOD_POST,
-        "application/json",
-        postDataLength,
-        (const byte*)postData
-    );
-    if (err != 0) {
-      SerialMon.println(F("failed to connect"));
-      delay(10000);
-      return;
-    }
+    // // Use the startRequest method that takes all parameters at once
+    // // This includes URL, method, content type, content length, and body
+    // int err = http.startRequest(
+    //     resource,
+    //     HTTP_METHOD_POST,
+    //     "application/json",
+    //     postDataLength,
+    //     (const byte*)postData
+    // );
+    // if (err != 0) {
+    //   SerialMon.println(F("failed to connect"));
+    //   delay(10000);
+    //   return;
+    // }
 
-    int status = http.responseStatusCode();
-    SerialMon.print(F("Response status code: "));
-    SerialMon.println(status);
-    if (!status) {
-      delay(10000);
-      return;
-    }
+    // int status = http.responseStatusCode();
+    // SerialMon.print(F("Response status code: "));
+    // SerialMon.println(status);
+    // if (!status) {
+    //   delay(10000);
+    //   return;
+    // }
 
-    SerialMon.println(F("Response Headers:"));
-    while (http.headerAvailable()) {
-      String headerName  = http.readHeaderName();
-      String headerValue = http.readHeaderValue();
-      SerialMon.println("    " + headerName + " : " + headerValue);
-    }
+    // SerialMon.println(F("Response Headers:"));
+    // while (http.headerAvailable()) {
+    //   String headerName  = http.readHeaderName();
+    //   String headerValue = http.readHeaderValue();
+    //   SerialMon.println("    " + headerName + " : " + headerValue);
+    // }
 
-    int length = http.contentLength();
-    if (length >= 0) {
-      SerialMon.print(F("Content length is: "));
-      SerialMon.println(length);
-    }
-    if (http.isResponseChunked()) {
-      SerialMon.println(F("The response is chunked"));
-    }
+    // int length = http.contentLength();
+    // if (length >= 0) {
+    //   SerialMon.print(F("Content length is: "));
+    //   SerialMon.println(length);
+    // }
+    // if (http.isResponseChunked()) {
+    //   SerialMon.println(F("The response is chunked"));
+    // }
 
-    String body = http.responseBody();
-    SerialMon.println(F("Response:"));
-    SerialMon.println(body);
+    // String body = http.responseBody();
+    // SerialMon.println(F("Response:"));
+    // SerialMon.println(body);
 
-    SerialMon.print(F("Body length is: "));
-    SerialMon.println(body.length());
+    // SerialMon.print(F("Body length is: "));
+    // SerialMon.println(body.length());
 
-    // Shutdown
-    http.stop();
-    SerialMon.println(F("Server disconnected"));
+    // // Shutdown
+    // http.stop();
+    // SerialMon.println(F("Server disconnected"));
    
   }
 
@@ -544,6 +599,13 @@ void loop() {
     
     if (modem.isGprsConnected()) {
       SerialMon.println("Still connected to cellular network");
+       // We maintain connectivity with the broker
+      if (!client.connected())
+      {
+        reconnect();
+      }
+      // We are listening to the events
+      client.loop();
     } else {
       SerialMon.println("Lost connection to cellular network. Will attempt to reconnect.");
       connected = false;
