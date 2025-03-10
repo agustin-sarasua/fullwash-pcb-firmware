@@ -11,9 +11,12 @@
 
 // Server details
 // Server details
-const char server[]   = "api-sbx.fullwash.uy";
-const char resource[] = "/public";
-const int  port       = 443;
+// const char server[]   = "api-sbx.fullwash.uy";
+const char server[]   = "a3foc0mc6v7ap0-ats.iot.us-east-1.amazonaws.com";
+
+const char resource[] = "/topics/fullwash-machine-001%2Finit";
+// const int  port       = 443;
+const int  port       = 8443;
 
 // GSM connection settings
 const char apn[] = "internet"; // Replace with your carrier's APN if needed
@@ -599,23 +602,27 @@ void setup() {
   bool modemInitialized = initModemAndConnectNetwork();
   if (modemInitialized) {
     // Set up SSL/TLS on the SIM7600G modem
-    // client.setCertificate(AWSClientCertificate, AWSClientPrivateKey, AmazonRootCA);
     client.setCACert(AmazonRootCA);
-    // client.setCertificate(AmazonRootCA);
-    // client.setCertificate(AWSClientCertificate);
-    // client.setPrivateKey(AWSClientPrivateKey);
-    // client.setCertificate
+    client.setCertificate(AWSClientCertificate);
+    client.setPrivateKey(AWSClientPrivateKey);
 
-    // // Test HTTPS
-    // if (testHttps()) {
-    //   SerialMon.println("HTTPS is working properly!");
-    // } else {
-    //   SerialMon.println("HTTPS test failed. Check certificates or network.");
-    // }
 
-    SerialMon.print(F("Performing HTTPS GET request... "));
+    // Define the JSON payload for the POST request
+    const char* postData = "{\"test\":\"test\"}";
+    int postDataLength = strlen(postData);
+    
+    SerialMon.print(F("Performing HTTPS POST request... "));
     http.connectionKeepAlive();  // Currently, this is needed for HTTPS
-    int err = http.get(resource);
+    
+    // Use the startRequest method that takes all parameters at once
+    // This includes URL, method, content type, content length, and body
+    int err = http.startRequest(
+        resource,
+        HTTP_METHOD_POST,
+        "application/json",
+        postDataLength,
+        (const byte*)postData
+    );
     if (err != 0) {
       SerialMon.println(F("failed to connect"));
       delay(10000);
@@ -654,7 +661,6 @@ void setup() {
     SerialMon.println(body.length());
 
     // Shutdown
-
     http.stop();
     SerialMon.println(F("Server disconnected"));
     
