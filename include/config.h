@@ -1,3 +1,7 @@
+
+#ifndef CONFIG_H
+#define CONFIG_H
+
 // Define modem model for TinyGSM
 #define TINY_GSM_MODEM_SIM7600
 // #define TINY_GSM_RX_BUFFER 1024  // Set RX buffer to 1Kb
@@ -6,6 +10,28 @@
 // TCA9535 I2C address 
 // Scanner found the device at address 0x24
 #define TCA9535_ADDR 0x24
+
+// GSM/Modem configuration
+#define MODEM_BAUD_RATE   115200
+#define GSM_PIN           "3846"
+#define APN               "internet"
+#define GPRS_USER         ""
+#define GPRS_PASS         ""
+
+// MQTT configuration
+#define MACHINE_ID        "fullwash-machine-001"
+#define AWS_IOT_ENDPOINT  "a3foc0mc6v7ap0-ats.iot.us-east-1.amazonaws.com"
+#define AWS_IOT_PORT      8443
+
+// Timing intervals (in milliseconds)
+#define BUTTON_CHECK_INTERVAL    50    // How often to check buttons
+#define STATE_UPDATE_INTERVAL    1000  // How often to update machine state
+#define NETWORK_CHECK_INTERVAL   30000 // How often to check network connection
+#define BACKEND_POLL_INTERVAL    60000 // How often to poll backend for state
+
+// Backend server configuration
+#define BACKEND_SERVER    "api-sbx.fullwash.uy"
+#define BACKEND_PORT      443
 
 // TCA9535 register addresses
 #define INPUT_PORT0      0x00
@@ -57,3 +83,5 @@
 #define RELAY7           6   // P16 - lighting
 
 #define GSM_PIN          "3846"
+
+#endif // CONFIG_H
