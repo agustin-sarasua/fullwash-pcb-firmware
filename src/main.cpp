@@ -248,7 +248,7 @@ void loop() {
         
         // Publish relay state change to MQTT if connected
         if (mqttClient.isConnected()) {
-          mqttClient.publish("machines/machine001/relay", newState ? "ON" : "OFF", QOS1_AT_LEAST_ONCE);
+          mqttClient.publish("machines/99/relay", newState ? "ON" : "OFF", QOS1_AT_LEAST_ONCE);
         }
       }
       

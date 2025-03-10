@@ -337,7 +337,12 @@ bool MqttLteClient::publish(const char* topic, const char* payload, const uint8_
     }
     
     if (_mqttClient->connected()) {
-        return _mqttClient->publish(topic, payload, qos);
+        Serial.print("Publishing to topic: ");
+        Serial.println(topic);
+        bool result = _mqttClient->publish(topic, payload);
+        Serial.print("Publish result: ");
+        Serial.println(result);
+        return result;
     }
     
     return false;
