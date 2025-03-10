@@ -1,70 +1,20 @@
 #include <Wire.h>
 #include <Arduino.h>
 #include <PubSubClient.h>
+#include <ArduinoHttpClient.h>
+
+#include "utilities.h"
 
 #include "certs/AmazonRootCA.h"
 #include "certs/AWSClientCertificate.h"
 #include "certs/AWSClientPrivateKey.h"
 
-// Define modem model for TinyGSM
-#define TINY_GSM_MODEM_SIM7600
-// #define TINY_GSM_RX_BUFFER 1024  // Set RX buffer to 1Kb
+// Server details
+// Server details
+const char server[]   = "api-sbx.fullwash.uy";
+const char resource[] = "/public";
+const int  port       = 443;
 
-#include <TinyGsmClient.h>
-// TCA9535 I2C address 
-// Scanner found the device at address 0x24
-#define TCA9535_ADDR 0x24
-
-// TCA9535 register addresses
-#define INPUT_PORT0      0x00
-#define INPUT_PORT1      0x01
-#define OUTPUT_PORT0     0x02
-#define OUTPUT_PORT1     0x03
-#define POLARITY_PORT0   0x04
-#define POLARITY_PORT1   0x05
-#define CONFIG_PORT0     0x06
-#define CONFIG_PORT1     0x07
-
-// Define pins on ESP32
-#define I2C_SDA_PIN      19
-#define I2C_SCL_PIN      18
-#define INT_PIN          23  // Interrupt pin from IO expander
-
-// Define a built-in LED pin for visual debugging
-#define LED_PIN          12   // Blue LED connected to IO12 per schematic
-
-// SIM7600G pin definitions (from your PCB documentation)
-#define MODEM_TX         26  // ESP32 RXD connected to SIM7600 TXD
-#define MODEM_RX         27  // ESP32 TXD connected to SIM7600 RXD
-#define MODEM_PWRKEY     4   // Power key pin
-#define MODEM_DTR        32  // DTR pin
-#define MODEM_FLIGHT     25  // Flight mode control pin
-
-// Define the serial console for debug prints
-#define SerialMon Serial
-// Set serial for AT commands (to the module)
-#define SerialAT Serial1
-
-
-
-// Define button and relay pins on TCA9535
-#define BUTTON1          0   // BT1 is on P00
-#define BUTTON2          1   // BT2 is on P01
-#define BUTTON3          2   // BT3 is on P02
-#define BUTTON4          3   // BT4 is on P03
-#define BUTTON5          4   // BT5 is on P04
-#define BUTTON6          5   // BT6 is on P05
-
-// Relay pins on TCA9535 (Port 1)
-#define RELAY1           0   // P10 - clear water
-#define RELAY2           1   // P11 - Foam
-#define RELAY3           2   // P12 - vacuum
-#define RELAY4           3   // P13 - handwashing
-#define RELAY5           4   // P14 - inflatable
-#define RELAY6           5   // P15 - disinfect
-#define RELAY7           6   // P16 - lighting
-
-#define GSM_PIN          "3846"
 // GSM connection settings
 const char apn[] = "internet"; // Replace with your carrier's APN if needed
 const char gprsUser[] = "";
@@ -85,16 +35,88 @@ unsigned long lastMqttCheck = 0;
 bool mqttConnected = false;
 
 // Initialize GSM modem and clients
-TinyGsm modem(SerialAT);
+// TinyGsm modem(SerialAT);
+// #define DUMP_AT_COMMANDS
+#ifdef DUMP_AT_COMMANDS
+#include <StreamDebugger.h>
+StreamDebugger debugger(SerialAT, SerialMon);
+TinyGsm        modem(debugger);
+#else
+TinyGsm        modem(SerialAT);
+#endif
+
 // TinyGsmClient client(modem);
 TinyGsmClientSecure client(modem, 0);
 // Set up PubSubClient with TinyGSM client
 // We'll configure security through AT commands
-PubSubClient mqtt(client);
+HttpClient          http(client, server, port);
 
 // Button states
 bool buttonState = false;
 bool lastButtonState = false;
+
+
+bool testHttps() {
+  SerialMon.println("Testing HTTPS connection...");
+  
+  // Try to connect to a known HTTPS endpoint
+  SerialAT.println("AT+HTTPINIT");
+  delay(1000);
+  
+  // Set HTTPS mode
+  SerialAT.println("AT+HTTPPARA=\"CONTENT\",\"application/json\"");
+  delay(1000);
+  
+  // Connect to a test HTTPS site
+  SerialAT.println("AT+HTTPPARA=\"URL\",\"https://api-sbx.fullwash.uy/public\"");
+  delay(2000);
+  
+  // Start HTTPS session
+  SerialAT.println("AT+HTTPACTION=0");
+  delay(5000);
+  
+  // Check response
+  String response = "";
+  while (SerialAT.available()) {
+    char c = SerialAT.read();
+    response += c;
+    SerialMon.write(c);
+  }
+  
+  // Check if we got HTTP 200 OK
+  if (response.indexOf("+HTTPACTION: 0,200") != -1) {
+    SerialMon.println("HTTPS request successful! Reading response body:");
+    
+    // Read the response body
+    SerialAT.println("AT+HTTPREAD");
+    delay(2000);
+    
+    // Get the response body
+    String responseBody = "";
+    while (SerialAT.available()) {
+      char c = SerialAT.read();
+      responseBody += c;
+      SerialMon.write(c);
+    }
+    
+    // Print the formatted response
+    SerialMon.println("\n--- Response Body ---");
+    SerialMon.println(responseBody);
+    SerialMon.println("--- End of Response ---");
+  }
+  
+  // Clean up
+  SerialAT.println("AT+HTTPTERM");
+  delay(1000);
+  
+  if (response.indexOf("+HTTPACTION: 0,200") != -1) {
+    SerialMon.println("HTTPS test successful!");
+    return true;
+  } else {
+    SerialMon.println("HTTPS test failed.");
+    return false;
+  }
+}
 
 void clearModemBuffer() {
   delay(100);
@@ -420,26 +442,26 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   }
 }
 
-boolean mqttConnect()
-{
-    SerialMon.print("Connecting to ");
-    SerialMon.print(AWS_BROKER);
+// boolean mqttConnect()
+// {
+//     SerialMon.print("Connecting to ");
+//     SerialMon.print(AWS_BROKER);
 
-    // Connect to MQTT Broker
-    boolean status = mqtt.connect("GsmClientTest");
+//     // Connect to MQTT Broker
+//     boolean status = mqtt.connect("GsmClientTest");
 
-    // Or, if you want to authenticate MQTT:
-    // boolean status = mqtt.connect("GsmClientName", "mqtt_user", "mqtt_pass");
+//     // Or, if you want to authenticate MQTT:
+//     // boolean status = mqtt.connect("GsmClientName", "mqtt_user", "mqtt_pass");
 
-    if (status == false) {
-        SerialMon.println(" fail");
-        return false;
-    }
-    SerialMon.println(" success");
-    mqtt.publish(PUBLISH_TOPIC, "GsmClientTest started");
-    mqtt.subscribe(SUBSCRIBE_TOPIC);
-    return mqtt.connected();
-}
+//     if (status == false) {
+//         SerialMon.println(" fail");
+//         return false;
+//     }
+//     SerialMon.println(" success");
+//     mqtt.publish(PUBLISH_TOPIC, "GsmClientTest started");
+//     mqtt.subscribe(SUBSCRIBE_TOPIC);
+//     return mqtt.connected();
+// }
 
 // bool connectToMQTT() {
 //   // First make sure MQTT is properly closed if it was open
@@ -579,11 +601,65 @@ void setup() {
     // Set up SSL/TLS on the SIM7600G modem
     // client.setCertificate(AWSClientCertificate, AWSClientPrivateKey, AmazonRootCA);
     client.setCACert(AmazonRootCA);
-    client.setCertificate(AWSClientCertificate);
-    client.setPrivateKey(AWSClientPrivateKey);
+    // client.setCertificate(AmazonRootCA);
+    // client.setCertificate(AWSClientCertificate);
+    // client.setPrivateKey(AWSClientPrivateKey);
+    // client.setCertificate
 
-    mqtt.setServer(AWS_BROKER, AWS_BROKER_PORT);
-    mqtt.setCallback(mqttCallback);
+    // // Test HTTPS
+    // if (testHttps()) {
+    //   SerialMon.println("HTTPS is working properly!");
+    // } else {
+    //   SerialMon.println("HTTPS test failed. Check certificates or network.");
+    // }
+
+    SerialMon.print(F("Performing HTTPS GET request... "));
+    http.connectionKeepAlive();  // Currently, this is needed for HTTPS
+    int err = http.get(resource);
+    if (err != 0) {
+      SerialMon.println(F("failed to connect"));
+      delay(10000);
+      return;
+    }
+
+    int status = http.responseStatusCode();
+    SerialMon.print(F("Response status code: "));
+    SerialMon.println(status);
+    if (!status) {
+      delay(10000);
+      return;
+    }
+
+    SerialMon.println(F("Response Headers:"));
+    while (http.headerAvailable()) {
+      String headerName  = http.readHeaderName();
+      String headerValue = http.readHeaderValue();
+      SerialMon.println("    " + headerName + " : " + headerValue);
+    }
+
+    int length = http.contentLength();
+    if (length >= 0) {
+      SerialMon.print(F("Content length is: "));
+      SerialMon.println(length);
+    }
+    if (http.isResponseChunked()) {
+      SerialMon.println(F("The response is chunked"));
+    }
+
+    String body = http.responseBody();
+    SerialMon.println(F("Response:"));
+    SerialMon.println(body);
+
+    SerialMon.print(F("Body length is: "));
+    SerialMon.println(body.length());
+
+    // Shutdown
+
+    http.stop();
+    SerialMon.println(F("Server disconnected"));
+    
+    // mqtt.setServer(AWS_BROKER, AWS_BROKER_PORT);
+    // mqtt.setCallback(mqttCallback);
 
     // if (!setupSslOnModem()) {
     //   Serial.println("Failed to set up SSL/TLS on modem, continuing without AWS IoT");
@@ -633,21 +709,21 @@ void loop() {
     if (connected) {
       SerialMon.println("Successfully connected to the internet!");
 
-      if (!mqtt.connected()) {
-          SerialMon.println("=== MQTT NOT CONNECTED ===");
-          // Reconnect every 10 seconds
-          uint32_t t = millis();
-          if (t - lastReconnectAttempt > 10000L) {
-              lastReconnectAttempt = t;
-              if (mqttConnect()) {
-                  lastReconnectAttempt = 0;
-              }
-          }
-          delay(100);
-          return;
-      }
+      // if (!mqtt.connected()) {
+      //     SerialMon.println("=== MQTT NOT CONNECTED ===");
+      //     // Reconnect every 10 seconds
+      //     uint32_t t = millis();
+      //     if (t - lastReconnectAttempt > 10000L) {
+      //         lastReconnectAttempt = t;
+      //         if (mqttConnect()) {
+      //             lastReconnectAttempt = 0;
+      //         }
+      //     }
+      //     delay(100);
+      //     return;
+      // }
 
-      mqtt.loop();
+      // mqtt.loop();
       // Blink the built-in LED to also indicate success
       for (int i = 0; i < 5; i++) {
         digitalWrite(LED_PIN, LOW);
