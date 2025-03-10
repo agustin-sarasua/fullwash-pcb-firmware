@@ -32,22 +32,6 @@ CarWashController* controller;
 bool buttonState = false;
 bool lastButtonState = false;
 
-// // MQTT callback function
-// void callback(char *topic, byte *payload, unsigned int length) {
-//   Serial.print("Message arrived [");
-//   Serial.print(topic);
-//   Serial.print("] ");
-//   for (int i = 0; i < length; i++) {
-//     Serial.print((char)payload[i]);
-//   }
-//   Serial.println();
-// }
-
-// void mqtt_callback(const char *topic, const uint8_t *payload, unsigned len) {
-//     if (controller) {
-//         controller->handleMqttMessage(topic, payload, len);
-//     }
-// }
 
 void mqtt_callback(char *topic, byte *payload, unsigned int len) {
   Serial.print("Message arrived [");
@@ -297,84 +281,3 @@ void loop() {
     }
   }
 }
-
-// void loop() {
-//   static unsigned long lastStatusCheck = 0;
-//   static unsigned long lastConnectionAttempt = 0;
-//   static bool connected = mqttClient.isNetworkConnected();
-  
-//   // Check connection status periodically
-//   if (!connected && (millis() - lastConnectionAttempt > 30000)) {
-//     lastConnectionAttempt = millis();
-    
-//     Serial.println("Loop, we are not connected");
-//     connected = mqttClient.begin(apn, gprsUser, gprsPass, pin);
-    
-//     if (connected) {
-//   //     Serial.println("Successfully connected to the internet!");
-      
-//   //     // Configure SSL certificates
-//       mqttClient.setCACert(AmazonRootCA);
-//       mqttClient.setCertificate(AWSClientCertificate);
-//       mqttClient.setPrivateKey(AWSClientPrivateKey);
-      
-//   //     // Connect to MQTT broker
-//       if (mqttClient.connect(AWS_BROKER, AWS_BROKER_PORT, AWS_CLIENT_ID)) {
-//         Serial.println("AAAAAAAA AAAAAAA!");
-//         bool result = mqttClient.subscribe(INIT_TOPIC.c_str());
-//         result = mqttClient.subscribe(CONFIG_TOPIC.c_str());
-//   //       // // Subscribe to test topic
-//   //       // mqttClient.subscribe("machines/machine001/test");
-//   //       controller->publishMachineSetupActionEvent();
-//   //     }
-//   //     // // Blink the built-in LED to indicate success
-//   //     // for (int i = 0; i < 5; i++) {
-//   //     //   digitalWrite(LED_PIN, LOW);
-//   //     //   delay(100);
-//   //     //   digitalWrite(LED_PIN, HIGH);
-//   //     //   delay(100);
-//       }
-//     }
-    
-//   //   // Print I/O expander debug info
-//   //   ioExpander.printDebugInfo();
-    
-//   //   // Try reading a specific button
-//   //   Serial.print("Button 1 state: ");
-//   //   Serial.println(ioExpander.readButton(BUTTON1) ? "PRESSED" : "NOT PRESSED");
-//   }
-
-//   if (connected) {
-//     // Always process MQTT messages when connected
-//     mqttClient.loop();
-    
-//     // Only check status periodically
-//     if (millis() - lastStatusCheck > 30000) {
-//         lastStatusCheck = millis();
-//         // Additional status checks here
-//     }
-//   }
-  
-//   // Read button state (BT1)
-//   buttonState = ioExpander.readButton(BUTTON1);
-  
-//   // Check if button state changed from not pressed to pressed
-//   if (buttonState && !lastButtonState) {
-//     Serial.println("Button pressed! Toggling Relay 1 (clear water)");
-    
-//     // Toggle Relay 1 and get the new state
-//     bool newState = ioExpander.toggleRelay(RELAY1);
-//     Serial.println(newState ? "Relay ON" : "Relay OFF");
-    
-//     // Publish relay state change to MQTT if connected
-//     if (mqttClient.isConnected()) {
-//       mqttClient.publish("machines/machine001/relay", newState ? "ON" : "OFF", QOS1_AT_LEAST_ONCE);
-//     }
-//   }
-  
-//   // Save last button state
-//   lastButtonState = buttonState;
-  
-//   // Small delay to debounce button
-//   delay(50);
-// }
