@@ -66,35 +66,45 @@ void CarWashController::handleButtons() {
     // Get reference to the IO expander (assumed to be a global or accessible)
     extern IoExpander ioExpander;
 
-    // Enhanced debugging for button 4
-    uint8_t rawPortValue = ioExpander.readRegister(INPUT_PORT0);
-    bool bt4RawState = !(rawPortValue & (1 << BUTTON4));
-    // Serial.printf("CarWashController::handleButtons - Direct Button 4 check: Raw port: 0x%02X, State: %s\n", 
-    //              rawPortValue, bt4RawState ? "PRESSED" : "RELEASED");
-
-    // Read all 5 function buttons
+    // Dump raw port values for debugging
+    uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
+    
+    // // Print raw state for debugging
+    // LOG_DEBUG("BUTTON DEBUG - Raw Port0: 0x%02X (Binary: %d%d%d%d%d%d)\n", 
+    //              rawPortValue0,
+    //              !(rawPortValue0 & (1 << BUTTON1)) ? 1 : 0,  // Button 1 bit
+    //              !(rawPortValue0 & (1 << BUTTON2)) ? 1 : 0,  // Button 2 bit
+    //              !(rawPortValue0 & (1 << BUTTON3)) ? 1 : 0,  // Button 3 bit
+    //              !(rawPortValue0 & (1 << BUTTON4)) ? 1 : 0,  // Button 4 bit
+    //              !(rawPortValue0 & (1 << BUTTON5)) ? 1 : 0,  // Button 5 bit
+    //              !(rawPortValue0 & (1 << BUTTON6)) ? 1 : 0); // Button 6 bit
+    
+    // Read all 5 function buttons - using simple approach
     for (int i = 0; i < NUM_BUTTONS-1; i++) {  // -1 because last button is STOP button
-        bool reading = ioExpander.readButton(BUTTON_INDICES[i]);
+        int buttonPin = BUTTON_INDICES[i];
         
-        // Enhanced debugging for button 4
-        // if (i == 3) { // Button 4 is index 3
-        //     Serial.printf("Button 4 processing: reading=%d, lastState=%d, index=%d, BUTTON_INDICES[i]=%d\n", 
-        //                  reading, lastButtonState[i] == LOW, i, BUTTON_INDICES[i]);
-        // }
+        // Check if button is pressed (active LOW in the IO expander)
+        bool buttonPressed = !(rawPortValue0 & (1 << buttonPin));
         
-        // Log any change in button state (press or release)
-        if (reading != (lastButtonState[i] == LOW)) {
-            // Serial.printf("Button %d state changed: reading=%d, lastState=%d\n", 
-            //              i+1, reading, lastButtonState[i] == LOW);
-            lastDebounceTime[i] = millis();
-        }
+        // Print state for each button
+        LOG_DEBUG("Button %d (pin %d) state: %s\n", 
+                     i+1, buttonPin, buttonPressed ? "PRESSED" : "RELEASED");
         
-        if ((millis() - lastDebounceTime[i]) > DEBOUNCE_DELAY) {
-            // Button is pressed when reading is true (active LOW in IO expander)
-            if (reading) {
-                // Serial.printf("Button %d debounced press detected! isLoaded=%d, state=%d\n", 
-                //              i+1, config.isLoaded, currentState);
+        // Handle button press with debouncing
+        if (buttonPressed) {
+            // If button wasn't pressed before or enough time has passed since last action
+            if (lastButtonState[i] == HIGH || 
+                (millis() - lastDebounceTime[i]) > DEBOUNCE_DELAY * 5) {
                 
+                // Record time of this press
+                lastDebounceTime[i] = millis();
+                lastButtonState[i] = LOW;  // Now pressed (active LOW)
+                
+                // Print debug info
+                // Serial.printf("* BUTTON %d PRESSED AND DEBOUNCED *\n", i+1);
+                LOG_INFO("Button %d pressed and debounced!", i+1);
+                
+                // Process button action
                 if (config.isLoaded) {
                     if (currentState == STATE_IDLE) {
                         LOG_INFO("Activating button %d in IDLE state", i+1);
@@ -113,25 +123,37 @@ void CarWashController::handleButtons() {
                     LOG_WARNING("Button press ignored - config not loaded!");
                 }
             }
+        } else {
+            // Button is released
+            if (lastButtonState[i] == LOW) {
+                Serial.printf("Button %d RELEASED\n", i+1);
+            }
+            lastButtonState[i] = HIGH;  // Not pressed (idle HIGH)
         }
-        
-        lastButtonState[i] = reading ? LOW : HIGH;  // Convert to match active low logic
     }
 
-    // Handle stop button (BUTTON6)
-    bool stopReading = ioExpander.readButton(STOP_BUTTON_PIN);
+    // Handle stop button (BUTTON6) - using the same approach as other buttons
+    bool stopButtonPressed = !(rawPortValue0 & (1 << STOP_BUTTON_PIN));
     
-    // Log any change in stop button state
-    if (stopReading != (lastButtonState[NUM_BUTTONS-1] == LOW)) {
-        // Serial.printf("STOP button state changed: reading=%d, lastState=%d\n", 
-        //              stopReading, lastButtonState[NUM_BUTTONS-1] == LOW);
-        lastDebounceTime[NUM_BUTTONS-1] = millis();
-    }
+    // Print debug for stop button
+    LOG_DEBUG("STOP Button (pin %d) state: %s\n", 
+                 STOP_BUTTON_PIN, stopButtonPressed ? "PRESSED" : "RELEASED");
     
-    if ((millis() - lastDebounceTime[NUM_BUTTONS-1]) > DEBOUNCE_DELAY) {
-        if (stopReading) {
-            LOG_DEBUG("STOP button debounced press detected! Current state=%d", currentState);
+    // Handle stop button press with debouncing
+    if (stopButtonPressed) {
+        // If button wasn't pressed before or enough time has passed
+        if (lastButtonState[NUM_BUTTONS-1] == HIGH || 
+            (millis() - lastDebounceTime[NUM_BUTTONS-1]) > DEBOUNCE_DELAY * 5) {
             
+            // Record time of this press
+            lastDebounceTime[NUM_BUTTONS-1] = millis();
+            lastButtonState[NUM_BUTTONS-1] = LOW;  // Now pressed (active LOW)
+            
+            // Print debug info
+            Serial.printf("** STOP BUTTON PRESSED AND DEBOUNCED **\n");
+            LOG_INFO("STOP button pressed and debounced!");
+            
+            // Process button action
             if (currentState == STATE_RUNNING) {
                 LOG_INFO("Stopping machine via STOP button");
                 stopMachine(MANUAL);
@@ -139,39 +161,114 @@ void CarWashController::handleButtons() {
                 LOG_WARNING("STOP button pressed but ignored - not in running state (state=%d)", currentState);
             }
         }
+    } else {
+        // Button is released
+        if (lastButtonState[NUM_BUTTONS-1] == LOW) {
+            Serial.printf("STOP Button RELEASED\n");
+        }
+        lastButtonState[NUM_BUTTONS-1] = HIGH;  // Not pressed (idle HIGH)
     }
-    
-    lastButtonState[NUM_BUTTONS-1] = stopReading ? LOW : HIGH;
 }
 
 void CarWashController::pauseMachine() {
     LOG_INFO("Pausing machine");
     if (activeButton >= 0) {
-        // Turn off the active relay
+        // Read relay state before deactivation
         extern IoExpander ioExpander;
+        uint8_t relayStateBefore = ioExpander.readRegister(OUTPUT_PORT1);
+        LOG_DEBUG("Pausing - Relay port state before: 0x%02X", relayStateBefore);
+        Serial.printf("RELAY DEBUG (Pause) - Before deactivation port value: 0x%02X\n", relayStateBefore);
+        
+        // Turn off the active relay
         ioExpander.setRelay(RELAY_INDICES[activeButton], false);
+        
+        // Verify relay state after deactivation
+        uint8_t relayStateAfter = ioExpander.readRegister(OUTPUT_PORT1);
+        LOG_DEBUG("Pausing - Relay port state after: 0x%02X", relayStateAfter);
+        Serial.printf("RELAY DEBUG (Pause) - After deactivation port value: 0x%02X\n", relayStateAfter);
+        
+        // Check relay bit is actually cleared
+        bool relayBitCleared = (relayStateAfter & (1 << RELAY_INDICES[activeButton])) == 0;
+        if (relayBitCleared) {
+            LOG_DEBUG("Relay %d successfully deactivated for pause", activeButton+1);
+            Serial.printf("RELAY %d OFF for PAUSE\n", activeButton+1);
+        } else {
+            LOG_ERROR("Failed to deactivate relay %d for pause!", activeButton+1);
+            Serial.printf("RELAY %d DEACTIVATION FAILED for PAUSE\n", activeButton+1);
+        }
     }
     currentState = STATE_PAUSED;
     lastActionTime = millis();
     pauseStartTime = millis();
     tokenTimeElapsed += (pauseStartTime - tokenStartTime);
     digitalWrite(RUNNING_LED_PIN, LOW);
+    
+    // Publish pause event
+    publishActionEvent(activeButton, ACTION_PAUSE, MANUAL);
 }
 
 void CarWashController::resumeMachine(int buttonIndex) {
-    LOG_INFO("Resuming machine");
+    LOG_INFO("Resuming machine with button %d", buttonIndex+1);
     activeButton = buttonIndex;
+    
+    // Turn on the corresponding relay when resuming
+    extern IoExpander ioExpander;
+    uint8_t relayStateBefore = ioExpander.readRegister(OUTPUT_PORT1);
+    LOG_DEBUG("Resuming - Relay port state before: 0x%02X", relayStateBefore);
+    Serial.printf("RELAY DEBUG (Resume) - Before activation port value: 0x%02X\n", relayStateBefore);
+    
+    // Turn on the relay for the active button
+    ioExpander.setRelay(RELAY_INDICES[buttonIndex], true);
+    
+    // Verify relay state after activation
+    uint8_t relayStateAfter = ioExpander.readRegister(OUTPUT_PORT1);
+    LOG_DEBUG("Resuming - Relay port state after: 0x%02X", relayStateAfter);
+    Serial.printf("RELAY DEBUG (Resume) - After activation port value: 0x%02X\n", relayStateAfter);
+    
+    // Check if relay bit was actually set
+    bool relayBitSet = (relayStateAfter & (1 << RELAY_INDICES[buttonIndex])) != 0;
+    if (relayBitSet) {
+        LOG_DEBUG("Relay %d successfully activated for resume", buttonIndex+1);
+        Serial.printf("RELAY %d ON for RESUME\n", buttonIndex+1);
+    } else {
+        LOG_ERROR("Failed to activate relay %d for resume!", buttonIndex+1);
+        Serial.printf("RELAY %d ACTIVATION FAILED for RESUME\n", buttonIndex+1);
+    }
+    
     currentState = STATE_RUNNING;
     lastActionTime = millis();
     tokenStartTime = millis();
     digitalWrite(RUNNING_LED_PIN, HIGH);
+    
+    // Publish resume event
+    publishActionEvent(buttonIndex, ACTION_RESUME, MANUAL);
 }
 
 void CarWashController::stopMachine(TriggerType triggerType) {
     if (activeButton >= 0) {
-        // Turn off the active relay
+        // Add relay state debugging
         extern IoExpander ioExpander;
+        uint8_t relayStateBefore = ioExpander.readRegister(OUTPUT_PORT1);
+        LOG_DEBUG("Stopping - Relay port state before: 0x%02X", relayStateBefore);
+        Serial.printf("RELAY DEBUG (Stop) - Before deactivation port value: 0x%02X\n", relayStateBefore);
+        
+        // Turn off the active relay
         ioExpander.setRelay(RELAY_INDICES[activeButton], false);
+        
+        // Verify relay state after deactivation
+        uint8_t relayStateAfter = ioExpander.readRegister(OUTPUT_PORT1);
+        LOG_DEBUG("Stopping - Relay port state after: 0x%02X", relayStateAfter);
+        Serial.printf("RELAY DEBUG (Stop) - After deactivation port value: 0x%02X\n", relayStateAfter);
+        
+        // Check relay bit is actually cleared
+        bool relayBitCleared = (relayStateAfter & (1 << RELAY_INDICES[activeButton])) == 0;
+        if (relayBitCleared) {
+            LOG_DEBUG("Relay %d successfully deactivated for stop", activeButton+1);
+            Serial.printf("RELAY %d OFF for STOP\n", activeButton+1);
+        } else {
+            LOG_ERROR("Failed to deactivate relay %d for stop!", activeButton+1);
+            Serial.printf("RELAY %d DEACTIVATION FAILED for STOP\n", activeButton+1);
+        }
     }
     
     config.isLoaded = false;
@@ -181,20 +278,51 @@ void CarWashController::stopMachine(TriggerType triggerType) {
     tokenStartTime = 0;
     tokenTimeElapsed = 0;
     pauseStartTime = 0;
+    
+    // Publish stop event
+    if (activeButton >= 0) {
+        publishActionEvent(activeButton, ACTION_STOP, triggerType);
+    }
 }
 
 void CarWashController::activateButton(int buttonIndex, TriggerType triggerType) {
     LOG_INFO("Activating button: %d", buttonIndex+1);  // +1 for human-readable button number
 
-    if (config.tokens <= 0) return;
+    if (config.tokens <= 0) {
+        LOG_WARNING("Cannot activate - no tokens left");
+        return;
+    }
 
     digitalWrite(RUNNING_LED_PIN, HIGH);
     currentState = STATE_RUNNING;
     activeButton = buttonIndex;
     
-    // Turn on the corresponding relay
+    // Debug before turning on relay
+    LOG_DEBUG("Attempting to activate relay %d (relay index: %d)", buttonIndex+1, RELAY_INDICES[buttonIndex]);
+    
+    // Read current relay state before activation
     extern IoExpander ioExpander;
+    uint8_t relayStateBefore = ioExpander.readRegister(OUTPUT_PORT1);
+    LOG_DEBUG("Relay port state before activation: 0x%02X", relayStateBefore);
+    Serial.printf("RELAY DEBUG - Before activation port value: 0x%02X\n", relayStateBefore);
+    
+    // Turn on the corresponding relay
     ioExpander.setRelay(RELAY_INDICES[buttonIndex], true);
+    
+    // Verify relay state after activation
+    uint8_t relayStateAfter = ioExpander.readRegister(OUTPUT_PORT1);
+    LOG_DEBUG("Relay port state after activation: 0x%02X", relayStateAfter);
+    Serial.printf("RELAY DEBUG - After activation port value: 0x%02X\n", relayStateAfter);
+    
+    // Check if relay bit was actually set
+    bool relayBitSet = (relayStateAfter & (1 << RELAY_INDICES[buttonIndex])) != 0;
+    if (relayBitSet) {
+        LOG_DEBUG("Relay %d successfully activated (bit %d set)", buttonIndex+1, RELAY_INDICES[buttonIndex]);
+        Serial.printf("RELAY %d ON - Port value: 0x%02X, Bit %d set\n", buttonIndex+1, relayStateAfter, RELAY_INDICES[buttonIndex]);
+    } else {
+        LOG_ERROR("Failed to activate relay %d! Bit %d not set", buttonIndex+1, RELAY_INDICES[buttonIndex]);
+        Serial.printf("RELAY %d ACTIVATION FAILED - Bit %d not set\n", buttonIndex+1, RELAY_INDICES[buttonIndex]);
+    }
     
     lastActionTime = millis();
     tokenStartTime = millis();
@@ -213,7 +341,6 @@ void CarWashController::tokenExpired() {
     activeButton = -1;
     currentState = STATE_IDLE;
     lastActionTime = millis();
-    digitalWrite(RUNNING_LED_PIN, LOW);
     // publishTokenExpiredEvent();
 }
 
