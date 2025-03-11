@@ -30,7 +30,8 @@ private:
     void displayFreeState();
     void displayIdleState(CarWashController* controller);
     void displayRunningState(CarWashController* controller);
-    void displayPausedState(CarWashController* controller);
+    // void displayPausedState(CarWashController* controller);
+    void displayPausedState(CarWashController* controller, MachineState previousState);
     
     LcdI2cCustom lcd;
     uint8_t _columns;

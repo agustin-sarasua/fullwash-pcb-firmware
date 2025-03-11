@@ -26,6 +26,7 @@ void DisplayManager::update(CarWashController* controller) {
     if (!controller) return;
     
     MachineState currentState = controller->getCurrentState();
+    MachineState previousState = lastState;
     
     // Only update when state changes or every second
     unsigned long currentTime = millis();
@@ -49,7 +50,7 @@ void DisplayManager::update(CarWashController* controller) {
             displayRunningState(controller);
             break;
         case STATE_PAUSED:
-            displayPausedState(controller);
+            displayPausedState(controller, previousState);
             break;
         default:
             // Fallback to free state for unknown states
@@ -178,46 +179,113 @@ void DisplayManager::displayRunningState(CarWashController* controller) {
     displayCentered("LAVANDO", 3);
 }
 
-void DisplayManager::displayPausedState(CarWashController* controller) {
-    // Always update display when transitioning to PAUSED state
+// void DisplayManager::displayPausedState(CarWashController* controller) {
+//     // Always update display when transitioning to PAUSED state
+//     int tokens = controller->getTokensLeft();
+//     String userName = controller->getUserName();
+//     unsigned long secondsLeft = controller->getSecondsLeft();
+    
+//     // Force update when entering PAUSED state from another state
+//     bool forceUpdate = (lastState != STATE_PAUSED);
+//     bool contentChanged = (tokens != lastTokens) || 
+//                          (userName != lastUserName) ||
+//                          (secondsLeft != lastSecondsLeft);
+    
+//     if (!contentChanged && !forceUpdate && lastState == STATE_PAUSED) return;
+    
+//     lastTokens = tokens;
+//     lastUserName = userName;
+//     lastSecondsLeft = secondsLeft;
+    
+//     // Clear display and redraw everything
+//     lcd.clear();
+    
+//     // Truncate username if it's too long
+//     if (userName.length() > 16) {
+//         userName = userName.substring(0, 13) + "...";
+//     }
+    
+//     String helloMsg = "Hola " + userName;
+//     lcd.setCursor(0, 0);
+//     lcd.print(helloMsg);
+    
+//     lcd.setCursor(0, 1);
+//     lcd.print("Fichas: ");
+//     lcd.print(tokens);
+    
+//     lcd.setCursor(0, 2);
+//     lcd.print("Tiempo: ");
+//     lcd.print(formatTime(secondsLeft));
+    
+//     // Make sure PAUSADA is visible by forcing redraw
+//     lcd.setCursor(0, 3);
+//     lcd.print("                "); // Clear line
+//     displayCentered("PAUSADA", 3);
+// }
+// Modified method signature to accept previous state
+void DisplayManager::displayPausedState(CarWashController* controller, MachineState previousState) {
+    // Get current values
     int tokens = controller->getTokensLeft();
     String userName = controller->getUserName();
     unsigned long secondsLeft = controller->getSecondsLeft();
     
-    // Force update when entering PAUSED state from another state
-    bool forceUpdate = (lastState != STATE_PAUSED);
+    // TRUE state transition detection - was it a different state before?
+    bool stateJustChanged = (previousState != STATE_PAUSED);
+    
+    // Check if content changed
     bool contentChanged = (tokens != lastTokens) || 
                          (userName != lastUserName) ||
                          (secondsLeft != lastSecondsLeft);
     
-    if (!contentChanged && !forceUpdate && lastState == STATE_PAUSED) return;
+    // Always update if state just changed or content changed
+    if (!stateJustChanged && !contentChanged) return;
     
+    // Update stored values
     lastTokens = tokens;
     lastUserName = userName;
     lastSecondsLeft = secondsLeft;
     
-    // Clear display and redraw everything
-    lcd.clear();
-    
-    // Truncate username if it's too long
-    if (userName.length() > 16) {
-        userName = userName.substring(0, 13) + "...";
+    // Clear display and redraw everything when state changes
+    if (stateJustChanged) {
+        lcd.clear();
+        
+        // Truncate username if it's too long
+        if (userName.length() > 16) {
+            userName = userName.substring(0, 13) + "...";
+        }
+        
+        String helloMsg = "Hola " + userName;
+        lcd.setCursor(0, 0);
+        lcd.print(helloMsg);
+        
+        lcd.setCursor(0, 1);
+        lcd.print("Fichas: ");
+        lcd.print(tokens);
+        
+        lcd.setCursor(0, 2);
+        lcd.print("Tiempo: ");
+        lcd.print(formatTime(secondsLeft));
+        
+        // Make sure PAUSADA is visible by forcing redraw
+        displayCentered("PAUSADA", 3);
+    } else if (contentChanged) {
+        // Perform selective updates without clearing the screen
+        // Only update the parts that changed
+        
+        // Update tokens if changed
+        if (tokens != lastTokens) {
+            lcd.setCursor(8, 1);  // Position after "Fichas: "
+            lcd.print("    ");    // Clear the space
+            lcd.setCursor(8, 1);
+            lcd.print(tokens);
+        }
+        
+        // Update time if changed
+        if (secondsLeft != lastSecondsLeft) {
+            lcd.setCursor(8, 2);  // Position after "Tiempo: "
+            lcd.print("        "); // Clear the space
+            lcd.setCursor(8, 2);
+            lcd.print(formatTime(secondsLeft));
+        }
     }
-    
-    String helloMsg = "Hola " + userName;
-    lcd.setCursor(0, 0);
-    lcd.print(helloMsg);
-    
-    lcd.setCursor(0, 1);
-    lcd.print("Fichas: ");
-    lcd.print(tokens);
-    
-    lcd.setCursor(0, 2);
-    lcd.print("Tiempo: ");
-    lcd.print(formatTime(secondsLeft));
-    
-    // Make sure PAUSADA is visible by forcing redraw
-    lcd.setCursor(0, 3);
-    lcd.print("                "); // Clear line
-    displayCentered("PAUSADA", 3);
 }
