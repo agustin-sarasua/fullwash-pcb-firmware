@@ -3,6 +3,10 @@
 
 #include <WString.h>
 #include "utilities.h"
+#include "logger.h"
+
+// Default Log Level - Change to LOG_DEBUG for more verbose output or LOG_ERROR for production
+#define DEFAULT_LOG_LEVEL LOG_INFO
 
 // Pin Definitions
 const int NUM_BUTTONS = 6;  // 6 buttons from BUTTON1 to BUTTON6 defined in utilities.h
@@ -30,6 +34,7 @@ extern const String INIT_TOPIC;
 extern const String CONFIG_TOPIC;
 extern const String ACTION_TOPIC;
 extern const String STATE_TOPIC;
+extern const String COMMAND_TOPIC;
 
 // QoS Levels
 const uint32_t QOS0_AT_MOST_ONCE = 0;

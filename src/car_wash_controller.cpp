@@ -32,7 +32,7 @@ void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payl
     StaticJsonDocument<512> doc;
     DeserializationError error = deserializeJson(doc, payload, len);
     if (error) {
-        Serial.println("Failed to parse JSON");
+        LOG_ERROR("Failed to parse JSON");
         return;
     }
     if (String(topic) == INIT_TOPIC) {
@@ -45,12 +45,11 @@ void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payl
         config.isLoaded = true;
         currentState = STATE_IDLE;
         lastActionTime = millis();
-        Serial.println("Switching on LED");
+        LOG_INFO("Switching on LED");
         digitalWrite(LED_PIN_INIT, HIGH);
-        Serial.println("Machine loaded with new configuration");
+        LOG_INFO("Machine loaded with new configuration");
     } else if (String(topic) == CONFIG_TOPIC) {
-        Serial.print("Updating machine configuration timestamp: ");
-        Serial.println(doc["timestamp"].as<String>());
+        LOG_DEBUG("Updating machine configuration timestamp: %s", doc["timestamp"].as<String>().c_str());
         config.timestamp = doc["timestamp"].as<String>();
         config.timestampMillis = millis();
         config.sessionId = "";
@@ -59,8 +58,7 @@ void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payl
         config.tokens = 0;
         config.isLoaded = false;
     } else {
-        Serial.print("Unknown topic: ");
-        Serial.println(String(topic));
+        LOG_WARNING("Unknown topic: %s", topic);
     }
 }
 
@@ -99,20 +97,20 @@ void CarWashController::handleButtons() {
                 
                 if (config.isLoaded) {
                     if (currentState == STATE_IDLE) {
-                        Serial.printf("Activating button %d in IDLE state\n", i+1);
+                        LOG_INFO("Activating button %d in IDLE state", i+1);
                         activateButton(i, MANUAL);
                     } else if (currentState == STATE_RUNNING && i == activeButton) {
-                        Serial.println("Pausing machine - same button pressed while running");
+                        LOG_INFO("Pausing machine - same button pressed while running");
                         pauseMachine();
                     } else if (currentState == STATE_PAUSED) {
-                        Serial.printf("Resuming machine with button %d\n", i+1);
+                        LOG_INFO("Resuming machine with button %d", i+1);
                         resumeMachine(i);
                     } else {
-                        Serial.printf("Button %d pressed but no action taken. State=%d, activeButton=%d\n", 
-                                    i+1, currentState, activeButton);
+                        LOG_WARNING("Button %d pressed but no action taken. State=%d, activeButton=%d", 
+                                   i+1, currentState, activeButton);
                     }
                 } else {
-                    Serial.println("Button press ignored - config not loaded!");
+                    LOG_WARNING("Button press ignored - config not loaded!");
                 }
             }
         }
@@ -132,13 +130,13 @@ void CarWashController::handleButtons() {
     
     if ((millis() - lastDebounceTime[NUM_BUTTONS-1]) > DEBOUNCE_DELAY) {
         if (stopReading) {
-            Serial.printf("STOP button debounced press detected! Current state=%d\n", currentState);
+            LOG_DEBUG("STOP button debounced press detected! Current state=%d", currentState);
             
             if (currentState == STATE_RUNNING) {
-                Serial.println("Stopping machine via STOP button");
+                LOG_INFO("Stopping machine via STOP button");
                 stopMachine(MANUAL);
             } else {
-                Serial.printf("STOP button pressed but ignored - not in running state (state=%d)\n", currentState);
+                LOG_WARNING("STOP button pressed but ignored - not in running state (state=%d)", currentState);
             }
         }
     }
@@ -147,7 +145,7 @@ void CarWashController::handleButtons() {
 }
 
 void CarWashController::pauseMachine() {
-    Serial.println("Pausing machine");
+    LOG_INFO("Pausing machine");
     if (activeButton >= 0) {
         // Turn off the active relay
         extern IoExpander ioExpander;
@@ -161,7 +159,7 @@ void CarWashController::pauseMachine() {
 }
 
 void CarWashController::resumeMachine(int buttonIndex) {
-    Serial.println("Resuming machine");
+    LOG_INFO("Resuming machine");
     activeButton = buttonIndex;
     currentState = STATE_RUNNING;
     lastActionTime = millis();
@@ -186,8 +184,7 @@ void CarWashController::stopMachine(TriggerType triggerType) {
 }
 
 void CarWashController::activateButton(int buttonIndex, TriggerType triggerType) {
-    Serial.print("Activating button: ");
-    Serial.println(String(buttonIndex+1));  // +1 for human-readable button number
+    LOG_INFO("Activating button: %d", buttonIndex+1);  // +1 for human-readable button number
 
     if (config.tokens <= 0) return;
 
@@ -232,19 +229,19 @@ void CarWashController::update() {
     if (currentState == STATE_RUNNING) {
         unsigned long totalElapsedTime = tokenTimeElapsed + (currentTime - tokenStartTime);
         if (totalElapsedTime >= TOKEN_TIME) {
-            Serial.println("Token expired");
+            LOG_INFO("Token expired");
             tokenExpired();
             return;
         }
     }
     if (currentTime - lastActionTime > USER_INACTIVE_TIMEOUT && currentState != STATE_FREE) {
-        Serial.println("Stopping machine due to user inactivity");
+        LOG_INFO("Stopping machine due to user inactivity");
         stopMachine(AUTOMATIC);
     }
 }
 
 void CarWashController::publishMachineSetupActionEvent() {
-    Serial.println("Publishing Machine Setup Action Event");
+    LOG_INFO("Publishing Machine Setup Action Event");
 
     StaticJsonDocument<512> doc;
     doc["machine_id"] = MACHINE_ID;
@@ -279,12 +276,9 @@ unsigned long CarWashController::getSecondsLeft() {
 
 String CarWashController::getTimestamp() {
     // First, let's add some debug logging
-    Serial.print("Raw timestamp: ");
-    Serial.println(config.timestamp);
-    Serial.print("Timestamp millis: ");
-    Serial.println(config.timestampMillis);
-    Serial.print("Current millis: ");
-    Serial.println(millis());
+    LOG_DEBUG("Raw timestamp: %s", config.timestamp.c_str());
+    LOG_DEBUG("Timestamp millis: %lu", config.timestampMillis);
+    LOG_DEBUG("Current millis: %lu", millis());
     
     // If timestamp is empty, return early
     if (config.timestamp.length() == 0) {
@@ -299,7 +293,7 @@ String CarWashController::getTimestamp() {
     
     // Verify we have the expected format
     if (tPos <= 0 || dotPos <= 0 || plusPos <= 0) {
-        Serial.println("Timestamp format invalid");
+        LOG_ERROR("Timestamp format invalid");
         return "Invalid format";
     }
     
@@ -320,8 +314,8 @@ String CarWashController::getTimestamp() {
     }
     
     // Debug the parsed components
-    Serial.printf("Parsed: %d-%02d-%02d %02d:%02d:%02d.%06ld\n", 
-                  year, month, day, hour, minute, second, microseconds);
+    LOG_DEBUG("Parsed: %d-%02d-%02d %02d:%02d:%02d.%06ld", 
+              year, month, day, hour, minute, second, microseconds);
     
     // Set up the time structure
     tmElements_t tm;
@@ -334,16 +328,14 @@ String CarWashController::getTimestamp() {
     
     // Convert to epoch time
     time_t serverEpoch = makeTime(tm);
-    Serial.print("Server epoch: ");
-    Serial.println(serverEpoch);
+    LOG_DEBUG("Server epoch: %lu", (unsigned long)serverEpoch);
     
     // Calculate time elapsed since timestamp was set
     unsigned long millisOffset = 0;
     if (config.timestampMillis > 0) {
         millisOffset = millis() - config.timestampMillis;
     }
-    Serial.print("Millis offset: ");
-    Serial.println(millisOffset);
+    LOG_DEBUG("Millis offset: %lu", millisOffset);
     
     // Adjust the time with the elapsed milliseconds
     time_t adjustedTime = serverEpoch + (millisOffset / 1000);
@@ -363,8 +355,7 @@ String CarWashController::getTimestamp() {
             adjustedTm.Year + 1970, adjustedTm.Month, adjustedTm.Day,
             adjustedTm.Hour, adjustedTm.Minute, adjustedTm.Second, milliseconds);
     
-    Serial.print("Formatted timestamp: ");
-    Serial.println(isoTimestamp);
+    LOG_DEBUG("Formatted timestamp: %s", isoTimestamp);
     
     return String(isoTimestamp);
 }
@@ -396,13 +387,12 @@ void CarWashController::publishActionEvent(int buttonIndex, MachineAction machin
 
 void CarWashController::publishPeriodicState(bool force) {
     if (force || millis() - lastStatePublishTime >= STATE_PUBLISH_INTERVAL) {
-        Serial.println("Publishing Periodic State");
+        LOG_INFO("Publishing Periodic State");
         StaticJsonDocument<512> doc;
         doc["machine_id"] = MACHINE_ID;
         doc["timestamp"] = getTimestamp();
         doc["status"] = getMachineStateString(currentState);
-        Serial.print("Status: ");
-        Serial.println(doc["status"].as<String>());
+        LOG_DEBUG("Status: %s", doc["status"].as<String>().c_str());
 
         if (config.isLoaded) {
             JsonObject sessionMetadata = doc.createNestedObject("session_metadata");
@@ -431,4 +421,18 @@ MachineState CarWashController::getCurrentState() const {
 
 bool CarWashController::isMachineLoaded() const {
     return config.isLoaded;
+}
+
+void CarWashController::setLogLevel(LogLevel level) {
+    LOG_INFO("Changing log level from %s to %s", 
+           Logger::getLogLevel() == LOG_DEBUG ? "DEBUG" :
+           Logger::getLogLevel() == LOG_INFO ? "INFO" :
+           Logger::getLogLevel() == LOG_WARNING ? "WARNING" :
+           Logger::getLogLevel() == LOG_ERROR ? "ERROR" : "NONE",
+           level == LOG_DEBUG ? "DEBUG" :
+           level == LOG_INFO ? "INFO" :
+           level == LOG_WARNING ? "WARNING" :
+           level == LOG_ERROR ? "ERROR" : "NONE");
+    
+    Logger::setLogLevel(level);
 }

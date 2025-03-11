@@ -4,6 +4,7 @@
 #include "utilities.h"
 #include "constants.h"
 #include "car_wash_controller.h"
+#include "logger.h"
 
 #include "certs/AmazonRootCA.h"
 #include "certs/AWSClientCertificate.h"
@@ -34,29 +35,57 @@ bool lastButtonState = false;
 
 
 void mqtt_callback(char *topic, byte *payload, unsigned int len) {
-    Serial.print("Message arrived from topic: ");
-    Serial.println(topic);
-    if (controller) {
-        Serial.println("Handling MQTT message...");
+    LOG_INFO("Message arrived from topic: %s", topic);
+    
+    // Handle command topic specially for changing log level
+    if (String(topic) == COMMAND_TOPIC) {
+        // Parse command JSON
+        StaticJsonDocument<256> doc;
+        DeserializationError error = deserializeJson(doc, payload, len);
+        
+        if (!error && doc.containsKey("command")) {
+            String command = doc["command"].as<String>();
+            
+            if (command == "set_log_level" && doc.containsKey("level")) {
+                String level = doc["level"].as<String>();
+                
+                if (level == "DEBUG") {
+                    controller->setLogLevel(LOG_DEBUG);
+                } else if (level == "INFO") {
+                    controller->setLogLevel(LOG_INFO);
+                } else if (level == "WARNING") {
+                    controller->setLogLevel(LOG_WARNING);
+                } else if (level == "ERROR") {
+                    controller->setLogLevel(LOG_ERROR);
+                } else if (level == "NONE") {
+                    controller->setLogLevel(LOG_NONE);
+                }
+            }
+        }
+    } else if (controller) {
+        LOG_DEBUG("Handling MQTT message...");
         controller->handleMqttMessage(topic, payload, len);
     }
 }
 
 void setup() {
-  Serial.begin(115200);
+  // Initialize Logger with default log level
+  Logger::init(DEFAULT_LOG_LEVEL, 115200);
   delay(1000); // Give time for serial to initialize
+  
+  LOG_INFO("Starting fullwash-pcb-firmware...");
   
   // Set up the built-in LED
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, HIGH); // Turn ON LED to show power
   
   // Initialize the I/O expander
-  Serial.println("Trying to initialize TCA9535...");
+  LOG_INFO("Trying to initialize TCA9535...");
   bool initSuccess = ioExpander.begin();
   
   if (!initSuccess) {
-    Serial.println("Failed to initialize TCA9535!");
-    Serial.println("Will continue without initialization. Check connections.");
+    LOG_ERROR("Failed to initialize TCA9535!");
+    LOG_WARNING("Will continue without initialization. Check connections.");
     
     // Blink LED rapidly to indicate error
     for (int i = 0; i < 10; i++) {
@@ -66,21 +95,21 @@ void setup() {
     
     // Continue anyway - don't get stuck in a loop
   } else {
-    Serial.println("TCA9535 initialization successful!");
+    LOG_INFO("TCA9535 initialization successful!");
     
     // Configure Port 0 (buttons) as inputs (1 = input, 0 = output)
-    Serial.println("Configuring Port 0 as inputs...");
+    LOG_DEBUG("Configuring Port 0 as inputs...");
     ioExpander.configurePortAsInput(0, 0xFF);
     
     // Configure Port 1 (relays) as outputs (1 = input, 0 = output)
-    Serial.println("Configuring Port 1 as outputs...");
+    LOG_DEBUG("Configuring Port 1 as outputs...");
     ioExpander.configurePortAsOutput(1, 0xFF);
     
     // Initialize all relays to OFF state
-    Serial.println("Setting all relays to OFF...");
+    LOG_DEBUG("Setting all relays to OFF...");
     ioExpander.writeRegister(OUTPUT_PORT1, 0x00);
     
-    Serial.println("TCA9535 fully initialized. Ready to control relays and read buttons.");
+    LOG_INFO("TCA9535 fully initialized. Ready to control relays and read buttons.");
   }
   controller = new CarWashController(mqttClient);
   // Initialize MQTT client with callback
@@ -88,7 +117,7 @@ void setup() {
   mqttClient.setBufferSize(512);
 
   // Initialize modem and connect to network
-  Serial.println("Initializing modem and connecting to network...");
+  LOG_INFO("Initializing modem and connecting to network...");
   if (mqttClient.begin(apn, gprsUser, gprsPass, pin)) {
     // Configure SSL certificates
     mqttClient.setCACert(AmazonRootCA);
@@ -96,31 +125,33 @@ void setup() {
     mqttClient.setPrivateKey(AWSClientPrivateKey);
     
     // Connect to MQTT broker
-    Serial.println("Connecting to MQTT broker...");
+    LOG_INFO("Connecting to MQTT broker...");
     if (mqttClient.connect(AWS_BROKER, AWS_BROKER_PORT, AWS_CLIENT_ID)) {
-      Serial.println("Connected to MQTT broker!");
+      LOG_INFO("Connected to MQTT broker!");
       
       // // Subscribe to test topic
       // mqttClient.subscribe("machines/machine001/test");
       
       // // Publish hello message
       // mqttClient.publish("machines/machine001/data", "hello world", QOS1_AT_LEAST_ONCE);
-      // Serial.print("Subscribing to topic:");
-      // Serial.println(INIT_TOPIC.c_str());
+      LOG_DEBUG("Subscribing to topic: %s", INIT_TOPIC.c_str());
       bool result = mqttClient.subscribe(INIT_TOPIC.c_str());
-      Serial.print("Subscription result:");
-      Serial.println(result);
+      LOG_DEBUG("Subscription result: %s", result ? "true" : "false");
+      
       result = mqttClient.subscribe(CONFIG_TOPIC.c_str());
-      Serial.print("Subscription result:");
-      Serial.println(result);
+      LOG_DEBUG("Subscription result: %s", result ? "true" : "false");
+      
+      result = mqttClient.subscribe(COMMAND_TOPIC.c_str());
+      LOG_DEBUG("Subscription to command topic: %s", result ? "true" : "false");
+      
       delay(4000);
-      Serial.println("Publishing Setup Action Event...");
+      LOG_INFO("Publishing Setup Action Event...");
       controller->publishMachineSetupActionEvent();
     } else {
-      Serial.println("Failed to connect to MQTT broker");
+      LOG_ERROR("Failed to connect to MQTT broker");
     }
   } else {
-    Serial.println("Failed to initialize modem");
+    LOG_ERROR("Failed to initialize modem");
   }
   
   // Final blink pattern to indicate setup complete
@@ -152,15 +183,15 @@ void loop() {
     lastNetworkCheck = currentTime;
     
     if (!mqttClient.isNetworkConnected()) {
-      Serial.println("Lost cellular network connection");
+      LOG_WARNING("Lost cellular network connection");
       
       // Only attempt reconnection every 60 seconds to avoid overwhelming the modem
       if (currentTime - lastConnectionAttempt > 60000) {
         lastConnectionAttempt = currentTime;
         
-        Serial.println("Attempting to reconnect to cellular network...");
+        LOG_INFO("Attempting to reconnect to cellular network...");
         if (mqttClient.begin(apn, gprsUser, gprsPass, pin)) {
-          Serial.println("Successfully reconnected to cellular network!");
+          LOG_INFO("Successfully reconnected to cellular network!");
           
           // Reconfigure SSL certificates
           mqttClient.setCACert(AmazonRootCA);
@@ -169,9 +200,10 @@ void loop() {
           
           // Connect to MQTT broker
           if (mqttClient.connect(AWS_BROKER, AWS_BROKER_PORT, AWS_CLIENT_ID)) {
-            Serial.println("MQTT broker connection restored!");
+            LOG_INFO("MQTT broker connection restored!");
             mqttClient.subscribe(INIT_TOPIC.c_str());
             mqttClient.subscribe(CONFIG_TOPIC.c_str());
+            mqttClient.subscribe(COMMAND_TOPIC.c_str());
             
             // Notify that we're back online
             if (controller) {
@@ -187,7 +219,7 @@ void loop() {
         // Only attempt MQTT reconnection every 15 seconds
         if (currentTime - lastMqttReconnectAttempt > 15000) {
           lastMqttReconnectAttempt = currentTime;
-          Serial.println("Network connected but MQTT disconnected, attempting to reconnect...");
+          LOG_WARNING("Network connected but MQTT disconnected, attempting to reconnect...");
           
           // MQTT client will handle resubscribing to topics internally
           mqttClient.reconnect();
@@ -204,7 +236,7 @@ void loop() {
     // Status message every 60 seconds if connected
     if (currentTime - lastStatusCheck > 60000) {
       lastStatusCheck = currentTime;
-      Serial.println("System running normally, network connected");
+      LOG_INFO("System running normally, network connected");
       
       // Optional: publish a heartbeat message
       // if (mqttClient.isConnected() && controller) {
@@ -216,9 +248,9 @@ void loop() {
   
   // Periodically check I/O expander raw values for debugging
   static unsigned long lastIoDebugCheck = 0;
-  if (currentTime - lastIoDebugCheck > 4000) {  // Every 2 seconds
+  if (currentTime - lastIoDebugCheck > 4000) {  // Every 4 seconds
     lastIoDebugCheck = currentTime;
-    Serial.printf("Machine state: %s, Machine loaded: %d, Formatted: %s\n", 
+    LOG_DEBUG("Machine state: %s, Machine loaded: %d, Formatted: %s", 
              getMachineStateString(controller->getCurrentState()),
              controller->isMachineLoaded(),
              controller->getTimestamp().c_str());  

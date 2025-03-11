@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include "logger.h"
 
 class IoExpander {
 public:
