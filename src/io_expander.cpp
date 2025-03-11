@@ -85,19 +85,41 @@ uint8_t IoExpander::readRegister(uint8_t reg) {
 }
 
 void IoExpander::setRelay(uint8_t relay, bool state) {
-    if (!_initialized || relay > 7) return; // Validate relay number
-    
-    uint8_t relayState = readRegister(OUTPUT_PORT1);
-    
-    if (state) {
-        // Turn ON relay
-        relayState |= (1 << relay);
-    } else {
-        // Turn OFF relay
-        relayState &= ~(1 << relay);
+    if (!_initialized || relay > 7) {
+        LOG_ERROR("Cannot set relay: initialized=%d, relay=%d", _initialized, relay);
+        return; // Validate relay number
     }
     
-    writeRegister(OUTPUT_PORT1, relayState);
+    LOG_DEBUG("Setting relay %d to %s", relay, state ? "ON" : "OFF");
+    
+    uint8_t relayState = readRegister(OUTPUT_PORT1);
+    LOG_DEBUG("Relay port state before change: 0x%02X", relayState);
+    
+    uint8_t newRelayState;
+    if (state) {
+        // Turn ON relay
+        newRelayState = relayState | (1 << relay);
+        LOG_DEBUG("Setting bit %d (mask 0x%02X) to turn relay ON", relay, (1 << relay));
+    } else {
+        // Turn OFF relay
+        newRelayState = relayState & ~(1 << relay);
+        LOG_DEBUG("Clearing bit %d (mask 0x%02X) to turn relay OFF", relay, (1 << relay));
+    }
+    
+    LOG_DEBUG("Writing new relay state: 0x%02X", newRelayState);
+    writeRegister(OUTPUT_PORT1, newRelayState);
+    
+    // Verify the change
+    uint8_t verifyState = readRegister(OUTPUT_PORT1);
+    bool changeVerified = (state && (verifyState & (1 << relay))) || 
+                          (!state && !(verifyState & (1 << relay)));
+    
+    if (changeVerified) {
+        LOG_DEBUG("Relay %d successfully set to %s", relay, state ? "ON" : "OFF");
+    } else {
+        LOG_ERROR("Failed to set relay %d to %s! Current state: 0x%02X", 
+                 relay, state ? "ON" : "OFF", verifyState);
+    }
 }
 
 bool IoExpander::readButton(uint8_t button) {
