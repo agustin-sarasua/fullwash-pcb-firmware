@@ -2,6 +2,8 @@
 #include "mqtt_lte_client.h"
 #include "io_expander.h"
 #include "utilities.h"
+#include "constants.h"
+#include "car_wash_controller.h"
 
 #include "certs/AmazonRootCA.h"
 #include "certs/AWSClientCertificate.h"
@@ -24,19 +26,20 @@ MqttLteClient mqttClient(SerialAT, MODEM_PWRKEY, MODEM_DTR, MODEM_FLIGHT, MODEM_
 // Create IO Expander
 IoExpander ioExpander(TCA9535_ADDR, I2C_SDA_PIN, I2C_SCL_PIN, INT_PIN);
 
+CarWashController* controller;
+
 // Button states
 bool buttonState = false;
 bool lastButtonState = false;
 
-// MQTT callback function
-void callback(char *topic, byte *payload, unsigned int length) {
-  Serial.print("Message arrived [");
-  Serial.print(topic);
-  Serial.print("] ");
-  for (int i = 0; i < length; i++) {
-    Serial.print((char)payload[i]);
-  }
-  Serial.println();
+
+void mqtt_callback(char *topic, byte *payload, unsigned int len) {
+    Serial.print("Message arrived from topic: ");
+    Serial.println(topic);
+    if (controller) {
+        Serial.println("Handling MQTT message...");
+        controller->handleMqttMessage(topic, payload, len);
+    }
 }
 
 void setup() {
@@ -46,19 +49,6 @@ void setup() {
   // Set up the built-in LED
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, HIGH); // Turn ON LED to show power
-  
-  Serial.println("\n\n");
-  Serial.println("======================================");
-  Serial.println("ESP32 TCA9535 I/O Expander Debug Mode");
-  Serial.println("======================================");
-  
-  // Blink LED to show we've reached this point
-  for (int i = 0; i < 3; i++) {
-    digitalWrite(LED_PIN, LOW);
-    delay(100);
-    digitalWrite(LED_PIN, HIGH);
-    delay(100);
-  }
   
   // Initialize the I/O expander
   Serial.println("Trying to initialize TCA9535...");
@@ -92,10 +82,11 @@ void setup() {
     
     Serial.println("TCA9535 fully initialized. Ready to control relays and read buttons.");
   }
-
+  controller = new CarWashController(mqttClient);
   // Initialize MQTT client with callback
-  mqttClient.setCallback(callback);
-  
+  mqttClient.setCallback(mqtt_callback);
+  mqttClient.setBufferSize(512);
+
   // Initialize modem and connect to network
   Serial.println("Initializing modem and connecting to network...");
   if (mqttClient.begin(apn, gprsUser, gprsPass, pin)) {
@@ -109,11 +100,22 @@ void setup() {
     if (mqttClient.connect(AWS_BROKER, AWS_BROKER_PORT, AWS_CLIENT_ID)) {
       Serial.println("Connected to MQTT broker!");
       
-      // Subscribe to test topic
-      mqttClient.subscribe("machines/machine001/test");
+      // // Subscribe to test topic
+      // mqttClient.subscribe("machines/machine001/test");
       
-      // Publish hello message
-      mqttClient.publish("machines/machine001/data", "hello world");
+      // // Publish hello message
+      // mqttClient.publish("machines/machine001/data", "hello world", QOS1_AT_LEAST_ONCE);
+      // Serial.print("Subscribing to topic:");
+      // Serial.println(INIT_TOPIC.c_str());
+      bool result = mqttClient.subscribe(INIT_TOPIC.c_str());
+      Serial.print("Subscription result:");
+      Serial.println(result);
+      result = mqttClient.subscribe(CONFIG_TOPIC.c_str());
+      Serial.print("Subscription result:");
+      Serial.println(result);
+      delay(4000);
+      Serial.println("Publishing Setup Action Event...");
+      controller->publishMachineSetupActionEvent();
     } else {
       Serial.println("Failed to connect to MQTT broker");
     }
@@ -131,89 +133,127 @@ void setup() {
 }
 
 void loop() {
+  // Timing variables for various operations
   static unsigned long lastStatusCheck = 0;
+  static unsigned long lastNetworkCheck = 0;
   static unsigned long lastConnectionAttempt = 0;
-  static bool connected = mqttClient.isNetworkConnected();
+  static unsigned long lastButtonCheck = 0;
+  static unsigned long lastMqttReconnectAttempt = 0;
   
-  // Check connection status periodically
-  if (!connected && (millis() - lastConnectionAttempt > 30000)) {
-    lastConnectionAttempt = millis();
+  // Button state tracking
+  static bool buttonState = false;
+  static bool lastButtonState = false;
+  
+  // Current time
+  unsigned long currentTime = millis();
+  
+  // Check network status every 30 seconds
+  if (currentTime - lastNetworkCheck > 30000) {
+    lastNetworkCheck = currentTime;
     
-    Serial.println("Attempting to connect to cellular network...");
-    connected = mqttClient.begin(apn, gprsUser, gprsPass, pin);
-    
-    if (connected) {
-      Serial.println("Successfully connected to the internet!");
+    if (!mqttClient.isNetworkConnected()) {
+      Serial.println("Lost cellular network connection");
       
-      // Configure SSL certificates
-      mqttClient.setCACert(AmazonRootCA);
-      mqttClient.setCertificate(AWSClientCertificate);
-      mqttClient.setPrivateKey(AWSClientPrivateKey);
-      
-      // Connect to MQTT broker
-      if (mqttClient.connect(AWS_BROKER, AWS_BROKER_PORT, AWS_CLIENT_ID)) {
-        Serial.println("Connected to MQTT broker!");
+      // Only attempt reconnection every 60 seconds to avoid overwhelming the modem
+      if (currentTime - lastConnectionAttempt > 60000) {
+        lastConnectionAttempt = currentTime;
         
-        // Subscribe to test topic
-        mqttClient.subscribe("machines/machine001/test");
+        Serial.println("Attempting to reconnect to cellular network...");
+        if (mqttClient.begin(apn, gprsUser, gprsPass, pin)) {
+          Serial.println("Successfully reconnected to cellular network!");
+          
+          // Reconfigure SSL certificates
+          mqttClient.setCACert(AmazonRootCA);
+          mqttClient.setCertificate(AWSClientCertificate);
+          mqttClient.setPrivateKey(AWSClientPrivateKey);
+          
+          // Connect to MQTT broker
+          if (mqttClient.connect(AWS_BROKER, AWS_BROKER_PORT, AWS_CLIENT_ID)) {
+            Serial.println("MQTT broker connection restored!");
+            mqttClient.subscribe(INIT_TOPIC.c_str());
+            mqttClient.subscribe(CONFIG_TOPIC.c_str());
+            
+            // Notify that we're back online
+            if (controller) {
+                delay(4000);
+                controller->publishMachineSetupActionEvent();
+            }
+          }
+        }
       }
-      
-      // Blink the built-in LED to indicate success
-      for (int i = 0; i < 5; i++) {
-        digitalWrite(LED_PIN, LOW);
-        delay(100);
-        digitalWrite(LED_PIN, HIGH);
-        delay(100);
+    } else {
+      // Network is connected, but check MQTT connection
+      if (!mqttClient.isConnected()) {
+        // Only attempt MQTT reconnection every 15 seconds
+        if (currentTime - lastMqttReconnectAttempt > 15000) {
+          lastMqttReconnectAttempt = currentTime;
+          Serial.println("Network connected but MQTT disconnected, attempting to reconnect...");
+          
+          // MQTT client will handle resubscribing to topics internally
+          mqttClient.reconnect();
+        }
       }
     }
-    
-    // Print I/O expander debug info
-    ioExpander.printDebugInfo();
-    
-    // Try reading a specific button
-    Serial.print("Button 1 state: ");
-    Serial.println(ioExpander.readButton(BUTTON1) ? "PRESSED" : "NOT PRESSED");
-    
-    // Blink the LED to show the program is running
-    digitalWrite(LED_PIN, LOW);
-    delay(50);
-    digitalWrite(LED_PIN, HIGH);
+  }
+  
+  // If connected to network, process MQTT messages
+  if (mqttClient.isNetworkConnected()) {
+    // Always process MQTT messages when connected (this handles incoming messages)
+    mqttClient.loop();
+       
+    // Status message every 60 seconds if connected
+    if (currentTime - lastStatusCheck > 60000) {
+      lastStatusCheck = currentTime;
+      Serial.println("System running normally, network connected");
+      
+      // Optional: publish a heartbeat message
+      // if (mqttClient.isConnected() && controller) {
+        // controller->publishHeartbeat();
+        // controller->update();
+      // }
+    }
+  }
+  
+  // Periodically check I/O expander raw values for debugging
+  static unsigned long lastIoDebugCheck = 0;
+  if (currentTime - lastIoDebugCheck > 4000) {  // Every 2 seconds
+    lastIoDebugCheck = currentTime;
+    Serial.printf("Machine state: %s, Machine loaded: %d, Formatted: %s\n", 
+             getMachineStateString(controller->getCurrentState()),
+             controller->isMachineLoaded(),
+             controller->getTimestamp().c_str());  
   }
 
-  if (connected && (millis() - lastStatusCheck > 10000)) {
-    lastStatusCheck = millis();
+  // Run controller update if available - this will handle all buttons through the controller
+  if (currentTime - lastButtonCheck > 50) {
+    lastButtonCheck = currentTime;
     
-    if (mqttClient.isNetworkConnected()) {
-      Serial.println("Still connected to cellular network");
-      
-      // Process MQTT messages
-      mqttClient.loop();
-    } else {
-      Serial.println("Lost connection to cellular network. Will attempt to reconnect.");
-      connected = false;
+    if (controller) {
+      controller->update();
     }
   }
   
-  // Read button state (BT1)
-  buttonState = ioExpander.readButton(BUTTON1);
+  // Handle LED indicator
+  // Blink pattern based on connection status
+  static unsigned long lastLedToggle = 0;
+  static bool ledState = HIGH;
   
-  // Check if button state changed from not pressed to pressed
-  if (buttonState && !lastButtonState) {
-    Serial.println("Button pressed! Toggling Relay 1 (clear water)");
-    
-    // Toggle Relay 1 and get the new state
-    bool newState = ioExpander.toggleRelay(RELAY1);
-    Serial.println(newState ? "Relay ON" : "Relay OFF");
-    
-    // Publish relay state change to MQTT if connected
-    if (mqttClient.isConnected()) {
-      mqttClient.publish("machines/machine001/relay", newState ? "ON" : "OFF");
+  if (mqttClient.isConnected()) {
+    // Solid LED when fully connected
+    digitalWrite(LED_PIN, HIGH);
+  } else if (mqttClient.isNetworkConnected()) {
+    // Slow blink when network is connected but MQTT is not
+    if (currentTime - lastLedToggle > 1000) {
+      lastLedToggle = currentTime;
+      ledState = !ledState;
+      digitalWrite(LED_PIN, ledState);
+    }
+  } else {
+    // Fast blink when not connected to network
+    if (currentTime - lastLedToggle > 300) {
+      lastLedToggle = currentTime;
+      ledState = !ledState;
+      digitalWrite(LED_PIN, ledState);
     }
   }
-  
-  // Save last button state
-  lastButtonState = buttonState;
-  
-  // Small delay to debounce button
-  delay(50);
 }

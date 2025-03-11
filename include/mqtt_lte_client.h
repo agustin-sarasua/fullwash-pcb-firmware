@@ -5,6 +5,7 @@
 #include "utilities.h"
 #include "SSLClient.h"
 #include <PubSubClient.h>
+#include <vector>
 
 class MqttLteClient {
 public:
@@ -23,13 +24,15 @@ public:
     // MQTT functions
     void setCallback(void (*callback)(char*, byte*, unsigned int));
     bool connect(const char* broker, uint16_t port, const char* clientId);
-    bool publish(const char* topic, const char* payload);
+    bool publish(const char* topic, const char* payload, const uint8_t qos);
     bool subscribe(const char* topic);
     void loop();
     
     // Status checks
     bool isConnected();
     bool isNetworkConnected();
+    void setBufferSize(size_t size);
+    void reconnect();
     
 private:
     // Private methods
@@ -37,7 +40,6 @@ private:
     bool testModemAT();
     void clearModemBuffer();
     bool initModemAndConnectNetwork();
-    void reconnect();
     
     // References to hardware
     HardwareSerial& _modemSerial;
@@ -46,6 +48,9 @@ private:
     int _flightPin;
     int _txPin;
     int _rxPin;
+
+    unsigned long _lastReconnectAttempt = 0;
+    int _reconnectInterval = 5000; // Start with 5 seconds
     
     // Network configuration
     const char* _apn;
@@ -69,6 +74,8 @@ private:
     bool _initialized;
     bool _networkConnected;
     bool _mqttConnected;
+
+    std::vector<String> _subscribedTopics;  // Store subscribed topics
 };
 
 #endif // MQTT_LTE_CLIENT_H

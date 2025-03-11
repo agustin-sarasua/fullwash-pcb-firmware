@@ -9,6 +9,8 @@ MqttLteClient::MqttLteClient(HardwareSerial& modemSerial, int pwrKeyPin, int dtr
     _gsmClient = new TinyGsmClient(*_modem);
     _sslClient = new SSLClient(_gsmClient);
     _mqttClient = new PubSubClient(*_sslClient);
+
+    _subscribedTopics.reserve(5);
 }
 
 bool MqttLteClient::begin(const char* apn, const char* user, const char* pass, const char* pin) {
@@ -263,6 +265,8 @@ bool MqttLteClient::connect(const char* broker, uint16_t port, const char* clien
     
     _mqttClient->setServer(_broker, _port);
     
+    _mqttClient->setKeepAlive(120); // Increase from default 15s to 120s
+
     // Loop until we're reconnected or timeout
     unsigned long startTime = millis();
     while (!_mqttClient->connected() && millis() - startTime < 10000) {
@@ -286,7 +290,15 @@ bool MqttLteClient::connect(const char* broker, uint16_t port, const char* clien
 
 void MqttLteClient::reconnect() {
     // Loop until we're reconnected or timeout
+    unsigned long now = millis();
+    if (now - _lastReconnectAttempt < _reconnectInterval) {
+        return; // Don't try too frequently
+    }
+    _lastReconnectAttempt = now;
+
     unsigned long startTime = millis();
+    bool reconnected = false;
+    
     while (!_mqttClient->connected() && millis() - startTime < 10000) {
         Serial.print("Attempting MQTT connection...");
         
@@ -294,7 +306,8 @@ void MqttLteClient::reconnect() {
         if (_mqttClient->connect(_clientId)) {
             Serial.println("connected");
             _mqttConnected = true;
-            return;
+            reconnected = true;
+            break;  // Exit the loop on successful connection
         } else {
             Serial.print("failed, rc=");
             Serial.print(_mqttClient->state());
@@ -302,15 +315,34 @@ void MqttLteClient::reconnect() {
             delay(1000);
         }
     }
+    
+    // If successfully reconnected, re-subscribe to all previously subscribed topics
+    if (!reconnected) {
+        // Exponential backoff - double the interval up to 2 minutes
+        _reconnectInterval = min(_reconnectInterval * 2, 120000);
+    } else {
+        for (const String& topic : _subscribedTopics) {
+            Serial.print("Re-subscribing to topic: ");
+            Serial.println(topic);
+            _mqttClient->subscribe(topic.c_str());
+        }
+        _reconnectInterval = 5000;
+    }
 }
 
-bool MqttLteClient::publish(const char* topic, const char* payload) {
+bool MqttLteClient::publish(const char* topic, const char* payload, const uint8_t qos) {
+    Serial.println("Publishing message...");
     if (!_mqttClient->connected()) {
         reconnect();
     }
     
     if (_mqttClient->connected()) {
-        return _mqttClient->publish(topic, payload);
+        Serial.print("Publishing to topic: ");
+        Serial.println(topic);
+        bool result = _mqttClient->publish(topic, payload);
+        Serial.print("Publish result: ");
+        Serial.println(result);
+        return result;
     }
     
     return false;
@@ -318,21 +350,41 @@ bool MqttLteClient::publish(const char* topic, const char* payload) {
 
 bool MqttLteClient::subscribe(const char* topic) {
     if (!_mqttClient->connected()) {
+        Serial.println("Reconnecting MQTT client before subscribing...");
         reconnect();
     }
     
     if (_mqttClient->connected()) {
-        return _mqttClient->subscribe(topic);
+        Serial.print("Subscribing to topic: ");
+        Serial.println(topic);
+        bool result = _mqttClient->subscribe(topic);
+        
+        if (result) {
+            // Store the topic in our list of subscribed topics for re-subscription after reconnect
+            _subscribedTopics.push_back(String(topic));
+        }
+        
+        return result;
     }
     
     return false;
 }
 
 void MqttLteClient::loop() {
+    static unsigned long lastConnectionCheck = 0;
+    // Only check connection status periodically to avoid overwhelming the client
+    if (millis() - lastConnectionCheck > 5000) {  // Check every 5 seconds
+        lastConnectionCheck = millis();
+        
+        if (!_mqttClient->connected() && _networkConnected) {
+            Serial.println("MQTT disconnected, reconnecting...");
+            reconnect();
+        }
+    }
+    // Always call the PubSubClient loop
     if (_mqttClient->connected()) {
+        // Serial.println("Calling MQTT loop...");
         _mqttClient->loop();
-    } else if (_networkConnected) {
-        reconnect();
     }
 }
 
@@ -345,4 +397,10 @@ bool MqttLteClient::isNetworkConnected() {
         _networkConnected = _modem->isGprsConnected();
     }
     return _networkConnected;
+}
+
+void MqttLteClient::setBufferSize(size_t size) {
+    if (_mqttClient) {
+        _mqttClient->setBufferSize(size);
+    }
 }
