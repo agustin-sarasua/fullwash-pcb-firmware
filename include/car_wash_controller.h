@@ -8,6 +8,7 @@
 #include <algorithm>
 #include "domain.h"
 #include "constants.h"
+#include "logger.h"
 
 class CarWashController {
 public:
@@ -26,6 +27,7 @@ public:
     MachineState getCurrentState() const;
     bool isMachineLoaded() const;
     String getTimestamp();
+    void setLogLevel(LogLevel level);
 
 private:
     MqttLteClient& mqttClient;

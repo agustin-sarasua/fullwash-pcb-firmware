@@ -11,18 +11,16 @@ bool IoExpander::begin() {
     
     // Set INT pin as input
     pinMode(_intPin, INPUT_PULLUP);
-    Serial.println("INT pin configured");
+    LOG_DEBUG("INT pin configured");
     
     // Check if device is responding
     Wire.beginTransmission(_address);
     uint8_t error = Wire.endTransmission();
     
-    Serial.print("TCA9535 initialization result: ");
-    Serial.println(error == 0 ? "Success" : "Failed");
+    LOG_INFO("TCA9535 initialization result: %s", error == 0 ? "Success" : "Failed");
     
     if (error != 0) {
-        Serial.print("I2C error code: ");
-        Serial.println(error);
+        LOG_ERROR("I2C error code: %d", error);
         // Error codes:
         // 0: success
         // 1: data too long
@@ -45,10 +43,7 @@ void IoExpander::writeRegister(uint8_t reg, uint8_t value) {
     uint8_t error = Wire.endTransmission();
     
     if (error != 0) {
-        Serial.print("Error writing to register 0x");
-        Serial.print(reg, HEX);
-        Serial.print(": Error code ");
-        Serial.println(error);
+        LOG_ERROR("Error writing to register 0x%02X: Error code %d", reg, error);
     }
 }
 
@@ -58,7 +53,7 @@ uint8_t IoExpander::readRegister(uint8_t reg) {
     // Add more debugging for INPUT_PORT0 reads
     bool isInputPortRead = (reg == INPUT_PORT0);
     // if (isInputPortRead) {
-    //     Serial.print("Reading INPUT_PORT0... ");
+    //     LOG_DEBUG("Reading INPUT_PORT0...");
     // }
     
     Wire.beginTransmission(_address);
@@ -66,30 +61,24 @@ uint8_t IoExpander::readRegister(uint8_t reg) {
     uint8_t error = Wire.endTransmission();
     
     if (error != 0) {
-        Serial.print("Error setting register to read 0x");
-        Serial.print(reg, HEX);
-        Serial.print(": Error code ");
-        Serial.println(error);
+        LOG_ERROR("Error setting register to read 0x%02X: Error code %d", reg, error);
         return 0;
     }
     
     uint8_t bytesReceived = Wire.requestFrom(_address, 1);
     if (bytesReceived != 1) {
-        Serial.print("Error reading from register 0x");
-        Serial.print(reg, HEX);
-        Serial.print(": Requested 1 byte, received ");
-        Serial.println(bytesReceived);
+        LOG_ERROR("Error reading from register 0x%02X: Requested 1 byte, received %d", reg, bytesReceived);
         return 0;
     }
     
     uint8_t value = Wire.read();
     
     // if (isInputPortRead) {
-    //     Serial.printf("Value: 0x%02X | Binary: ", value);
-    //     for (int i = 7; i >= 0; i--) {
-    //         Serial.print((value & (1 << i)) ? "1" : "0");
-    //     }
-    //     Serial.println();
+    //     LOG_DEBUG("Value: 0x%02X | Binary: %d%d%d%d%d%d%d%d", value,
+    //            (value & 0x80) ? 1 : 0, (value & 0x40) ? 1 : 0,
+    //            (value & 0x20) ? 1 : 0, (value & 0x10) ? 1 : 0,
+    //            (value & 0x08) ? 1 : 0, (value & 0x04) ? 1 : 0,
+    //            (value & 0x02) ? 1 : 0, (value & 0x01) ? 1 : 0);
     // }
     
     return value;
@@ -113,28 +102,28 @@ void IoExpander::setRelay(uint8_t relay, bool state) {
 
 bool IoExpander::readButton(uint8_t button) {
     if (!_initialized || button > 5) {
-        Serial.printf("Button read error: initialized=%d, button=%d\n", _initialized, button);
+        LOG_ERROR("Button read error: initialized=%d, button=%d", _initialized, button);
         return false; // Validate button number
     }
     uint8_t portValue = readRegister(INPUT_PORT0);
     
     // Force more debugging - print raw port value for each button read
-    // Serial.printf("Reading Button %d (pin): Raw port value: 0x%02X, Bit value: %d\n", 
-    //              button, portValue, (portValue & (1 << button)) ? 1 : 0);
+    // LOG_DEBUG("Reading Button %d (pin): Raw port value: 0x%02X, Bit value: %d", 
+    //          button, portValue, (portValue & (1 << button)) ? 1 : 0);
     
     // For button 4 (BUTTON4 = 3), check specifically bit 3
     // if (button == BUTTON4) {
-    //     Serial.printf("BUTTON4 detail: pin=%d, raw bit=%d, mask=0x%02X, test=%d\n", 
-    //                 button, 
-    //                 (portValue & (1 << button)) ? 1 : 0,
-    //                 (1 << button),
-    //                 (portValue & (1 << button)));
+    //     LOG_DEBUG("BUTTON4 detail: pin=%d, raw bit=%d, mask=0x%02X, test=%d", 
+    //              button, 
+    //              (portValue & (1 << button)) ? 1 : 0,
+    //              (1 << button),
+    //              (portValue & (1 << button)));
     // }
     bool buttonState = !(portValue & (1 << button)); // Buttons are active LOW
     
     // // Log button state for all buttons
-    // Serial.printf("Button %d (pin): Raw port value: 0x%02X, State: %s\n", 
-    //              button, portValue, buttonState ? "PRESSED" : "RELEASED");
+    // LOG_DEBUG("Button %d (pin): Raw port value: 0x%02X, State: %s", 
+    //          button, portValue, buttonState ? "PRESSED" : "RELEASED");
     
     return buttonState;
 }
@@ -144,24 +133,26 @@ void IoExpander::configurePortAsInput(uint8_t port, uint8_t mask) {
     
     uint8_t configReg = (port == 0) ? CONFIG_PORT0 : CONFIG_PORT1;
     
-    Serial.printf("Configuring port %d as INPUT with mask: 0x%02X | Binary: ", port, mask);
-    for (int i = 7; i >= 0; i--) {
-        Serial.print((mask & (1 << i)) ? "1" : "0");
-    }
-    Serial.println();
+    LOG_DEBUG("Configuring port %d as INPUT with mask: 0x%02X | Binary: %d%d%d%d%d%d%d%d", 
+             port, mask,
+             (mask & 0x80) ? 1 : 0, (mask & 0x40) ? 1 : 0,
+             (mask & 0x20) ? 1 : 0, (mask & 0x10) ? 1 : 0,
+             (mask & 0x08) ? 1 : 0, (mask & 0x04) ? 1 : 0,
+             (mask & 0x02) ? 1 : 0, (mask & 0x01) ? 1 : 0);
     
     writeRegister(configReg, mask); // 1 = input in config register
     
     // Verify configuration was applied correctly
     uint8_t readBack = readRegister(configReg);
-    Serial.printf("Config verification - Port %d config read back: 0x%02X | Binary: ", port, readBack);
-    for (int i = 7; i >= 0; i--) {
-        Serial.print((readBack & (1 << i)) ? "1" : "0");
-    }
-    Serial.println();
+    LOG_DEBUG("Config verification - Port %d config read back: 0x%02X | Binary: %d%d%d%d%d%d%d%d", 
+             port, readBack,
+             (readBack & 0x80) ? 1 : 0, (readBack & 0x40) ? 1 : 0,
+             (readBack & 0x20) ? 1 : 0, (readBack & 0x10) ? 1 : 0,
+             (readBack & 0x08) ? 1 : 0, (readBack & 0x04) ? 1 : 0,
+             (readBack & 0x02) ? 1 : 0, (readBack & 0x01) ? 1 : 0);
     
     if (readBack != mask) {
-        Serial.printf("ERROR: Port %d config mismatch! Wrote 0x%02X but read back 0x%02X\n", port, mask, readBack);
+        LOG_ERROR("Port %d config mismatch! Wrote 0x%02X but read back 0x%02X", port, mask, readBack);
     }
 }
 
@@ -171,25 +162,26 @@ void IoExpander::configurePortAsOutput(uint8_t port, uint8_t mask) {
     uint8_t configReg = (port == 0) ? CONFIG_PORT0 : CONFIG_PORT1;
     uint8_t configValue = ~mask; // 0 = output in config register
     
-    Serial.printf("Configuring port %d as OUTPUT with mask: 0x%02X | Config value: 0x%02X | Binary: ", 
-                 port, mask, configValue);
-    for (int i = 7; i >= 0; i--) {
-        Serial.print((configValue & (1 << i)) ? "1" : "0");
-    }
-    Serial.println();
+    LOG_DEBUG("Configuring port %d as OUTPUT with mask: 0x%02X | Config value: 0x%02X | Binary: %d%d%d%d%d%d%d%d", 
+             port, mask, configValue,
+             (configValue & 0x80) ? 1 : 0, (configValue & 0x40) ? 1 : 0,
+             (configValue & 0x20) ? 1 : 0, (configValue & 0x10) ? 1 : 0,
+             (configValue & 0x08) ? 1 : 0, (configValue & 0x04) ? 1 : 0,
+             (configValue & 0x02) ? 1 : 0, (configValue & 0x01) ? 1 : 0);
     
     writeRegister(configReg, configValue);
     
     // Verify configuration was applied correctly
     uint8_t readBack = readRegister(configReg);
-    Serial.printf("Config verification - Port %d config read back: 0x%02X | Binary: ", port, readBack);
-    for (int i = 7; i >= 0; i--) {
-        Serial.print((readBack & (1 << i)) ? "1" : "0");
-    }
-    Serial.println();
+    LOG_DEBUG("Config verification - Port %d config read back: 0x%02X | Binary: %d%d%d%d%d%d%d%d", 
+             port, readBack,
+             (readBack & 0x80) ? 1 : 0, (readBack & 0x40) ? 1 : 0,
+             (readBack & 0x20) ? 1 : 0, (readBack & 0x10) ? 1 : 0,
+             (readBack & 0x08) ? 1 : 0, (readBack & 0x04) ? 1 : 0,
+             (readBack & 0x02) ? 1 : 0, (readBack & 0x01) ? 1 : 0);
     
     if (readBack != configValue) {
-        Serial.printf("ERROR: Port %d config mismatch! Wrote 0x%02X but read back 0x%02X\n", port, configValue, readBack);
+        LOG_ERROR("Port %d config mismatch! Wrote 0x%02X but read back 0x%02X", port, configValue, readBack);
     }
 }
 
@@ -205,25 +197,25 @@ bool IoExpander::toggleRelay(uint8_t relay) {
 
 void IoExpander::printDebugInfo() {
     if (!_initialized) {
-        Serial.println("IoExpander not initialized");
+        LOG_WARNING("IoExpander not initialized");
         return;
     }
     
-    Serial.println("==== Debug Info ====");
+    LOG_DEBUG("==== IO Expander Debug Info ====");
     
     // Read and print all button states
     uint8_t portValue = readRegister(INPUT_PORT0);
-    Serial.print("Port 0 Value: 0b");
-    for (int i = 7; i >= 0; i--) {
-        Serial.print((portValue & (1 << i)) ? "1" : "0");
-    }
-    Serial.println();
+    LOG_DEBUG("Port 0 Value: 0b%d%d%d%d%d%d%d%d",
+            (portValue & 0x80) ? 1 : 0, (portValue & 0x40) ? 1 : 0,
+            (portValue & 0x20) ? 1 : 0, (portValue & 0x10) ? 1 : 0,
+            (portValue & 0x08) ? 1 : 0, (portValue & 0x04) ? 1 : 0,
+            (portValue & 0x02) ? 1 : 0, (portValue & 0x01) ? 1 : 0);
     
     // Read and print relay states
     uint8_t relayState = readRegister(OUTPUT_PORT1);
-    Serial.print("Port 1 Value: 0b");
-    for (int i = 7; i >= 0; i--) {
-        Serial.print((relayState & (1 << i)) ? "1" : "0");
-    }
-    Serial.println();
+    LOG_DEBUG("Port 1 Value: 0b%d%d%d%d%d%d%d%d",
+            (relayState & 0x80) ? 1 : 0, (relayState & 0x40) ? 1 : 0,
+            (relayState & 0x20) ? 1 : 0, (relayState & 0x10) ? 1 : 0,
+            (relayState & 0x08) ? 1 : 0, (relayState & 0x04) ? 1 : 0,
+            (relayState & 0x02) ? 1 : 0, (relayState & 0x01) ? 1 : 0);
 }

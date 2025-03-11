@@ -13,3 +13,4 @@ const String INIT_TOPIC = buildTopicName(MACHINE_ID, "init");
 const String CONFIG_TOPIC = buildTopicName(MACHINE_ID, "config");
 const String ACTION_TOPIC = buildTopicName(MACHINE_ID, "action");
 const String STATE_TOPIC = buildTopicName(MACHINE_ID, "state");
+const String COMMAND_TOPIC = buildTopicName(MACHINE_ID, "command");
