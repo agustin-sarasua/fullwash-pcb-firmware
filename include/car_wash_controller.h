@@ -21,6 +21,11 @@ public:
     void tokenExpired();
     void update();
     void publishMachineSetupActionEvent();
+    
+    // Getter methods
+    MachineState getCurrentState() const;
+    bool isMachineLoaded() const;
+    String getTimestamp();
 
 private:
     MqttLteClient& mqttClient;
@@ -41,7 +46,6 @@ private:
     const unsigned long STATE_PUBLISH_INTERVAL = 10000;
 
     unsigned long getSecondsLeft();
-    String getTimestamp();
     void publishActionEvent(int buttonIndex, MachineAction machineAction, TriggerType triggerType = MANUAL);
     void publishPeriodicState(bool force = false);
 };

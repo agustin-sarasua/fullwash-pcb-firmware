@@ -47,7 +47,8 @@ enum MachineButtonName {
     BUTTON_2,
     BUTTON_3,
     BUTTON_4,
-    BUTTON_5
+    BUTTON_5,
+    BUTTON_6
 };
 
 #endif // DOMAIN_H

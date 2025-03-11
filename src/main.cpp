@@ -34,8 +34,10 @@ bool lastButtonState = false;
 
 
 void mqtt_callback(char *topic, byte *payload, unsigned int len) {
-  Serial.print("Message arrived [");
+    Serial.print("Message arrived from topic: ");
+    Serial.println(topic);
     if (controller) {
+        Serial.println("Handling MQTT message...");
         controller->handleMqttMessage(topic, payload, len);
     }
 }
@@ -48,10 +50,10 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, HIGH); // Turn ON LED to show power
   
-  Serial.println("\n\n");
-  Serial.println("======================================");
-  Serial.println("ESP32 TCA9535 I/O Expander Debug Mode");
-  Serial.println("======================================");
+  // Serial.println("\n\n");
+  // Serial.println("======================================");
+  // Serial.println("ESP32 TCA9535 I/O Expander Debug Mode");
+  // Serial.println("======================================");
   
   // // Blink LED to show we've reached this point
   // for (int i = 0; i < 3; i++) {
@@ -124,6 +126,7 @@ void setup() {
       result = mqttClient.subscribe(CONFIG_TOPIC.c_str());
       Serial.print("Subscription result:");
       Serial.println(result);
+      Serial.println("Publishing Setup Action Event...");
       controller->publishMachineSetupActionEvent();
     } else {
       Serial.println("Failed to connect to MQTT broker");
@@ -184,7 +187,7 @@ void loop() {
             
             // Notify that we're back online
             if (controller) {
-              // controller->publishMachineStatusEvent("ONLINE");
+                controller->publishMachineSetupActionEvent();
             }
           }
         }
@@ -208,52 +211,36 @@ void loop() {
   if (mqttClient.isNetworkConnected()) {
     // Always process MQTT messages when connected (this handles incoming messages)
     mqttClient.loop();
-    
-    // Run controller update if available
-    if (controller) {
-      // controller->update();
-    }
-    
+       
     // Status message every 60 seconds if connected
     if (currentTime - lastStatusCheck > 60000) {
       lastStatusCheck = currentTime;
       Serial.println("System running normally, network connected");
       
       // Optional: publish a heartbeat message
-      if (mqttClient.isConnected() && controller) {
+      // if (mqttClient.isConnected() && controller) {
         // controller->publishHeartbeat();
-      }
+        // controller->update();
+      // }
     }
   }
   
-  // Read and handle button presses (check every 50ms for debouncing)
+  // Periodically check I/O expander raw values for debugging
+  static unsigned long lastIoDebugCheck = 0;
+  if (currentTime - lastIoDebugCheck > 4000) {  // Every 2 seconds
+    lastIoDebugCheck = currentTime;
+    Serial.printf("Machine state: %s, Machine loaded: %d, Formatted: %s\n", 
+             getMachineStateString(controller->getCurrentState()),
+             controller->isMachineLoaded(),
+             controller->getTimestamp().c_str());  
+  }
+
+  // Run controller update if available - this will handle all buttons through the controller
   if (currentTime - lastButtonCheck > 50) {
     lastButtonCheck = currentTime;
     
-    // Read button with error handling
-    bool buttonReadSuccess = true;
-    buttonState = ioExpander.readButton(BUTTON1);
-    
-    // Handle I/O expander errors if your IoExpander class supports error reporting
-    if (!buttonReadSuccess) {
-      Serial.println("Error reading button state, skipping button handling");
-    } else {
-      // Check if button state changed from not pressed to pressed
-      if (buttonState && !lastButtonState) {
-        Serial.println("Button pressed! Toggling Relay 1 (clear water)");
-        
-        // Toggle Relay 1 and get the new state
-        bool newState = ioExpander.toggleRelay(RELAY1);
-        Serial.println(newState ? "Relay ON" : "Relay OFF");
-        
-        // Publish relay state change to MQTT if connected
-        if (mqttClient.isConnected()) {
-          mqttClient.publish("machines/99/relay", newState ? "ON" : "OFF", QOS1_AT_LEAST_ONCE);
-        }
-      }
-      
-      // Save last button state
-      lastButtonState = buttonState;
+    if (controller) {
+      controller->update();
     }
   }
   

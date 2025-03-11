@@ -1,5 +1,5 @@
 #include "car_wash_controller.h"
-
+#include "io_expander.h"
 
 CarWashController::CarWashController(MqttLteClient& client)
     : mqttClient(client),
@@ -11,21 +11,19 @@ CarWashController::CarWashController(MqttLteClient& client)
       tokenTimeElapsed(0),
       pauseStartTime(0) {
 
+    // Initialize LED pins - using built-in LED
     pinMode(LED_PIN_INIT, OUTPUT);
     digitalWrite(LED_PIN_INIT, LOW);
 
-    pinMode(RUNNING_LED_PIN, OUTPUT);
-    digitalWrite(RUNNING_LED_PIN, LOW);
-
+    // Initialize button debounce times - we'll use the IO expander to read buttons
     for (int i = 0; i < NUM_BUTTONS; i++) {
-        pinMode(BUTTON_PINS[i], INPUT_PULLUP);
         lastDebounceTime[i] = 0;
-        lastButtonState[i] = HIGH;
+        lastButtonState[i] = HIGH;  // Buttons are active low
     }
 
-    pinMode(STOP_BUTTON_PIN, INPUT_PULLUP);
-    lastDebounceTime[NUM_BUTTONS] = 0;
-    lastButtonState[NUM_BUTTONS] = HIGH;
+    // Set up for the stop button (BUTTON6)
+    lastDebounceTime[NUM_BUTTONS-1] = 0;  // NUM_BUTTONS-1 is the index for the stop button
+    lastButtonState[NUM_BUTTONS-1] = HIGH;
 
     config.isLoaded = false;
 }
@@ -67,43 +65,93 @@ void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payl
 }
 
 void CarWashController::handleButtons() {
-    for (int i = 0; i < NUM_BUTTONS; i++) {
-        int reading = digitalRead(BUTTON_PINS[i]);
-        if (reading != lastButtonState[i]) {
+    // Get reference to the IO expander (assumed to be a global or accessible)
+    extern IoExpander ioExpander;
+
+    // Enhanced debugging for button 4
+    uint8_t rawPortValue = ioExpander.readRegister(INPUT_PORT0);
+    bool bt4RawState = !(rawPortValue & (1 << BUTTON4));
+    // Serial.printf("CarWashController::handleButtons - Direct Button 4 check: Raw port: 0x%02X, State: %s\n", 
+    //              rawPortValue, bt4RawState ? "PRESSED" : "RELEASED");
+
+    // Read all 5 function buttons
+    for (int i = 0; i < NUM_BUTTONS-1; i++) {  // -1 because last button is STOP button
+        bool reading = ioExpander.readButton(BUTTON_INDICES[i]);
+        
+        // Enhanced debugging for button 4
+        // if (i == 3) { // Button 4 is index 3
+        //     Serial.printf("Button 4 processing: reading=%d, lastState=%d, index=%d, BUTTON_INDICES[i]=%d\n", 
+        //                  reading, lastButtonState[i] == LOW, i, BUTTON_INDICES[i]);
+        // }
+        
+        // Log any change in button state (press or release)
+        if (reading != (lastButtonState[i] == LOW)) {
+            // Serial.printf("Button %d state changed: reading=%d, lastState=%d\n", 
+            //              i+1, reading, lastButtonState[i] == LOW);
             lastDebounceTime[i] = millis();
         }
+        
         if ((millis() - lastDebounceTime[i]) > DEBOUNCE_DELAY) {
-            if (reading == LOW && config.isLoaded) {
-                Serial.print("Button pressed: ");
-                Serial.println(String(i));
-                if (currentState == STATE_IDLE) {
-                    activateButton(i, MANUAL);
-                } else if (currentState == STATE_RUNNING && i == activeButton) {
-                    pauseMachine();
-                } else if (currentState == STATE_PAUSED) {
-                    resumeMachine(i);
+            // Button is pressed when reading is true (active LOW in IO expander)
+            if (reading) {
+                // Serial.printf("Button %d debounced press detected! isLoaded=%d, state=%d\n", 
+                //              i+1, config.isLoaded, currentState);
+                
+                if (config.isLoaded) {
+                    if (currentState == STATE_IDLE) {
+                        Serial.printf("Activating button %d in IDLE state\n", i+1);
+                        activateButton(i, MANUAL);
+                    } else if (currentState == STATE_RUNNING && i == activeButton) {
+                        Serial.println("Pausing machine - same button pressed while running");
+                        pauseMachine();
+                    } else if (currentState == STATE_PAUSED) {
+                        Serial.printf("Resuming machine with button %d\n", i+1);
+                        resumeMachine(i);
+                    } else {
+                        Serial.printf("Button %d pressed but no action taken. State=%d, activeButton=%d\n", 
+                                    i+1, currentState, activeButton);
+                    }
+                } else {
+                    Serial.println("Button press ignored - config not loaded!");
                 }
             }
         }
-        lastButtonState[i] = reading;
+        
+        lastButtonState[i] = reading ? LOW : HIGH;  // Convert to match active low logic
     }
 
-    int stopReading = digitalRead(STOP_BUTTON_PIN);
-    if (stopReading != lastButtonState[NUM_BUTTONS]) {
-        lastDebounceTime[NUM_BUTTONS] = millis();
+    // Handle stop button (BUTTON6)
+    bool stopReading = ioExpander.readButton(STOP_BUTTON_PIN);
+    
+    // Log any change in stop button state
+    if (stopReading != (lastButtonState[NUM_BUTTONS-1] == LOW)) {
+        // Serial.printf("STOP button state changed: reading=%d, lastState=%d\n", 
+        //              stopReading, lastButtonState[NUM_BUTTONS-1] == LOW);
+        lastDebounceTime[NUM_BUTTONS-1] = millis();
     }
-    if ((millis() - lastDebounceTime[NUM_BUTTONS]) > DEBOUNCE_DELAY) {
-        if (stopReading == LOW && currentState == STATE_RUNNING) {
-            stopMachine(MANUAL);
+    
+    if ((millis() - lastDebounceTime[NUM_BUTTONS-1]) > DEBOUNCE_DELAY) {
+        if (stopReading) {
+            Serial.printf("STOP button debounced press detected! Current state=%d\n", currentState);
+            
+            if (currentState == STATE_RUNNING) {
+                Serial.println("Stopping machine via STOP button");
+                stopMachine(MANUAL);
+            } else {
+                Serial.printf("STOP button pressed but ignored - not in running state (state=%d)\n", currentState);
+            }
         }
     }
-    lastButtonState[NUM_BUTTONS] = stopReading;
+    
+    lastButtonState[NUM_BUTTONS-1] = stopReading ? LOW : HIGH;
 }
 
 void CarWashController::pauseMachine() {
     Serial.println("Pausing machine");
     if (activeButton >= 0) {
-        // digitalWrite(RELAY_PINS[activeButton], LOW);
+        // Turn off the active relay
+        extern IoExpander ioExpander;
+        ioExpander.setRelay(RELAY_INDICES[activeButton], false);
     }
     currentState = STATE_PAUSED;
     lastActionTime = millis();
@@ -123,7 +171,9 @@ void CarWashController::resumeMachine(int buttonIndex) {
 
 void CarWashController::stopMachine(TriggerType triggerType) {
     if (activeButton >= 0) {
-        // digitalWrite(RELAY_PINS[activeButton], LOW);
+        // Turn off the active relay
+        extern IoExpander ioExpander;
+        ioExpander.setRelay(RELAY_INDICES[activeButton], false);
     }
     
     config.isLoaded = false;
@@ -137,14 +187,18 @@ void CarWashController::stopMachine(TriggerType triggerType) {
 
 void CarWashController::activateButton(int buttonIndex, TriggerType triggerType) {
     Serial.print("Activating button: ");
-    Serial.println(String(BUTTON_PINS[buttonIndex]));
+    Serial.println(String(buttonIndex+1));  // +1 for human-readable button number
 
     if (config.tokens <= 0) return;
 
     digitalWrite(RUNNING_LED_PIN, HIGH);
     currentState = STATE_RUNNING;
     activeButton = buttonIndex;
-    // digitalWrite(RELAY_PINS[buttonIndex], HIGH);
+    
+    // Turn on the corresponding relay
+    extern IoExpander ioExpander;
+    ioExpander.setRelay(RELAY_INDICES[buttonIndex], true);
+    
     lastActionTime = millis();
     tokenStartTime = millis();
     tokenTimeElapsed = 0;
@@ -155,7 +209,9 @@ void CarWashController::activateButton(int buttonIndex, TriggerType triggerType)
 
 void CarWashController::tokenExpired() {
     if (activeButton >= 0) {
-        // digitalWrite(RELAY_PINS[activeButton], LOW);
+        // Turn off the active relay
+        extern IoExpander ioExpander;
+        ioExpander.setRelay(RELAY_INDICES[activeButton], false);
     }
     activeButton = -1;
     currentState = STATE_IDLE;
@@ -165,9 +221,11 @@ void CarWashController::tokenExpired() {
 }
 
 void CarWashController::update() {
+    // Serial.println("CarWashController::update");
     if (config.timestamp == "") {
         return;
     }
+    // Serial.println("Handling buttons");
     handleButtons();
     unsigned long currentTime = millis();
     publishPeriodicState();
@@ -220,16 +278,52 @@ unsigned long CarWashController::getSecondsLeft() {
 }
 
 String CarWashController::getTimestamp() {
-    if (config.timestamp == "")
-        return "";
-
-    int year, month, day, hour, minute, second;
-    float fractional_seconds;
-
-    sscanf(config.timestamp.c_str(), "%d-%d-%dT%d:%d:%fZ",
-           &year, &month, &day, &hour, &minute, &fractional_seconds);
-    second = static_cast<int>(fractional_seconds);
-
+    // First, let's add some debug logging
+    Serial.print("Raw timestamp: ");
+    Serial.println(config.timestamp);
+    Serial.print("Timestamp millis: ");
+    Serial.println(config.timestampMillis);
+    Serial.print("Current millis: ");
+    Serial.println(millis());
+    
+    // If timestamp is empty, return early
+    if (config.timestamp.length() == 0) {
+        return "No timestamp";
+    }
+    
+    // Manual string parsing for reliability
+    String ts = config.timestamp;
+    int tPos = ts.indexOf('T');
+    int dotPos = ts.indexOf('.');
+    int plusPos = ts.indexOf('+');
+    
+    // Verify we have the expected format
+    if (tPos <= 0 || dotPos <= 0 || plusPos <= 0) {
+        Serial.println("Timestamp format invalid");
+        return "Invalid format";
+    }
+    
+    // Extract date components
+    int year = ts.substring(0, 4).toInt();
+    int month = ts.substring(5, 7).toInt();
+    int day = ts.substring(8, 10).toInt();
+    
+    // Extract time components
+    int hour = ts.substring(tPos+1, tPos+3).toInt();
+    int minute = ts.substring(tPos+4, tPos+6).toInt();
+    int second = ts.substring(tPos+7, tPos+9).toInt();
+    
+    // Extract microseconds
+    long microseconds = 0;
+    if (dotPos > 0 && plusPos > dotPos) {
+        microseconds = ts.substring(dotPos+1, plusPos).toInt();
+    }
+    
+    // Debug the parsed components
+    Serial.printf("Parsed: %d-%02d-%02d %02d:%02d:%02d.%06ld\n", 
+                  year, month, day, hour, minute, second, microseconds);
+    
+    // Set up the time structure
     tmElements_t tm;
     tm.Year = year - 1970;
     tm.Month = month;
@@ -237,21 +331,41 @@ String CarWashController::getTimestamp() {
     tm.Hour = hour;
     tm.Minute = minute;
     tm.Second = second;
-
+    
+    // Convert to epoch time
     time_t serverEpoch = makeTime(tm);
-
-    unsigned long millisOffset = millis() - config.timestampMillis;
+    Serial.print("Server epoch: ");
+    Serial.println(serverEpoch);
+    
+    // Calculate time elapsed since timestamp was set
+    unsigned long millisOffset = 0;
+    if (config.timestampMillis > 0) {
+        millisOffset = millis() - config.timestampMillis;
+    }
+    Serial.print("Millis offset: ");
+    Serial.println(millisOffset);
+    
+    // Adjust the time with the elapsed milliseconds
     time_t adjustedTime = serverEpoch + (millisOffset / 1000);
-    int extraMilliseconds = millisOffset % 1000;
-
+    int milliseconds = (microseconds / 1000) + (millisOffset % 1000);
+    while (milliseconds >= 1000) {
+        adjustedTime += 1;
+        milliseconds -= 1000;
+    }
+    
+    // Convert back to time components
     tmElements_t adjustedTm;
     breakTime(adjustedTime, adjustedTm);
-
-    char isoTimestamp[30];
+    
+    // Format the result
+    char isoTimestamp[40];
     sprintf(isoTimestamp, "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
             adjustedTm.Year + 1970, adjustedTm.Month, adjustedTm.Day,
-            adjustedTm.Hour, adjustedTm.Minute, adjustedTm.Second, extraMilliseconds);
-
+            adjustedTm.Hour, adjustedTm.Minute, adjustedTm.Second, milliseconds);
+    
+    Serial.print("Formatted timestamp: ");
+    Serial.println(isoTimestamp);
+    
     return String(isoTimestamp);
 }
 
@@ -308,4 +422,13 @@ void CarWashController::publishPeriodicState(bool force) {
 
         lastStatePublishTime = millis();
     }
+}
+
+// Add getter methods for controller state access
+MachineState CarWashController::getCurrentState() const {
+    return currentState;
+}
+
+bool CarWashController::isMachineLoaded() const {
+    return config.isLoaded;
 }

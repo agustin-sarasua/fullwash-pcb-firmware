@@ -383,6 +383,7 @@ void MqttLteClient::loop() {
     }
     // Always call the PubSubClient loop
     if (_mqttClient->connected()) {
+        // Serial.println("Calling MQTT loop...");
         _mqttClient->loop();
     }
 }

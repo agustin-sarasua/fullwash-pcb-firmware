@@ -55,6 +55,12 @@ void IoExpander::writeRegister(uint8_t reg, uint8_t value) {
 uint8_t IoExpander::readRegister(uint8_t reg) {
     if (!_initialized) return 0;
     
+    // Add more debugging for INPUT_PORT0 reads
+    bool isInputPortRead = (reg == INPUT_PORT0);
+    // if (isInputPortRead) {
+    //     Serial.print("Reading INPUT_PORT0... ");
+    // }
+    
     Wire.beginTransmission(_address);
     Wire.write(reg);
     uint8_t error = Wire.endTransmission();
@@ -76,7 +82,17 @@ uint8_t IoExpander::readRegister(uint8_t reg) {
         return 0;
     }
     
-    return Wire.read();
+    uint8_t value = Wire.read();
+    
+    // if (isInputPortRead) {
+    //     Serial.printf("Value: 0x%02X | Binary: ", value);
+    //     for (int i = 7; i >= 0; i--) {
+    //         Serial.print((value & (1 << i)) ? "1" : "0");
+    //     }
+    //     Serial.println();
+    // }
+    
+    return value;
 }
 
 void IoExpander::setRelay(uint8_t relay, bool state) {
@@ -96,24 +112,85 @@ void IoExpander::setRelay(uint8_t relay, bool state) {
 }
 
 bool IoExpander::readButton(uint8_t button) {
-    if (!_initialized || button > 5) return false; // Validate button number
-    
+    if (!_initialized || button > 5) {
+        Serial.printf("Button read error: initialized=%d, button=%d\n", _initialized, button);
+        return false; // Validate button number
+    }
     uint8_t portValue = readRegister(INPUT_PORT0);
-    return !(portValue & (1 << button)); // Buttons are active LOW
+    
+    // Force more debugging - print raw port value for each button read
+    // Serial.printf("Reading Button %d (pin): Raw port value: 0x%02X, Bit value: %d\n", 
+    //              button, portValue, (portValue & (1 << button)) ? 1 : 0);
+    
+    // For button 4 (BUTTON4 = 3), check specifically bit 3
+    // if (button == BUTTON4) {
+    //     Serial.printf("BUTTON4 detail: pin=%d, raw bit=%d, mask=0x%02X, test=%d\n", 
+    //                 button, 
+    //                 (portValue & (1 << button)) ? 1 : 0,
+    //                 (1 << button),
+    //                 (portValue & (1 << button)));
+    // }
+    bool buttonState = !(portValue & (1 << button)); // Buttons are active LOW
+    
+    // // Log button state for all buttons
+    // Serial.printf("Button %d (pin): Raw port value: 0x%02X, State: %s\n", 
+    //              button, portValue, buttonState ? "PRESSED" : "RELEASED");
+    
+    return buttonState;
 }
 
 void IoExpander::configurePortAsInput(uint8_t port, uint8_t mask) {
     if (!_initialized) return;
     
     uint8_t configReg = (port == 0) ? CONFIG_PORT0 : CONFIG_PORT1;
+    
+    Serial.printf("Configuring port %d as INPUT with mask: 0x%02X | Binary: ", port, mask);
+    for (int i = 7; i >= 0; i--) {
+        Serial.print((mask & (1 << i)) ? "1" : "0");
+    }
+    Serial.println();
+    
     writeRegister(configReg, mask); // 1 = input in config register
+    
+    // Verify configuration was applied correctly
+    uint8_t readBack = readRegister(configReg);
+    Serial.printf("Config verification - Port %d config read back: 0x%02X | Binary: ", port, readBack);
+    for (int i = 7; i >= 0; i--) {
+        Serial.print((readBack & (1 << i)) ? "1" : "0");
+    }
+    Serial.println();
+    
+    if (readBack != mask) {
+        Serial.printf("ERROR: Port %d config mismatch! Wrote 0x%02X but read back 0x%02X\n", port, mask, readBack);
+    }
 }
 
 void IoExpander::configurePortAsOutput(uint8_t port, uint8_t mask) {
     if (!_initialized) return;
     
     uint8_t configReg = (port == 0) ? CONFIG_PORT0 : CONFIG_PORT1;
-    writeRegister(configReg, ~mask); // 0 = output in config register
+    uint8_t configValue = ~mask; // 0 = output in config register
+    
+    Serial.printf("Configuring port %d as OUTPUT with mask: 0x%02X | Config value: 0x%02X | Binary: ", 
+                 port, mask, configValue);
+    for (int i = 7; i >= 0; i--) {
+        Serial.print((configValue & (1 << i)) ? "1" : "0");
+    }
+    Serial.println();
+    
+    writeRegister(configReg, configValue);
+    
+    // Verify configuration was applied correctly
+    uint8_t readBack = readRegister(configReg);
+    Serial.printf("Config verification - Port %d config read back: 0x%02X | Binary: ", port, readBack);
+    for (int i = 7; i >= 0; i--) {
+        Serial.print((readBack & (1 << i)) ? "1" : "0");
+    }
+    Serial.println();
+    
+    if (readBack != configValue) {
+        Serial.printf("ERROR: Port %d config mismatch! Wrote 0x%02X but read back 0x%02X\n", port, configValue, readBack);
+    }
 }
 
 bool IoExpander::toggleRelay(uint8_t relay) {
