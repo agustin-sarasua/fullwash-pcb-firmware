@@ -15,6 +15,7 @@ public:
     CarWashController(MqttLteClient& client);
     void handleMqttMessage(const char* topic, const uint8_t* payload, uint32_t len);
     void handleButtons();
+    void handleCoinAcceptor();
     void pauseMachine();
     void resumeMachine(int buttonIndex);
     void stopMachine(TriggerType triggerType = AUTOMATIC);
@@ -22,6 +23,7 @@ public:
     void tokenExpired();
     void update();
     void publishMachineSetupActionEvent();
+    void publishCoinInsertedEvent();
     
     // Getter methods
     MachineState getCurrentState() const;
@@ -47,8 +49,11 @@ private:
     unsigned long pauseStartTime;
 
     static const unsigned long DEBOUNCE_DELAY = 50;
+    static const unsigned long COIN_DEBOUNCE_DELAY = 100;
     unsigned long lastDebounceTime[NUM_BUTTONS + 1];
     int lastButtonState[NUM_BUTTONS + 1];
+    unsigned long lastCoinDebounceTime;
+    int lastCoinState;
 
     unsigned long lastStatePublishTime;
     const unsigned long STATE_PUBLISH_INTERVAL = 10000;

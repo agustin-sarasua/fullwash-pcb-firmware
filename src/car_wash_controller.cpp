@@ -9,7 +9,9 @@ CarWashController::CarWashController(MqttLteClient& client)
       tokenStartTime(0),
       lastStatePublishTime(0),
       tokenTimeElapsed(0),
-      pauseStartTime(0) {
+      pauseStartTime(0),
+      lastCoinDebounceTime(0),
+      lastCoinState(HIGH) {
 
     // Initialize LED pins - using built-in LED
     pinMode(LED_PIN_INIT, OUTPUT);
@@ -26,6 +28,7 @@ CarWashController::CarWashController(MqttLteClient& client)
     lastButtonState[NUM_BUTTONS-1] = HIGH;
 
     config.isLoaded = false;
+    config.physicalTokens = 0;
 }
 
 void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payload, unsigned len) {
@@ -40,6 +43,7 @@ void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payl
         config.userId = doc["user_id"].as<String>();
         config.userName = doc["user_name"].as<String>();
         config.tokens = doc["tokens"].as<int>();
+        config.physicalTokens = 0;  // No physical tokens when session is initialized remotely
         config.timestamp = doc["timestamp"].as<String>();
         config.timestampMillis = millis();
         config.isLoaded = true;
@@ -56,6 +60,7 @@ void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payl
         config.userId = "";
         config.userName = "";
         config.tokens = 0;
+        config.physicalTokens = 0;
         config.isLoaded = false;
     } else {
         LOG_WARNING("Unknown topic: %s", topic);
@@ -295,6 +300,11 @@ void CarWashController::activateButton(int buttonIndex, TriggerType triggerType)
     lastActionTime = millis();
     tokenStartTime = millis();
     tokenTimeElapsed = 0;
+    
+    // Prioritize using physical tokens first
+    if (config.physicalTokens > 0) {
+        config.physicalTokens--;
+    }
     config.tokens--;
 
     publishActionEvent(buttonIndex, ACTION_START, triggerType);
@@ -312,15 +322,86 @@ void CarWashController::tokenExpired() {
     // publishTokenExpiredEvent();
 }
 
+void CarWashController::handleCoinAcceptor() {
+    // Get reference to the IO expander
+    extern IoExpander ioExpander;
+
+    // Read the coin signal pin
+    uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
+    bool coinSignal = !(rawPortValue0 & (1 << COIN_SIG));  // Assuming active LOW like buttons
+    
+    // Debug the coin signal
+    LOG_DEBUG("Coin Signal (pin %d) state: %s", COIN_SIG, coinSignal ? "ACTIVE" : "INACTIVE");
+    
+    // Handle coin signal with debouncing
+    if (coinSignal) {
+        // If signal wasn't active before or enough time has passed since last detection
+        if (lastCoinState == HIGH || (millis() - lastCoinDebounceTime) > COIN_DEBOUNCE_DELAY * 5) {
+            // Record time of this signal
+            lastCoinDebounceTime = millis();
+            lastCoinState = LOW;  // Now active (assuming active LOW)
+            
+            LOG_INFO("Coin detected and debounced!");
+            
+            // Reset the last activity time - inserting a coin counts as user activity
+            lastActionTime = millis();
+            
+            // Process coin insertion
+            if (config.isLoaded) {
+                // If a session is already active, just add a token
+                LOG_INFO("Adding physical token to existing session");
+                config.physicalTokens++;
+                config.tokens++;
+                
+                // Publish coin inserted event
+                publishCoinInsertedEvent();
+            } else {
+                // No active session, create a new "manual" session
+                LOG_INFO("Creating new manual session from coin insertion");
+                
+                // Generate a manual session ID with current timestamp
+                char sessionIdBuffer[30];
+                sprintf(sessionIdBuffer, "manual_%lu", millis());
+                
+                config.sessionId = String(sessionIdBuffer);
+                config.userId = "unknown";
+                config.userName = "";
+                config.physicalTokens = 1;  // Start with 1 physical token
+                config.tokens = 1;
+                // config.timestamp = getTimestamp();
+                // config.timestampMillis = millis();
+                config.isLoaded = true;
+                
+                // Change state to IDLE and turn on LED
+                currentState = STATE_IDLE;
+                digitalWrite(LED_PIN_INIT, HIGH);
+                
+                // Publish coin inserted event
+                publishCoinInsertedEvent();
+            }
+        }
+    } else {
+        // Signal is inactive
+        if (lastCoinState == LOW) {
+            LOG_DEBUG("Coin signal INACTIVE");
+        }
+        lastCoinState = HIGH;  // Not active (idle HIGH)
+    }
+}
+
 void CarWashController::update() {
     // Serial.println("CarWashController::update");
     if (config.timestamp == "") {
         return;
     }
-    // Serial.println("Handling buttons");
+    
+    // Handle buttons and coin acceptor
     handleButtons();
+    handleCoinAcceptor();
+    
     unsigned long currentTime = millis();
     publishPeriodicState();
+    
     if (currentState == STATE_RUNNING) {
         unsigned long totalElapsedTime = tokenTimeElapsed + (currentTime - tokenStartTime);
         if (totalElapsedTime >= TOKEN_TIME) {
@@ -329,6 +410,7 @@ void CarWashController::update() {
             return;
         }
     }
+    
     if (currentTime - lastActionTime > USER_INACTIVE_TIMEOUT && currentState != STATE_FREE) {
         LOG_INFO("Stopping machine due to user inactivity");
         stopMachine(AUTOMATIC);
@@ -455,6 +537,27 @@ String CarWashController::getTimestamp() {
     return String(isoTimestamp);
 }
 
+void CarWashController::publishCoinInsertedEvent() {
+    if (!config.isLoaded) return;
+
+    StaticJsonDocument<512> doc;
+
+    doc["machine_id"] = MACHINE_ID;
+    doc["timestamp"] = getTimestamp();
+    doc["action"] = getMachineActionString(ACTION_COIN_INSERTED);
+    doc["trigger_type"] = "MANUAL";
+    doc["session_id"] = config.sessionId;
+    doc["user_id"] = config.userId;
+    doc["token_channel"] = "PHYSICAL";
+    doc["tokens_left"] = config.tokens;
+    doc["physical_tokens"] = config.physicalTokens;
+
+    String jsonString;
+    serializeJson(doc, jsonString);
+
+    mqttClient.publish(ACTION_TOPIC.c_str(), jsonString.c_str(), QOS1_AT_LEAST_ONCE);
+}
+
 void CarWashController::publishActionEvent(int buttonIndex, MachineAction machineAction, TriggerType triggerType) {
     if (!config.isLoaded) return;
 
@@ -467,8 +570,9 @@ void CarWashController::publishActionEvent(int buttonIndex, MachineAction machin
     doc["button_name"] = String("BUTTON_") + String(buttonIndex + 1);
     doc["session_id"] = config.sessionId;
     doc["user_id"] = config.userId;
-    doc["token_channel"] = "PHYSICAL";
+    doc["token_channel"] = (config.physicalTokens > 0) ? "PHYSICAL" : "DIGITAL";
     doc["tokens_left"] = config.tokens;
+    doc["physical_tokens"] = config.physicalTokens;
 
     if (currentState == STATE_RUNNING) {
         doc["seconds_left"] = getSecondsLeft();
@@ -495,6 +599,7 @@ void CarWashController::publishPeriodicState(bool force) {
             sessionMetadata["user_id"] = config.userId;
             sessionMetadata["user_name"] = config.userName;
             sessionMetadata["tokens_left"] = config.tokens;
+            sessionMetadata["physical_tokens"] = config.physicalTokens;
             sessionMetadata["timestamp"] = config.timestamp;
             if (tokenStartTime > 0) {
                 sessionMetadata["seconds_left"] = getSecondsLeft();
