@@ -1,14 +1,18 @@
 #include <Arduino.h>
+#include <Wire.h>
 #include "mqtt_lte_client.h"
 #include "io_expander.h"
 #include "utilities.h"
 #include "constants.h"
 #include "car_wash_controller.h"
 #include "logger.h"
+#include "display_manager.h"
 
 #include "certs/AmazonRootCA.h"
 #include "certs/AWSClientCertificate.h"
 #include "certs/AWSClientPrivateKey.h"
+
+// Wire1 is already defined in the ESP32 Arduino framework
 
 // Server details
 const char* AWS_BROKER = "a3foc0mc6v7ap0-ats.iot.us-east-1.amazonaws.com";
@@ -27,7 +31,11 @@ MqttLteClient mqttClient(SerialAT, MODEM_PWRKEY, MODEM_DTR, MODEM_FLIGHT, MODEM_
 // Create IO Expander
 IoExpander ioExpander(TCA9535_ADDR, I2C_SDA_PIN, I2C_SCL_PIN, INT_PIN);
 
+// Create controller
 CarWashController* controller;
+
+// Create display manager
+DisplayManager* display;
 
 // Button states
 bool buttonState = false;
@@ -112,6 +120,12 @@ void setup() {
     LOG_INFO("TCA9535 fully initialized. Ready to control relays and read buttons.");
   }
   controller = new CarWashController(mqttClient);
+  
+  // Initialize Wire1 for the LCD display
+  Wire1.begin(LCD_SDA_PIN, LCD_SCL_PIN);
+  
+  // Initialize the display with correct LCD pins
+  display = new DisplayManager(LCD_ADDR, LCD_COLS, LCD_ROWS, LCD_SDA_PIN, LCD_SCL_PIN);
   // Initialize MQTT client with callback
   mqttClient.setCallback(mqtt_callback);
   mqttClient.setBufferSize(512);
@@ -263,6 +277,11 @@ void loop() {
     if (controller) {
       controller->update();
     }
+  }
+  
+  // Update display with current state
+  if (display && controller) {
+    display->update(controller);
   }
   
   // Handle LED indicator

@@ -436,3 +436,18 @@ void CarWashController::setLogLevel(LogLevel level) {
     
     Logger::setLogLevel(level);
 }
+
+unsigned long CarWashController::getTimeToInactivityTimeout() const {
+    if (currentState == STATE_FREE || !config.isLoaded) {
+        return 0;
+    }
+    
+    unsigned long elapsedTime = millis() - lastActionTime;
+    if (elapsedTime >= USER_INACTIVE_TIMEOUT) {
+        return 0;
+    }
+    
+    return USER_INACTIVE_TIMEOUT - elapsedTime;
+}
+
+// getTokensLeft and getUserName are implemented as inline methods in the header

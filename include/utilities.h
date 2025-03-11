@@ -61,4 +61,11 @@
 
 #define GSM_PIN          "3846"
 
+// LCD Configuration
+#define LCD_ADDR         0x27 // Default I2C address for most PCF8574 LCD adapters
+#define LCD_COLS         20   // 20 characters per line
+#define LCD_ROWS         4    // 4 lines display
+#define LCD_SDA_PIN      21   // Separate I2C pins for LCD
+#define LCD_SCL_PIN      22   // Separate I2C pins for LCD
+
 #endif // UTILITIES_H
