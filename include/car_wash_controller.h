@@ -28,6 +28,12 @@ public:
     bool isMachineLoaded() const;
     String getTimestamp();
     void setLogLevel(LogLevel level);
+    
+    // Additional getters for LCD display
+    String getUserName() const { return config.userName; }
+    int getTokensLeft() const { return config.tokens; }
+    unsigned long getTimeToInactivityTimeout() const;
+    unsigned long getSecondsLeft();
 
 private:
     MqttLteClient& mqttClient;
@@ -47,7 +53,6 @@ private:
     unsigned long lastStatePublishTime;
     const unsigned long STATE_PUBLISH_INTERVAL = 10000;
 
-    unsigned long getSecondsLeft();
     void publishActionEvent(int buttonIndex, MachineAction machineAction, TriggerType triggerType = MANUAL);
     void publishPeriodicState(bool force = false);
 };
