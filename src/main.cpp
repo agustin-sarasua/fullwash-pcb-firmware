@@ -50,19 +50,6 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, HIGH); // Turn ON LED to show power
   
-  // Serial.println("\n\n");
-  // Serial.println("======================================");
-  // Serial.println("ESP32 TCA9535 I/O Expander Debug Mode");
-  // Serial.println("======================================");
-  
-  // // Blink LED to show we've reached this point
-  // for (int i = 0; i < 3; i++) {
-  //   digitalWrite(LED_PIN, LOW);
-  //   delay(100);
-  //   digitalWrite(LED_PIN, HIGH);
-  //   delay(100);
-  // }
-  
   // Initialize the I/O expander
   Serial.println("Trying to initialize TCA9535...");
   bool initSuccess = ioExpander.begin();
@@ -126,6 +113,7 @@ void setup() {
       result = mqttClient.subscribe(CONFIG_TOPIC.c_str());
       Serial.print("Subscription result:");
       Serial.println(result);
+      delay(4000);
       Serial.println("Publishing Setup Action Event...");
       controller->publishMachineSetupActionEvent();
     } else {
@@ -187,6 +175,7 @@ void loop() {
             
             // Notify that we're back online
             if (controller) {
+                delay(4000);
                 controller->publishMachineSetupActionEvent();
             }
           }
