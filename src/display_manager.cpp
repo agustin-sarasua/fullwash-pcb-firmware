@@ -179,21 +179,24 @@ void DisplayManager::displayRunningState(CarWashController* controller) {
 }
 
 void DisplayManager::displayPausedState(CarWashController* controller) {
-    // Check if tokens or username or time changed
+    // Always update display when transitioning to PAUSED state
     int tokens = controller->getTokensLeft();
     String userName = controller->getUserName();
     unsigned long secondsLeft = controller->getSecondsLeft();
     
+    // Force update when entering PAUSED state from another state
+    bool forceUpdate = (lastState != STATE_PAUSED);
     bool contentChanged = (tokens != lastTokens) || 
                          (userName != lastUserName) ||
                          (secondsLeft != lastSecondsLeft);
     
-    if (!contentChanged && lastState == STATE_PAUSED) return;
+    if (!contentChanged && !forceUpdate && lastState == STATE_PAUSED) return;
     
     lastTokens = tokens;
     lastUserName = userName;
     lastSecondsLeft = secondsLeft;
     
+    // Clear display and redraw everything
     lcd.clear();
     
     // Truncate username if it's too long
@@ -213,5 +216,8 @@ void DisplayManager::displayPausedState(CarWashController* controller) {
     lcd.print("Tiempo: ");
     lcd.print(formatTime(secondsLeft));
     
+    // Make sure PAUSADA is visible by forcing redraw
+    lcd.setCursor(0, 3);
+    lcd.print("                "); // Clear line
     displayCentered("PAUSADA", 3);
 }

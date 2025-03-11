@@ -66,35 +66,45 @@ void CarWashController::handleButtons() {
     // Get reference to the IO expander (assumed to be a global or accessible)
     extern IoExpander ioExpander;
 
-    // Enhanced debugging for button 4
-    uint8_t rawPortValue = ioExpander.readRegister(INPUT_PORT0);
-    bool bt4RawState = !(rawPortValue & (1 << BUTTON4));
-    // Serial.printf("CarWashController::handleButtons - Direct Button 4 check: Raw port: 0x%02X, State: %s\n", 
-    //              rawPortValue, bt4RawState ? "PRESSED" : "RELEASED");
-
-    // Read all 5 function buttons
+    // Dump raw port values for debugging
+    uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
+    
+    // Print raw state for debugging
+    LOG_DEBUG("BUTTON DEBUG - Raw Port0: 0x%02X (Binary: %d%d%d%d%d%d)\n", 
+                 rawPortValue0,
+                 !(rawPortValue0 & (1 << BUTTON1)) ? 1 : 0,  // Button 1 bit
+                 !(rawPortValue0 & (1 << BUTTON2)) ? 1 : 0,  // Button 2 bit
+                 !(rawPortValue0 & (1 << BUTTON3)) ? 1 : 0,  // Button 3 bit
+                 !(rawPortValue0 & (1 << BUTTON4)) ? 1 : 0,  // Button 4 bit
+                 !(rawPortValue0 & (1 << BUTTON5)) ? 1 : 0,  // Button 5 bit
+                 !(rawPortValue0 & (1 << BUTTON6)) ? 1 : 0); // Button 6 bit
+    
+    // Read all 5 function buttons - using simple approach
     for (int i = 0; i < NUM_BUTTONS-1; i++) {  // -1 because last button is STOP button
-        bool reading = ioExpander.readButton(BUTTON_INDICES[i]);
+        int buttonPin = BUTTON_INDICES[i];
         
-        // Enhanced debugging for button 4
-        // if (i == 3) { // Button 4 is index 3
-        //     Serial.printf("Button 4 processing: reading=%d, lastState=%d, index=%d, BUTTON_INDICES[i]=%d\n", 
-        //                  reading, lastButtonState[i] == LOW, i, BUTTON_INDICES[i]);
-        // }
+        // Check if button is pressed (active LOW in the IO expander)
+        bool buttonPressed = !(rawPortValue0 & (1 << buttonPin));
         
-        // Log any change in button state (press or release)
-        if (reading != (lastButtonState[i] == LOW)) {
-            // Serial.printf("Button %d state changed: reading=%d, lastState=%d\n", 
-            //              i+1, reading, lastButtonState[i] == LOW);
-            lastDebounceTime[i] = millis();
-        }
+        // Print state for each button
+        LOG_DEBUG("Button %d (pin %d) state: %s\n", 
+                     i+1, buttonPin, buttonPressed ? "PRESSED" : "RELEASED");
         
-        if ((millis() - lastDebounceTime[i]) > DEBOUNCE_DELAY) {
-            // Button is pressed when reading is true (active LOW in IO expander)
-            if (reading) {
-                // Serial.printf("Button %d debounced press detected! isLoaded=%d, state=%d\n", 
-                //              i+1, config.isLoaded, currentState);
+        // Handle button press with debouncing
+        if (buttonPressed) {
+            // If button wasn't pressed before or enough time has passed since last action
+            if (lastButtonState[i] == HIGH || 
+                (millis() - lastDebounceTime[i]) > DEBOUNCE_DELAY * 5) {
                 
+                // Record time of this press
+                lastDebounceTime[i] = millis();
+                lastButtonState[i] = LOW;  // Now pressed (active LOW)
+                
+                // Print debug info
+                // Serial.printf("* BUTTON %d PRESSED AND DEBOUNCED *\n", i+1);
+                LOG_INFO("Button %d pressed and debounced!", i+1);
+                
+                // Process button action
                 if (config.isLoaded) {
                     if (currentState == STATE_IDLE) {
                         LOG_INFO("Activating button %d in IDLE state", i+1);
@@ -113,25 +123,37 @@ void CarWashController::handleButtons() {
                     LOG_WARNING("Button press ignored - config not loaded!");
                 }
             }
+        } else {
+            // Button is released
+            if (lastButtonState[i] == LOW) {
+                Serial.printf("Button %d RELEASED\n", i+1);
+            }
+            lastButtonState[i] = HIGH;  // Not pressed (idle HIGH)
         }
-        
-        lastButtonState[i] = reading ? LOW : HIGH;  // Convert to match active low logic
     }
 
-    // Handle stop button (BUTTON6)
-    bool stopReading = ioExpander.readButton(STOP_BUTTON_PIN);
+    // Handle stop button (BUTTON6) - using the same approach as other buttons
+    bool stopButtonPressed = !(rawPortValue0 & (1 << STOP_BUTTON_PIN));
     
-    // Log any change in stop button state
-    if (stopReading != (lastButtonState[NUM_BUTTONS-1] == LOW)) {
-        // Serial.printf("STOP button state changed: reading=%d, lastState=%d\n", 
-        //              stopReading, lastButtonState[NUM_BUTTONS-1] == LOW);
-        lastDebounceTime[NUM_BUTTONS-1] = millis();
-    }
+    // Print debug for stop button
+    LOG_DEBUG("STOP Button (pin %d) state: %s\n", 
+                 STOP_BUTTON_PIN, stopButtonPressed ? "PRESSED" : "RELEASED");
     
-    if ((millis() - lastDebounceTime[NUM_BUTTONS-1]) > DEBOUNCE_DELAY) {
-        if (stopReading) {
-            LOG_DEBUG("STOP button debounced press detected! Current state=%d", currentState);
+    // Handle stop button press with debouncing
+    if (stopButtonPressed) {
+        // If button wasn't pressed before or enough time has passed
+        if (lastButtonState[NUM_BUTTONS-1] == HIGH || 
+            (millis() - lastDebounceTime[NUM_BUTTONS-1]) > DEBOUNCE_DELAY * 5) {
             
+            // Record time of this press
+            lastDebounceTime[NUM_BUTTONS-1] = millis();
+            lastButtonState[NUM_BUTTONS-1] = LOW;  // Now pressed (active LOW)
+            
+            // Print debug info
+            Serial.printf("** STOP BUTTON PRESSED AND DEBOUNCED **\n");
+            LOG_INFO("STOP button pressed and debounced!");
+            
+            // Process button action
             if (currentState == STATE_RUNNING) {
                 LOG_INFO("Stopping machine via STOP button");
                 stopMachine(MANUAL);
@@ -139,9 +161,13 @@ void CarWashController::handleButtons() {
                 LOG_WARNING("STOP button pressed but ignored - not in running state (state=%d)", currentState);
             }
         }
+    } else {
+        // Button is released
+        if (lastButtonState[NUM_BUTTONS-1] == LOW) {
+            Serial.printf("STOP Button RELEASED\n");
+        }
+        lastButtonState[NUM_BUTTONS-1] = HIGH;  // Not pressed (idle HIGH)
     }
-    
-    lastButtonState[NUM_BUTTONS-1] = stopReading ? LOW : HIGH;
 }
 
 void CarWashController::pauseMachine() {
