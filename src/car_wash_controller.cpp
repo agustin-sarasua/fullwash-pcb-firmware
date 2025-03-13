@@ -145,8 +145,8 @@ void CarWashController::handleButtons() {
     bool stopButtonPressed = !(rawPortValue0 & (1 << STOP_BUTTON_PIN));
     
     // Print debug for stop button
-    LOG_DEBUG("STOP Button (pin %d) state: %s\n", 
-                 STOP_BUTTON_PIN, stopButtonPressed ? "PRESSED" : "RELEASED");
+    // LOG_DEBUG("STOP Button (pin %d) state: %s\n", 
+    //              STOP_BUTTON_PIN, stopButtonPressed ? "PRESSED" : "RELEASED");
     
     // Handle stop button press with debouncing
     if (stopButtonPressed) {
@@ -359,99 +359,75 @@ void CarWashController::handleCoinAcceptor() {
     // Read raw port value
     uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
     
-    // Focus on SIGNAL pin only - from logs it's clear SIG pin is toggling with coins
+    // Get current state of coin signal pin
     bool coinSignalActiveLow = !(rawPortValue0 & (1 << COIN_SIG));
     
-    // *** SIMPLIFIED APPROACH BASED ON FINAL LOGS ***
-    // Looking at your logs, we see a pattern when coins are inserted:
-    // LOW -> HIGH quickly followed by HIGH -> LOW
+    // *** IMPROVED EDGE DETECTION APPROACH ***
+    // This approach is more generic and works with various coin acceptor signal patterns
     
-    // Static variables to track transitions
-    static unsigned long lastTransitionTime = 0;
-    static unsigned long lastHighToLowTime = 0;
+    // Static variables to track edges and timing patterns
+    static unsigned long lastEdgeTime = 0;
+    static int edgeCount = 0;
+    static unsigned long edgeWindowStart = 0;
     
-    // Detect signal changes
+    // Only process this signal if the state has changed (this is an edge)
     if (coinSignalActiveLow != lastCoinState) {
-        // Log all transitions
-        LOG_INFO("Coin signal changed: %s -> %s", 
+        // Log transition for debugging
+        LOG_INFO("Coin signal edge: %s -> %s", 
                 lastCoinState ? "LOW" : "HIGH", 
                 coinSignalActiveLow ? "LOW" : "HIGH");
         
-        unsigned long timeSinceLastTransition = currentTime - lastTransitionTime;
-        lastTransitionTime = currentTime;
+        // Calculate timing between edges
+        unsigned long timeSinceLastEdge = currentTime - lastEdgeTime;
+        lastEdgeTime = currentTime;
         
-        // FALLING EDGE (HIGH to LOW) after a RISING EDGE (LOW to HIGH)
-        // This seems to be the pattern when a coin is inserted
-        if (coinSignalActiveLow && !lastCoinState) {
-            // This is a HIGH to LOW transition
+        // Start a new counting window if this is the first edge or it's been a while
+        if (edgeCount == 0 || currentTime - edgeWindowStart > 1000) {
+            edgeWindowStart = currentTime;
+            edgeCount = 1;
+        } else {
+            // Count this edge
+            edgeCount++;
             
-            // Check if it happened quickly after a LOW to HIGH transition
-            // (which would indicate a coin insertion)
-            unsigned long timeSinceLastLowToHigh = currentTime - lastTransitionTime + timeSinceLastTransition;
+            // Calculate how long the window has been going
+            unsigned long windowDuration = currentTime - edgeWindowStart;
             
-            if (timeSinceLastTransition < 200) {  // Less than 200ms between transitions
-                LOG_INFO("Quick transition pattern detected - likely a coin!");
+            // Look for these patterns that might indicate a coin:
+            // Multiple edges within a configurable time window (typical for most coin acceptors)
+            if (edgeCount >= COIN_MIN_EDGES && windowDuration < COIN_EDGE_WINDOW && 
+                currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
                 
-                // Check if this could be a unique coin insertion (not just signal bounce)
-                if (currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
-                    LOG_INFO("Processing coin insertion");
-                    processCoinInsertion(currentTime);
-                } else {
-                    LOG_INFO("Skipping coin - too soon after last (%lu ms < %lu ms)",
-                           currentTime - lastCoinProcessedTime, COIN_PROCESS_COOLDOWN);
-                }
+                LOG_INFO("Detected coin pattern: %d edges in %lu ms window", 
+                        edgeCount, windowDuration);
+                
+                // Process the coin and reset our edge tracking
+                processCoinInsertion(currentTime);
+                edgeCount = 0;
             }
             
-            lastHighToLowTime = currentTime;
+            // Prevent overflow by resetting if we somehow get too many edges without detection
+            if (edgeCount > 10) {
+                edgeCount = 0;
+            }
         }
         
-        // Update state tracking
+        // Update state for next comparison
         lastCoinState = coinSignalActiveLow;
     }
     
-    // Additional method: if no transitions are detected for some time, 
-    // but we observe changes every ~500-1000ms when coins are inserted,
-    // add a simple timer-based detection as a fallback
-    static unsigned long lastCoinCheckTime = 0;
-    if (currentTime - lastCoinCheckTime > 250) {  // Check every 250ms
-        lastCoinCheckTime = currentTime;
-        
-        // If no coin processed recently, check for activity
-        if (currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
-            // Count transitions in the last second
-            static int recentTransitions = 0;
-            static unsigned long transitionWindowStart = 0;
-            
-            // Reset counter periodically
-            if (currentTime - transitionWindowStart > 1000) {
-                transitionWindowStart = currentTime;
-                
-                // If we saw 2-4 transitions in the last second, that's likely a coin
-                if (recentTransitions >= 2 && recentTransitions <= 6) {
-                    LOG_INFO("Detected %d transitions in 1 second - likely a coin!", recentTransitions);
-                    
-                    if (currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
-                        LOG_INFO("Processing coin based on transition frequency");
-                        processCoinInsertion(currentTime);
-                    }
-                }
-                
-                recentTransitions = 0;
-            }
-            
-            // Count this transition if one occurred
-            if (currentTime - lastTransitionTime < 250) {
-                recentTransitions++;
-            }
-        }
+    // Reset edge detection if it's been too long without completing a pattern
+    if (edgeCount > 0 && currentTime - edgeWindowStart > 1000) {
+        LOG_DEBUG("Resetting incomplete edge pattern after timeout");
+        edgeCount = 0;
     }
     
-    // Periodic debug info
+    // Periodic debug logging
     static unsigned long lastDebugTime = 0;
     if (currentTime - lastDebugTime > 5000) { // Every 5 seconds to reduce noise
         lastDebugTime = currentTime;
-        LOG_DEBUG("Coin state: SIG=%s, LastProcessed=%lums ago", 
+        LOG_DEBUG("Coin acceptor: Signal=%s, EdgeCount=%d, LastProcess=%lums ago", 
                 coinSignalActiveLow ? "LOW" : "HIGH",
+                edgeCount,
                 currentTime - lastCoinProcessedTime);
     }
 }
