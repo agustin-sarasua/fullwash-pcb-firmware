@@ -8,7 +8,7 @@ String getMachineActionString(MachineAction action) {
         case ACTION_STOP: return "STOP";
         case ACTION_PAUSE: return "PAUSE";
         case ACTION_RESUME: return "RESUME";
-        case ACTION_COIN_INSERTED: return "COIN_INSERTED";
+        case ACTION_TOKEN_INSERTED: return "TOKEN_INSERTED";
         default: return "START";
     }
 }

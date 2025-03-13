@@ -544,7 +544,7 @@ void CarWashController::publishCoinInsertedEvent() {
 
     doc["machine_id"] = MACHINE_ID;
     doc["timestamp"] = getTimestamp();
-    doc["action"] = getMachineActionString(ACTION_COIN_INSERTED);
+    doc["action"] = getMachineActionString(ACTION_TOKEN_INSERTED);
     doc["trigger_type"] = "MANUAL";
     doc["session_id"] = config.sessionId;
     doc["user_id"] = config.userId;

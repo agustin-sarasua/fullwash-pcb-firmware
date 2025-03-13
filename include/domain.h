@@ -36,7 +36,7 @@ enum MachineAction {
     ACTION_STOP,
     ACTION_PAUSE,
     ACTION_RESUME,
-    ACTION_COIN_INSERTED
+    ACTION_TOKEN_INSERTED
 };
 
 // Function declarations
