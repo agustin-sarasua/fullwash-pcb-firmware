@@ -50,6 +50,10 @@
 #define BUTTON5          1   // BT5 is on P04
 #define BUTTON6          0   // BT6 is on P05
 
+// Coin acceptor pins on TCA9535 (Port 0)
+#define COIN_SIG         7   // P06 - Coin signal
+#define COIN_CNT         6   // P07 - Coin counter
+
 // Relay pins on TCA9535 (Port 1)
 #define RELAY1           0   // P10 - clear water
 #define RELAY2           1   // P11 - Foam

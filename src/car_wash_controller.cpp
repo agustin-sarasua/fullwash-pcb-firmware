@@ -9,7 +9,26 @@ CarWashController::CarWashController(MqttLteClient& client)
       tokenStartTime(0),
       lastStatePublishTime(0),
       tokenTimeElapsed(0),
-      pauseStartTime(0) {
+      pauseStartTime(0),
+      lastCoinDebounceTime(0),
+      lastCoinProcessedTime(0),
+      lastCoinState(HIGH) {
+          
+    // Force a read of the coin signal pin at startup to initialize correctly
+    extern IoExpander ioExpander;
+    uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
+    bool initialCoinSignal = !(rawPortValue0 & (1 << COIN_SIG));
+    lastCoinState = initialCoinSignal ? LOW : HIGH;
+    LOG_INFO("Coin detector initialized with state: %s", initialCoinSignal ? "ACTIVE" : "INACTIVE");
+    
+    // Check coin counter pin - optional hardware counter for coins
+    bool counterSignal = !(rawPortValue0 & (1 << COIN_CNT));
+    LOG_INFO("Coin counter initialized with state: %s", counterSignal ? "ACTIVE" : "INACTIVE");
+    
+    // IMPORTANT: Initialize these static variables to prevent false triggers at startup
+    // We'll skip any coin signals that happen in the first 2 seconds after boot
+    lastCoinProcessedTime = millis();
+    lastCoinDebounceTime = millis();
 
     // Initialize LED pins - using built-in LED
     pinMode(LED_PIN_INIT, OUTPUT);
@@ -26,6 +45,7 @@ CarWashController::CarWashController(MqttLteClient& client)
     lastButtonState[NUM_BUTTONS-1] = HIGH;
 
     config.isLoaded = false;
+    config.physicalTokens = 0;
 }
 
 void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payload, unsigned len) {
@@ -40,6 +60,7 @@ void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payl
         config.userId = doc["user_id"].as<String>();
         config.userName = doc["user_name"].as<String>();
         config.tokens = doc["tokens"].as<int>();
+        config.physicalTokens = 0;  // No physical tokens when session is initialized remotely
         config.timestamp = doc["timestamp"].as<String>();
         config.timestampMillis = millis();
         config.isLoaded = true;
@@ -56,6 +77,7 @@ void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payl
         config.userId = "";
         config.userName = "";
         config.tokens = 0;
+        config.physicalTokens = 0;
         config.isLoaded = false;
     } else {
         LOG_WARNING("Unknown topic: %s", topic);
@@ -123,8 +145,8 @@ void CarWashController::handleButtons() {
     bool stopButtonPressed = !(rawPortValue0 & (1 << STOP_BUTTON_PIN));
     
     // Print debug for stop button
-    LOG_DEBUG("STOP Button (pin %d) state: %s\n", 
-                 STOP_BUTTON_PIN, stopButtonPressed ? "PRESSED" : "RELEASED");
+    // LOG_DEBUG("STOP Button (pin %d) state: %s\n", 
+    //              STOP_BUTTON_PIN, stopButtonPressed ? "PRESSED" : "RELEASED");
     
     // Handle stop button press with debouncing
     if (stopButtonPressed) {
@@ -295,6 +317,11 @@ void CarWashController::activateButton(int buttonIndex, TriggerType triggerType)
     lastActionTime = millis();
     tokenStartTime = millis();
     tokenTimeElapsed = 0;
+    
+    // Prioritize using physical tokens first
+    if (config.physicalTokens > 0) {
+        config.physicalTokens--;
+    }
     config.tokens--;
 
     publishActionEvent(buttonIndex, ACTION_START, triggerType);
@@ -312,15 +339,201 @@ void CarWashController::tokenExpired() {
     // publishTokenExpiredEvent();
 }
 
+void CarWashController::handleCoinAcceptor() {
+    // Get reference to the IO expander
+    extern IoExpander ioExpander;
+
+    // Get current time for all timing operations
+    unsigned long currentTime = millis();
+    
+    // Skip startup period to avoid false triggers
+    static bool startupPeriod = true;
+    if (startupPeriod) {
+        if (currentTime < 3000) { // Skip first 3 seconds
+            return;
+        }
+        startupPeriod = false;
+        LOG_INFO("Coin detector startup period over, now actively monitoring");
+    }
+    
+    // NEW APPROACH: Check if the interrupt handler detected a coin signal
+    if (ioExpander.isCoinSignalDetected()) {
+        LOG_INFO("Interrupt-based coin signal detected!");
+        
+        // Read the current state to get more details
+        uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
+        bool coinSignalActiveLow = !(rawPortValue0 & (1 << COIN_SIG));
+        bool coinCounterActiveLow = !(rawPortValue0 & (1 << COIN_CNT));
+        
+        LOG_DEBUG("Coin pins state - SIG: %s, CNT: %s", 
+                coinSignalActiveLow ? "ACTIVE" : "INACTIVE",
+                coinCounterActiveLow ? "ACTIVE" : "INACTIVE");
+        
+        // Only process the coin if it's been long enough since the last coin
+        if (currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
+            LOG_INFO("Processing coin from interrupt detection");
+            processCoinInsertion(currentTime);
+        } else {
+            LOG_DEBUG("Ignoring coin signal - too soon after last coin (%lu ms)",
+                    currentTime - lastCoinProcessedTime);
+        }
+        
+        // Clear the flag for next detection
+        ioExpander.clearCoinSignalFlag();
+        return;
+    }
+    
+    // FALLBACK: Still include the original polling method as a backup
+    // This is especially important during development or if interrupts aren't reliable
+    
+    // Read raw port value
+    uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
+    
+    // Get current state of both coin signal pins
+    bool coinSignalActiveLow = !(rawPortValue0 & (1 << COIN_SIG));
+    bool coinCounterActiveLow = !(rawPortValue0 & (1 << COIN_CNT));
+    
+    // Track the counter signal state 
+    static bool lastCounterState = false;
+    static unsigned long counterActiveSince = 0;
+    
+    // Static variables to track edges and timing patterns
+    static unsigned long lastEdgeTime = 0;
+    static int edgeCount = 0;
+    static unsigned long edgeWindowStart = 0;
+    
+    // PART 1: Counter-based detection (COIN_CNT pin)
+    if (coinCounterActiveLow != lastCounterState) {
+        LOG_INFO("Counter signal changed: %s -> %s", 
+                lastCounterState ? "LOW" : "HIGH", 
+                coinCounterActiveLow ? "LOW" : "HIGH");
+        
+        if (coinCounterActiveLow && !lastCounterState) {
+            counterActiveSince = currentTime;
+            LOG_INFO("Counter signal ACTIVE - potential valid coin");
+            
+            if (currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
+                LOG_INFO("Valid coin detected via counter signal!");
+                processCoinInsertion(currentTime);
+                
+                edgeCount = 0;
+            }
+        }
+        
+        lastCounterState = coinCounterActiveLow;
+    }
+    
+    // PART 2: Signal-based edge detection (COIN_SIG pin)
+    if (coinSignalActiveLow != lastCoinState) {
+        LOG_INFO("Coin signal edge: %s -> %s", 
+                lastCoinState ? "LOW" : "HIGH", 
+                coinSignalActiveLow ? "LOW" : "HIGH");
+        
+        unsigned long timeSinceLastEdge = currentTime - lastEdgeTime;
+        lastEdgeTime = currentTime;
+        
+        if (edgeCount == 0 || currentTime - edgeWindowStart > 1000) {
+            edgeWindowStart = currentTime;
+            edgeCount = 1;
+        } else {
+            edgeCount++;
+            
+            unsigned long windowDuration = currentTime - edgeWindowStart;
+            
+            if (edgeCount >= COIN_MIN_EDGES && windowDuration < COIN_EDGE_WINDOW && 
+                currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
+                
+                LOG_INFO("Detected coin pattern: %d edges in %lu ms window", 
+                        edgeCount, windowDuration);
+                
+                processCoinInsertion(currentTime);
+                edgeCount = 0;
+            }
+            
+            if (edgeCount > 10) {
+                edgeCount = 0;
+            }
+        }
+        
+        lastCoinState = coinSignalActiveLow;
+    }
+    
+    // Reset edge detection if it's been too long
+    if (edgeCount > 0 && currentTime - edgeWindowStart > 1000) {
+        LOG_DEBUG("Resetting incomplete edge pattern after timeout");
+        edgeCount = 0;
+    }
+    
+    // PART 3: Special case for long-active counter signal
+    if (coinCounterActiveLow && counterActiveSince > 0) {
+        unsigned long counterActiveDuration = currentTime - counterActiveSince;
+        
+        if (counterActiveDuration > COUNTER_ACTIVE_DURATION && 
+            currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
+            LOG_INFO("Detected sustained counter signal (%lu ms) - processing coin", counterActiveDuration);
+            processCoinInsertion(currentTime);
+            counterActiveSince = 0;
+        }
+    }
+    
+    // Periodic debug logging
+    static unsigned long lastDebugTime = 0;
+    if (currentTime - lastDebugTime > 5000) {
+        lastDebugTime = currentTime;
+        LOG_DEBUG("Coin acceptor: Signal=%s, Counter=%s, EdgeCount=%d, LastProcess=%lums ago", 
+                coinSignalActiveLow ? "LOW" : "HIGH",
+                coinCounterActiveLow ? "LOW" : "HIGH",
+                edgeCount,
+                currentTime - lastCoinProcessedTime);
+    }
+}
+
+// Helper method to handle the business logic of a coin insertion
+void CarWashController::processCoinInsertion(unsigned long currentTime) {
+    LOG_INFO("Coin detected!");
+    
+    // Update activity tracking - crucial for debouncing and cooldown periods
+    lastActionTime = currentTime;
+    lastCoinProcessedTime = currentTime; // This is critical for the cooldown between coins
+    
+    // Update or create session
+    if (config.isLoaded) {
+        LOG_INFO("Adding physical token to existing session");
+        config.physicalTokens++;
+        config.tokens++;
+    } else {
+        LOG_INFO("Creating new manual session from coin insertion");
+        
+        char sessionIdBuffer[30];
+        sprintf(sessionIdBuffer, "manual_%lu", currentTime);
+        
+        config.sessionId = String(sessionIdBuffer);
+        config.userId = "unknown";
+        config.userName = "";
+        config.physicalTokens = 1;
+        config.tokens = 1;
+        config.isLoaded = true;
+        
+        currentState = STATE_IDLE;
+        digitalWrite(LED_PIN_INIT, HIGH);
+    }
+    
+    publishCoinInsertedEvent();
+}
+
 void CarWashController::update() {
     // Serial.println("CarWashController::update");
     if (config.timestamp == "") {
         return;
     }
-    // Serial.println("Handling buttons");
+    
+    // Handle buttons and coin acceptor
     handleButtons();
+    handleCoinAcceptor();
+    
     unsigned long currentTime = millis();
     publishPeriodicState();
+    
     if (currentState == STATE_RUNNING) {
         unsigned long totalElapsedTime = tokenTimeElapsed + (currentTime - tokenStartTime);
         if (totalElapsedTime >= TOKEN_TIME) {
@@ -329,6 +542,7 @@ void CarWashController::update() {
             return;
         }
     }
+    
     if (currentTime - lastActionTime > USER_INACTIVE_TIMEOUT && currentState != STATE_FREE) {
         LOG_INFO("Stopping machine due to user inactivity");
         stopMachine(AUTOMATIC);
@@ -455,6 +669,33 @@ String CarWashController::getTimestamp() {
     return String(isoTimestamp);
 }
 
+void CarWashController::publishCoinInsertedEvent() {
+    if (!config.isLoaded) return;
+
+    StaticJsonDocument<512> doc;
+
+    doc["machine_id"] = MACHINE_ID;
+    doc["timestamp"] = getTimestamp();
+    doc["action"] = getMachineActionString(ACTION_TOKEN_INSERTED);
+    doc["trigger_type"] = "MANUAL";
+    doc["session_id"] = config.sessionId;
+    doc["user_id"] = config.userId;
+    doc["token_channel"] = "PHYSICAL";
+    doc["tokens_left"] = config.tokens;
+    doc["physical_tokens"] = config.physicalTokens;
+
+    String jsonString;
+    serializeJson(doc, jsonString);
+
+    mqttClient.publish(ACTION_TOPIC.c_str(), jsonString.c_str(), QOS1_AT_LEAST_ONCE);
+}
+
+// Debug method to directly simulate a coin insertion
+void CarWashController::simulateCoinInsertion() {
+    LOG_INFO("Simulating coin insertion (DEBUG METHOD)");
+    processCoinInsertion(millis());
+}
+
 void CarWashController::publishActionEvent(int buttonIndex, MachineAction machineAction, TriggerType triggerType) {
     if (!config.isLoaded) return;
 
@@ -467,8 +708,9 @@ void CarWashController::publishActionEvent(int buttonIndex, MachineAction machin
     doc["button_name"] = String("BUTTON_") + String(buttonIndex + 1);
     doc["session_id"] = config.sessionId;
     doc["user_id"] = config.userId;
-    doc["token_channel"] = "PHYSICAL";
+    doc["token_channel"] = (config.physicalTokens > 0) ? "PHYSICAL" : "DIGITAL";
     doc["tokens_left"] = config.tokens;
+    doc["physical_tokens"] = config.physicalTokens;
 
     if (currentState == STATE_RUNNING) {
         doc["seconds_left"] = getSecondsLeft();
@@ -495,6 +737,7 @@ void CarWashController::publishPeriodicState(bool force) {
             sessionMetadata["user_id"] = config.userId;
             sessionMetadata["user_name"] = config.userName;
             sessionMetadata["tokens_left"] = config.tokens;
+            sessionMetadata["physical_tokens"] = config.physicalTokens;
             sessionMetadata["timestamp"] = config.timestamp;
             if (tokenStartTime > 0) {
                 sessionMetadata["seconds_left"] = getSecondsLeft();

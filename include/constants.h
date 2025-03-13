@@ -19,9 +19,9 @@ const int RUNNING_LED_PIN = LED_PIN;  // Use same LED for running state
 const int RELAY_INDICES[] = {RELAY1, RELAY2, RELAY3, RELAY4, RELAY5};
 
 // Timing Constants
-const unsigned long STATE_RUNNING_TIME = 120000; // 2 minutes in milliseconds
-const unsigned long TOKEN_TIME = 120000;         // Time per token (2 minutes)
-const unsigned long USER_INACTIVE_TIMEOUT = 120000; // Timeout for user inactivity
+const unsigned long STATE_RUNNING_TIME = 120000 / 6; // 2 minutes in milliseconds
+const unsigned long TOKEN_TIME = 120000 / 6;         // Time per token (2 minutes)
+const unsigned long USER_INACTIVE_TIMEOUT = 120000 / 6; // Timeout for user inactivity
 
 // MQTT Topics
 extern const char* MACHINE_ID;

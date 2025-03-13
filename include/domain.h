@@ -4,11 +4,18 @@
 #include <WString.h>
 
 // Struct for machine configuration
+// Enum for token types
+enum TokenType {
+    DIGITAL,
+    PHYSICAL
+};
+
 struct MachineConfig {
     String sessionId;
     String userId;
     String userName;
-    int tokens;
+    int tokens;           // Total tokens (digital + physical)
+    int physicalTokens;   // Only physical tokens from coin acceptor
     String timestamp;
     unsigned long timestampMillis;
     bool isLoaded;
@@ -28,7 +35,8 @@ enum MachineAction {
     ACTION_START,
     ACTION_STOP,
     ACTION_PAUSE,
-    ACTION_RESUME
+    ACTION_RESUME,
+    ACTION_TOKEN_INSERTED
 };
 
 // Function declarations

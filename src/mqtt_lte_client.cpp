@@ -331,17 +331,17 @@ void MqttLteClient::reconnect() {
 }
 
 bool MqttLteClient::publish(const char* topic, const char* payload, const uint8_t qos) {
-    Serial.println("Publishing message...");
+    // Serial.println("Publishing message...");
     if (!_mqttClient->connected()) {
         reconnect();
     }
     
     if (_mqttClient->connected()) {
-        Serial.print("Publishing to topic: ");
-        Serial.println(topic);
+        // Serial.print("Publishing to topic: ");
+        // Serial.println(topic);
         bool result = _mqttClient->publish(topic, payload);
-        Serial.print("Publish result: ");
-        Serial.println(result);
+        // Serial.print("Publish result: ");
+        // Serial.println(result);
         return result;
     }
     
