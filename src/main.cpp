@@ -45,7 +45,7 @@ bool lastButtonState = false;
 void mqtt_callback(char *topic, byte *payload, unsigned int len) {
     LOG_INFO("Message arrived from topic: %s", topic);
     
-    // Handle command topic specially for changing log level
+    // Handle command topic specially for changing log level or debug commands
     if (String(topic) == COMMAND_TOPIC) {
         // Parse command JSON
         StaticJsonDocument<256> doc;
@@ -64,10 +64,44 @@ void mqtt_callback(char *topic, byte *payload, unsigned int len) {
                 } else if (level == "WARNING") {
                     controller->setLogLevel(LOG_WARNING);
                 } else if (level == "ERROR") {
-                    controller->setLogLevel(LOG_ERROR);
                 } else if (level == "NONE") {
                     controller->setLogLevel(LOG_NONE);
                 }
+            }
+            // Add test command for simulating coin insertion
+            else if (command == "simulate_coin") {
+                LOG_INFO("Received command to simulate coin insertion");
+                controller->simulateCoinInsertion();
+            }
+            // Add advanced coin signal simulation options
+            else if (command == "test_coin_signal" && doc.containsKey("pattern")) {
+                String pattern = doc["pattern"].as<String>();
+                LOG_INFO("Testing coin acceptor with pattern: %s", pattern.c_str());
+                
+                extern IoExpander ioExpander;
+                
+                if (pattern == "high_low_high") {
+                    // Simulate a SIG pin toggling HIGH->LOW->HIGH
+                    LOG_INFO("Simulating HIGH->LOW->HIGH pattern");
+                    // We can't directly set input pins, so this is for testing only
+                    controller->simulateCoinInsertion();
+                }
+                else if (pattern == "toggle") {
+                    // Just toggle the coin trigger function
+                    LOG_INFO("Simply toggling the coin detector");
+                    controller->simulateCoinInsertion();
+                }
+                else if (pattern == "counter") {
+                    // Trigger based on CNT pin
+                    LOG_INFO("Simulating coin counter pulse");
+                    controller->simulateCoinInsertion();
+                }
+            }
+            // Add debug command to print IO expander state
+            else if (command == "debug_io") {
+                LOG_INFO("Printing IO expander debug info");
+                extern IoExpander ioExpander;
+                ioExpander.printDebugInfo();
             }
         }
     } else if (controller) {

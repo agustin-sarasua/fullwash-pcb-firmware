@@ -11,7 +11,24 @@ CarWashController::CarWashController(MqttLteClient& client)
       tokenTimeElapsed(0),
       pauseStartTime(0),
       lastCoinDebounceTime(0),
+      lastCoinProcessedTime(0),
       lastCoinState(HIGH) {
+          
+    // Force a read of the coin signal pin at startup to initialize correctly
+    extern IoExpander ioExpander;
+    uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
+    bool initialCoinSignal = !(rawPortValue0 & (1 << COIN_SIG));
+    lastCoinState = initialCoinSignal ? LOW : HIGH;
+    LOG_INFO("Coin detector initialized with state: %s", initialCoinSignal ? "ACTIVE" : "INACTIVE");
+    
+    // Check coin counter pin - optional hardware counter for coins
+    bool counterSignal = !(rawPortValue0 & (1 << COIN_CNT));
+    LOG_INFO("Coin counter initialized with state: %s", counterSignal ? "ACTIVE" : "INACTIVE");
+    
+    // IMPORTANT: Initialize these static variables to prevent false triggers at startup
+    // We'll skip any coin signals that happen in the first 2 seconds after boot
+    lastCoinProcessedTime = millis();
+    lastCoinDebounceTime = millis();
 
     // Initialize LED pins - using built-in LED
     pinMode(LED_PIN_INIT, OUTPUT);
@@ -326,67 +343,150 @@ void CarWashController::handleCoinAcceptor() {
     // Get reference to the IO expander
     extern IoExpander ioExpander;
 
-    // Read the coin signal pin
+    // Get current time for all timing operations
+    unsigned long currentTime = millis();
+    
+    // Skip startup period to avoid false triggers
+    static bool startupPeriod = true;
+    if (startupPeriod) {
+        if (currentTime < 3000) { // Skip first 3 seconds
+            return;
+        }
+        startupPeriod = false;
+        LOG_INFO("Coin detector startup period over, now actively monitoring");
+    }
+    
+    // Read raw port value
     uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
-    bool coinSignal = !(rawPortValue0 & (1 << COIN_SIG));  // Assuming active LOW like buttons
     
-    // Debug the coin signal
-    LOG_DEBUG("Coin Signal (pin %d) state: %s", COIN_SIG, coinSignal ? "ACTIVE" : "INACTIVE");
+    // Focus on SIGNAL pin only - from logs it's clear SIG pin is toggling with coins
+    bool coinSignalActiveLow = !(rawPortValue0 & (1 << COIN_SIG));
     
-    // Handle coin signal with debouncing
-    if (coinSignal) {
-        // If signal wasn't active before or enough time has passed since last detection
-        if (lastCoinState == HIGH || (millis() - lastCoinDebounceTime) > COIN_DEBOUNCE_DELAY * 5) {
-            // Record time of this signal
-            lastCoinDebounceTime = millis();
-            lastCoinState = LOW;  // Now active (assuming active LOW)
+    // *** SIMPLIFIED APPROACH BASED ON FINAL LOGS ***
+    // Looking at your logs, we see a pattern when coins are inserted:
+    // LOW -> HIGH quickly followed by HIGH -> LOW
+    
+    // Static variables to track transitions
+    static unsigned long lastTransitionTime = 0;
+    static unsigned long lastHighToLowTime = 0;
+    
+    // Detect signal changes
+    if (coinSignalActiveLow != lastCoinState) {
+        // Log all transitions
+        LOG_INFO("Coin signal changed: %s -> %s", 
+                lastCoinState ? "LOW" : "HIGH", 
+                coinSignalActiveLow ? "LOW" : "HIGH");
+        
+        unsigned long timeSinceLastTransition = currentTime - lastTransitionTime;
+        lastTransitionTime = currentTime;
+        
+        // FALLING EDGE (HIGH to LOW) after a RISING EDGE (LOW to HIGH)
+        // This seems to be the pattern when a coin is inserted
+        if (coinSignalActiveLow && !lastCoinState) {
+            // This is a HIGH to LOW transition
             
-            LOG_INFO("Coin detected and debounced!");
+            // Check if it happened quickly after a LOW to HIGH transition
+            // (which would indicate a coin insertion)
+            unsigned long timeSinceLastLowToHigh = currentTime - lastTransitionTime + timeSinceLastTransition;
             
-            // Reset the last activity time - inserting a coin counts as user activity
-            lastActionTime = millis();
+            if (timeSinceLastTransition < 200) {  // Less than 200ms between transitions
+                LOG_INFO("Quick transition pattern detected - likely a coin!");
+                
+                // Check if this could be a unique coin insertion (not just signal bounce)
+                if (currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
+                    LOG_INFO("Processing coin insertion");
+                    processCoinInsertion(currentTime);
+                } else {
+                    LOG_INFO("Skipping coin - too soon after last (%lu ms < %lu ms)",
+                           currentTime - lastCoinProcessedTime, COIN_PROCESS_COOLDOWN);
+                }
+            }
             
-            // Process coin insertion
-            if (config.isLoaded) {
-                // If a session is already active, just add a token
-                LOG_INFO("Adding physical token to existing session");
-                config.physicalTokens++;
-                config.tokens++;
+            lastHighToLowTime = currentTime;
+        }
+        
+        // Update state tracking
+        lastCoinState = coinSignalActiveLow;
+    }
+    
+    // Additional method: if no transitions are detected for some time, 
+    // but we observe changes every ~500-1000ms when coins are inserted,
+    // add a simple timer-based detection as a fallback
+    static unsigned long lastCoinCheckTime = 0;
+    if (currentTime - lastCoinCheckTime > 250) {  // Check every 250ms
+        lastCoinCheckTime = currentTime;
+        
+        // If no coin processed recently, check for activity
+        if (currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
+            // Count transitions in the last second
+            static int recentTransitions = 0;
+            static unsigned long transitionWindowStart = 0;
+            
+            // Reset counter periodically
+            if (currentTime - transitionWindowStart > 1000) {
+                transitionWindowStart = currentTime;
                 
-                // Publish coin inserted event
-                publishCoinInsertedEvent();
-            } else {
-                // No active session, create a new "manual" session
-                LOG_INFO("Creating new manual session from coin insertion");
+                // If we saw 2-4 transitions in the last second, that's likely a coin
+                if (recentTransitions >= 2 && recentTransitions <= 6) {
+                    LOG_INFO("Detected %d transitions in 1 second - likely a coin!", recentTransitions);
+                    
+                    if (currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
+                        LOG_INFO("Processing coin based on transition frequency");
+                        processCoinInsertion(currentTime);
+                    }
+                }
                 
-                // Generate a manual session ID with current timestamp
-                char sessionIdBuffer[30];
-                sprintf(sessionIdBuffer, "manual_%lu", millis());
-                
-                config.sessionId = String(sessionIdBuffer);
-                config.userId = "unknown";
-                config.userName = "";
-                config.physicalTokens = 1;  // Start with 1 physical token
-                config.tokens = 1;
-                // config.timestamp = getTimestamp();
-                // config.timestampMillis = millis();
-                config.isLoaded = true;
-                
-                // Change state to IDLE and turn on LED
-                currentState = STATE_IDLE;
-                digitalWrite(LED_PIN_INIT, HIGH);
-                
-                // Publish coin inserted event
-                publishCoinInsertedEvent();
+                recentTransitions = 0;
+            }
+            
+            // Count this transition if one occurred
+            if (currentTime - lastTransitionTime < 250) {
+                recentTransitions++;
             }
         }
-    } else {
-        // Signal is inactive
-        if (lastCoinState == LOW) {
-            LOG_DEBUG("Coin signal INACTIVE");
-        }
-        lastCoinState = HIGH;  // Not active (idle HIGH)
     }
+    
+    // Periodic debug info
+    static unsigned long lastDebugTime = 0;
+    if (currentTime - lastDebugTime > 5000) { // Every 5 seconds to reduce noise
+        lastDebugTime = currentTime;
+        LOG_DEBUG("Coin state: SIG=%s, LastProcessed=%lums ago", 
+                coinSignalActiveLow ? "LOW" : "HIGH",
+                currentTime - lastCoinProcessedTime);
+    }
+}
+
+// Helper method to handle the business logic of a coin insertion
+void CarWashController::processCoinInsertion(unsigned long currentTime) {
+    LOG_INFO("Coin detected!");
+    
+    // Update activity tracking - crucial for debouncing and cooldown periods
+    lastActionTime = currentTime;
+    lastCoinProcessedTime = currentTime; // This is critical for the cooldown between coins
+    
+    // Update or create session
+    if (config.isLoaded) {
+        LOG_INFO("Adding physical token to existing session");
+        config.physicalTokens++;
+        config.tokens++;
+    } else {
+        LOG_INFO("Creating new manual session from coin insertion");
+        
+        char sessionIdBuffer[30];
+        sprintf(sessionIdBuffer, "manual_%lu", currentTime);
+        
+        config.sessionId = String(sessionIdBuffer);
+        config.userId = "unknown";
+        config.userName = "";
+        config.physicalTokens = 1;
+        config.tokens = 1;
+        config.isLoaded = true;
+        
+        currentState = STATE_IDLE;
+        digitalWrite(LED_PIN_INIT, HIGH);
+    }
+    
+    publishCoinInsertedEvent();
 }
 
 void CarWashController::update() {
@@ -556,6 +656,12 @@ void CarWashController::publishCoinInsertedEvent() {
     serializeJson(doc, jsonString);
 
     mqttClient.publish(ACTION_TOPIC.c_str(), jsonString.c_str(), QOS1_AT_LEAST_ONCE);
+}
+
+// Debug method to directly simulate a coin insertion
+void CarWashController::simulateCoinInsertion() {
+    LOG_INFO("Simulating coin insertion (DEBUG METHOD)");
+    processCoinInsertion(millis());
 }
 
 void CarWashController::publishActionEvent(int buttonIndex, MachineAction machineAction, TriggerType triggerType) {

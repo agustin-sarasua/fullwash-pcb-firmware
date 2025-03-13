@@ -25,6 +25,9 @@ public:
     void publishMachineSetupActionEvent();
     void publishCoinInsertedEvent();
     
+    // Debug method to simulate a coin insertion
+    void simulateCoinInsertion();
+    
     // Getter methods
     MachineState getCurrentState() const;
     bool isMachineLoaded() const;
@@ -48,15 +51,19 @@ private:
     unsigned long tokenTimeElapsed;
     unsigned long pauseStartTime;
 
-    static const unsigned long DEBOUNCE_DELAY = 50;
-    static const unsigned long COIN_DEBOUNCE_DELAY = 100;
+    static const unsigned long DEBOUNCE_DELAY = 100;
+    static const unsigned long COIN_DEBOUNCE_DELAY = 50;
+    static const unsigned long COIN_PROCESS_COOLDOWN = 1000; // 1000ms (1 second) between accepted coins
     unsigned long lastDebounceTime[NUM_BUTTONS + 1];
     int lastButtonState[NUM_BUTTONS + 1];
     unsigned long lastCoinDebounceTime;
+    unsigned long lastCoinProcessedTime; // Track when a coin was last successfully processed
     int lastCoinState;
 
     unsigned long lastStatePublishTime;
     const unsigned long STATE_PUBLISH_INTERVAL = 10000;
+
+    void processCoinInsertion(unsigned long currentTime);
 
     void publishActionEvent(int buttonIndex, MachineAction machineAction, TriggerType triggerType = MANUAL);
     void publishPeriodicState(bool force = false);
