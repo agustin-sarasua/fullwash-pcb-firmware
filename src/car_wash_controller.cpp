@@ -356,6 +356,36 @@ void CarWashController::handleCoinAcceptor() {
         LOG_INFO("Coin detector startup period over, now actively monitoring");
     }
     
+    // NEW APPROACH: Check if the interrupt handler detected a coin signal
+    if (ioExpander.isCoinSignalDetected()) {
+        LOG_INFO("Interrupt-based coin signal detected!");
+        
+        // Read the current state to get more details
+        uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
+        bool coinSignalActiveLow = !(rawPortValue0 & (1 << COIN_SIG));
+        bool coinCounterActiveLow = !(rawPortValue0 & (1 << COIN_CNT));
+        
+        LOG_DEBUG("Coin pins state - SIG: %s, CNT: %s", 
+                coinSignalActiveLow ? "ACTIVE" : "INACTIVE",
+                coinCounterActiveLow ? "ACTIVE" : "INACTIVE");
+        
+        // Only process the coin if it's been long enough since the last coin
+        if (currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
+            LOG_INFO("Processing coin from interrupt detection");
+            processCoinInsertion(currentTime);
+        } else {
+            LOG_DEBUG("Ignoring coin signal - too soon after last coin (%lu ms)",
+                    currentTime - lastCoinProcessedTime);
+        }
+        
+        // Clear the flag for next detection
+        ioExpander.clearCoinSignalFlag();
+        return;
+    }
+    
+    // FALLBACK: Still include the original polling method as a backup
+    // This is especially important during development or if interrupts aren't reliable
+    
     // Read raw port value
     uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
     
@@ -367,32 +397,25 @@ void CarWashController::handleCoinAcceptor() {
     static bool lastCounterState = false;
     static unsigned long counterActiveSince = 0;
     
-    // *** DUAL PIN MONITORING APPROACH ***
-    // Monitor both signal and counter pins for more reliable detection
-    
     // Static variables to track edges and timing patterns
     static unsigned long lastEdgeTime = 0;
     static int edgeCount = 0;
     static unsigned long edgeWindowStart = 0;
     
     // PART 1: Counter-based detection (COIN_CNT pin)
-    // The counter pin typically pulses when a valid coin is accepted
     if (coinCounterActiveLow != lastCounterState) {
         LOG_INFO("Counter signal changed: %s -> %s", 
                 lastCounterState ? "LOW" : "HIGH", 
                 coinCounterActiveLow ? "LOW" : "HIGH");
         
-        // RISING EDGE on counter (LOW to HIGH) may indicate a valid coin
         if (coinCounterActiveLow && !lastCounterState) {
             counterActiveSince = currentTime;
             LOG_INFO("Counter signal ACTIVE - potential valid coin");
             
-            // Only process if it's been long enough since the last coin
             if (currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
                 LOG_INFO("Valid coin detected via counter signal!");
                 processCoinInsertion(currentTime);
                 
-                // Reset edge detection since we've already processed this coin
                 edgeCount = 0;
             }
         }
@@ -401,74 +424,61 @@ void CarWashController::handleCoinAcceptor() {
     }
     
     // PART 2: Signal-based edge detection (COIN_SIG pin)
-    // This serves as a backup for coin acceptors that don't utilize the counter pin
     if (coinSignalActiveLow != lastCoinState) {
-        // Log transition for debugging
         LOG_INFO("Coin signal edge: %s -> %s", 
                 lastCoinState ? "LOW" : "HIGH", 
                 coinSignalActiveLow ? "LOW" : "HIGH");
         
-        // Calculate timing between edges
         unsigned long timeSinceLastEdge = currentTime - lastEdgeTime;
         lastEdgeTime = currentTime;
         
-        // Start a new counting window if this is the first edge or it's been a while
         if (edgeCount == 0 || currentTime - edgeWindowStart > 1000) {
             edgeWindowStart = currentTime;
             edgeCount = 1;
         } else {
-            // Count this edge
             edgeCount++;
             
-            // Calculate how long the window has been going
             unsigned long windowDuration = currentTime - edgeWindowStart;
             
-            // Look for these patterns that might indicate a coin:
-            // Multiple edges within a configurable time window (typical for most coin acceptors)
             if (edgeCount >= COIN_MIN_EDGES && windowDuration < COIN_EDGE_WINDOW && 
                 currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
                 
                 LOG_INFO("Detected coin pattern: %d edges in %lu ms window", 
                         edgeCount, windowDuration);
                 
-                // Process the coin and reset our edge tracking
                 processCoinInsertion(currentTime);
                 edgeCount = 0;
             }
             
-            // Prevent overflow by resetting if we somehow get too many edges without detection
             if (edgeCount > 10) {
                 edgeCount = 0;
             }
         }
         
-        // Update state for next comparison
         lastCoinState = coinSignalActiveLow;
     }
     
-    // Reset edge detection if it's been too long without completing a pattern
+    // Reset edge detection if it's been too long
     if (edgeCount > 0 && currentTime - edgeWindowStart > 1000) {
         LOG_DEBUG("Resetting incomplete edge pattern after timeout");
         edgeCount = 0;
     }
     
     // PART 3: Special case for long-active counter signal
-    // Some coin acceptors keep the counter active for a specific duration
     if (coinCounterActiveLow && counterActiveSince > 0) {
         unsigned long counterActiveDuration = currentTime - counterActiveSince;
         
-        // If counter has been active for a specific duration without being processed yet
         if (counterActiveDuration > COUNTER_ACTIVE_DURATION && 
             currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
             LOG_INFO("Detected sustained counter signal (%lu ms) - processing coin", counterActiveDuration);
             processCoinInsertion(currentTime);
-            counterActiveSince = 0; // Reset to avoid multiple triggers
+            counterActiveSince = 0;
         }
     }
     
     // Periodic debug logging
     static unsigned long lastDebugTime = 0;
-    if (currentTime - lastDebugTime > 5000) { // Every 5 seconds to reduce noise
+    if (currentTime - lastDebugTime > 5000) {
         lastDebugTime = currentTime;
         LOG_DEBUG("Coin acceptor: Signal=%s, Counter=%s, EdgeCount=%d, LastProcess=%lums ago", 
                 coinSignalActiveLow ? "LOW" : "HIGH",

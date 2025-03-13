@@ -151,6 +151,10 @@ void setup() {
     LOG_DEBUG("Setting all relays to OFF...");
     ioExpander.writeRegister(OUTPUT_PORT1, 0x00);
     
+    // Enable interrupt for coin acceptor pins (COIN_SIG and COIN_CNT)
+    LOG_INFO("Enabling interrupt for coin acceptor pins...");
+    ioExpander.enableInterrupt(0, (1 << COIN_SIG) | (1 << COIN_CNT));
+    
     LOG_INFO("TCA9535 fully initialized. Ready to control relays and read buttons.");
   }
   controller = new CarWashController(mqttClient);
@@ -304,6 +308,9 @@ void loop() {
              controller->getTimestamp().c_str());  
   }
 
+  // Check for interrupts from the IO expander
+  ioExpander.handleInterrupt();
+  
   // Run controller update if available - this will handle all buttons through the controller
   if (currentTime - lastButtonCheck > 50) {
     lastButtonCheck = currentTime;

@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include "logger.h"
+#include <functional>
 
 class IoExpander {
 public:
@@ -34,6 +35,21 @@ public:
     
     // Toggle relay and return new state
     bool toggleRelay(uint8_t relay);
+    
+    // Enable interrupt handler for specific port and pins
+    void enableInterrupt(uint8_t port, uint8_t pinMask);
+    
+    // Set callback function for interrupt
+    void setInterruptCallback(std::function<void(uint8_t)> callback);
+    
+    // Handle interrupt (called from ISR or main loop)
+    void handleInterrupt();
+    
+    // Check if a coin signal has been detected
+    bool isCoinSignalDetected();
+    
+    // Clear the coin signal flag
+    void clearCoinSignalFlag();
 
 private:
     uint8_t _address;
@@ -41,6 +57,10 @@ private:
     int _sclPin;
     int _intPin;
     bool _initialized;
+    std::function<void(uint8_t)> _interruptCallback;
+    unsigned long _lastInterruptTime;
+    volatile bool _coinSignalDetected;
+    static const unsigned long DEBOUNCE_INTERVAL = 50; // 50ms debounce
 };
 
 #endif // IO_EXPANDER_H
