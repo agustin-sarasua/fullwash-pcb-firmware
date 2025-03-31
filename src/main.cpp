@@ -7,6 +7,7 @@
 #include "car_wash_controller.h"
 #include "logger.h"
 #include "display_manager.h"
+#include "config_manager.h"
 
 #include "certs/AmazonRootCA.h"
 #include "certs/AWSClientCertificate.h"
@@ -19,11 +20,14 @@ const char* AWS_BROKER = "a3foc0mc6v7ap0-ats.iot.us-east-1.amazonaws.com";
 const char* AWS_CLIENT_ID = "fullwash-machine-001";
 const uint16_t AWS_BROKER_PORT = 8883;
 
-// GSM connection settings
-const char apn[] = "internet"; // Replace with your carrier's APN if needed
-const char gprsUser[] = "";
-const char gprsPass[] = "";
-const char pin[] = "3846";
+// GSM connection settings - will be overridden by stored configuration
+String apn = "internet"; // Default APN
+String gprsUser = "";
+String gprsPass = "";
+String simPin = "3846"; // Default PIN
+
+// Create configuration manager
+ConfigManager configManager;
 
 // Create MQTT LTE client
 MqttLteClient mqttClient(SerialAT, MODEM_PWRKEY, MODEM_DTR, MODEM_FLIGHT, MODEM_TX, MODEM_RX);
@@ -40,6 +44,9 @@ DisplayManager* display;
 // Button states
 bool buttonState = false;
 bool lastButtonState = false;
+
+// Setup mode flag
+bool setupMode = false;
 
 
 void mqtt_callback(char *topic, byte *payload, unsigned int len) {
@@ -121,7 +128,37 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, HIGH); // Turn ON LED to show power
   
-  // Initialize the I/O expander
+  // Initialize configuration manager and load settings
+  LOG_INFO("Initializing configuration manager...");
+  if (configManager.begin()) {
+    LOG_INFO("Configuration loaded successfully");
+    
+    // Apply loaded configuration
+    simPin = configManager.getSimPin();
+    apn = configManager.getApn();
+    
+    // Update constants (will affect controller initialization)
+    extern const char* MACHINE_ID;
+    const_cast<char*&>(MACHINE_ID) = strdup(configManager.getMachineId().c_str());
+    
+    extern const unsigned long TOKEN_TIME;
+    const_cast<unsigned long&>(TOKEN_TIME) = configManager.getTokenTime();
+    
+    extern const unsigned long USER_INACTIVE_TIMEOUT;
+    const_cast<unsigned long&>(USER_INACTIVE_TIMEOUT) = configManager.getUserInactiveTimeout();
+    
+    // Update MQTT topics to use the new MACHINE_ID
+    updateMqttTopics();
+    
+    LOG_INFO("Applied configuration - Machine ID: %s, Token Time: %lu, Timeout: %lu",
+             MACHINE_ID, TOKEN_TIME, USER_INACTIVE_TIMEOUT);
+  } else {
+    LOG_WARNING("Failed to load configuration, using defaults");
+  }
+  
+  // Check if setup button is pressed during boot
+  // For simplicity, we'll use BUTTON1 as the setup button trigger
+  // Initialize the I/O expander first to read buttons
   LOG_INFO("Trying to initialize TCA9535...");
   bool initSuccess = ioExpander.begin();
   
@@ -156,7 +193,40 @@ void setup() {
     ioExpander.enableInterrupt(0, (1 << COIN_SIG) | (1 << COIN_CNT));
     
     LOG_INFO("TCA9535 fully initialized. Ready to control relays and read buttons.");
+    
+    // Check if setup button is pressed
+    uint8_t buttonState = ioExpander.readRegister(INPUT_PORT0);
+    if (!(buttonState & (1 << BUTTON1))) {  // Button1 is pressed (active low)
+      LOG_INFO("Setup button (BUTTON1) pressed during boot, entering config mode");
+      
+      // Initialize the display to show setup mode
+      Wire1.begin(LCD_SDA_PIN, LCD_SCL_PIN);
+      display = new DisplayManager(LCD_ADDR, LCD_COLS, LCD_ROWS, LCD_SDA_PIN, LCD_SCL_PIN);
+      if (display) {
+        display->clear();
+        display->setCursor(0, 0);
+        display->print("WiFi Setup Mode");
+        display->setCursor(0, 1);
+        display->print("SSID: FullWash-Setup");
+        display->setCursor(0, 2);
+        display->print("Password: ********");
+        display->setCursor(0, 3);
+        display->print("IP: 192.168.4.1");
+      }
+      
+      // Start config portal
+      setupMode = true;
+      configManager.startConfigPortal();
+      
+      // After exiting config portal, reboot to apply settings
+      LOG_INFO("Configuration complete, rebooting to apply settings");
+      delay(1000);
+      ESP.restart();
+      return;
+    }
   }
+  
+  // Initialize controller with proper configuration
   controller = new CarWashController(mqttClient);
   
   // Initialize Wire1 for the LCD display
@@ -164,13 +234,14 @@ void setup() {
   
   // Initialize the display with correct LCD pins
   display = new DisplayManager(LCD_ADDR, LCD_COLS, LCD_ROWS, LCD_SDA_PIN, LCD_SCL_PIN);
+  
   // Initialize MQTT client with callback
   mqttClient.setCallback(mqtt_callback);
   mqttClient.setBufferSize(512);
 
   // Initialize modem and connect to network
   LOG_INFO("Initializing modem and connecting to network...");
-  if (mqttClient.begin(apn, gprsUser, gprsPass, pin)) {
+  if (mqttClient.begin(apn.c_str(), gprsUser.c_str(), gprsPass.c_str(), simPin.c_str())) {
     // Configure SSL certificates
     mqttClient.setCACert(AmazonRootCA);
     mqttClient.setCertificate(AWSClientCertificate);
@@ -181,11 +252,6 @@ void setup() {
     if (mqttClient.connect(AWS_BROKER, AWS_BROKER_PORT, AWS_CLIENT_ID)) {
       LOG_INFO("Connected to MQTT broker!");
       
-      // // Subscribe to test topic
-      // mqttClient.subscribe("machines/machine001/test");
-      
-      // // Publish hello message
-      // mqttClient.publish("machines/machine001/data", "hello world", QOS1_AT_LEAST_ONCE);
       LOG_DEBUG("Subscribing to topic: %s", INIT_TOPIC.c_str());
       bool result = mqttClient.subscribe(INIT_TOPIC.c_str());
       LOG_DEBUG("Subscription result: %s", result ? "true" : "false");
@@ -216,6 +282,15 @@ void setup() {
 }
 
 void loop() {
+  // If we're in setup mode, don't run the normal loop
+  if (setupMode) {
+    return;
+  }
+  
+  // Check if setup button is pressed for 5 seconds during normal operation
+  static unsigned long setupButtonPressStartTime = 0;
+  static bool setupButtonWasPressed = false;
+  
   // Timing variables for various operations
   static unsigned long lastStatusCheck = 0;
   static unsigned long lastNetworkCheck = 0;
@@ -230,6 +305,48 @@ void loop() {
   // Current time
   unsigned long currentTime = millis();
   
+  // Check for setup button press (BUTTON1)
+  if (ioExpander.isInitialized()) {
+    uint8_t buttonState = ioExpander.readRegister(INPUT_PORT0);
+    bool button1Pressed = !(buttonState & (1 << BUTTON1)); // Button1 is active low
+    
+    if (button1Pressed && !setupButtonWasPressed) {
+      // Button just pressed, start timing
+      setupButtonPressStartTime = currentTime;
+      setupButtonWasPressed = true;
+    } else if (!button1Pressed && setupButtonWasPressed) {
+      // Button released
+      setupButtonWasPressed = false;
+    } else if (button1Pressed && setupButtonWasPressed && 
+               (currentTime - setupButtonPressStartTime > 5000)) {
+      // Button held for 5 seconds, enter setup mode
+      LOG_INFO("Setup button held for 5 seconds, entering config mode");
+      
+      // Show setup mode on display
+      if (display) {
+        display->clear();
+        display->setCursor(0, 0);
+        display->print("WiFi Setup Mode");
+        display->setCursor(0, 1);
+        display->print("SSID: FullWash-Setup");
+        display->setCursor(0, 2);
+        display->print("Password: ********");
+        display->setCursor(0, 3);
+        display->print("IP: 192.168.4.1");
+      }
+      
+      // Start config portal
+      setupMode = true;
+      configManager.startConfigPortal();
+      
+      // After exiting config portal, reboot to apply settings
+      LOG_INFO("Configuration complete, rebooting to apply settings");
+      delay(1000);
+      ESP.restart();
+      return;
+    }
+  }
+  
   // Check network status every 30 seconds
   if (currentTime - lastNetworkCheck > 30000) {
     lastNetworkCheck = currentTime;
@@ -242,7 +359,7 @@ void loop() {
         lastConnectionAttempt = currentTime;
         
         LOG_INFO("Attempting to reconnect to cellular network...");
-        if (mqttClient.begin(apn, gprsUser, gprsPass, pin)) {
+        if (mqttClient.begin(apn.c_str(), gprsUser.c_str(), gprsPass.c_str(), simPin.c_str())) {
           LOG_INFO("Successfully reconnected to cellular network!");
           
           // Reconfigure SSL certificates

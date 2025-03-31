@@ -24,6 +24,15 @@ public:
     
     // Format seconds into MM:SS
     String formatTime(unsigned long seconds);
+    
+    // Clear the entire display
+    void clear();
+    
+    // Set cursor position
+    void setCursor(uint8_t col, uint8_t row);
+    
+    // Print text at current cursor position
+    void print(const String& text);
 
 private:
     // Display specific screens based on machine state

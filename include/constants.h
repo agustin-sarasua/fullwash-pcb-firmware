@@ -18,10 +18,9 @@ const int RUNNING_LED_PIN = LED_PIN;  // Use same LED for running state
 // Relay mapping - one-to-one with buttons (relay 7 not used)
 const int RELAY_INDICES[] = {RELAY1, RELAY2, RELAY3, RELAY4, RELAY5};
 
-// Timing Constants
-const unsigned long STATE_RUNNING_TIME = 120000 / 6; // 2 minutes in milliseconds
-const unsigned long TOKEN_TIME = 120000 / 6;         // Time per token (2 minutes)
-const unsigned long USER_INACTIVE_TIMEOUT = 120000 / 6; // Timeout for user inactivity
+// Timing Constants (can be overridden by configuration)
+extern const unsigned long TOKEN_TIME;         // Time per token (2 minutes)
+extern const unsigned long USER_INACTIVE_TIMEOUT; // Timeout for user inactivity
 
 // MQTT Topics
 extern const char* MACHINE_ID;
@@ -30,11 +29,14 @@ extern const char* MACHINE_ID;
 String buildTopicName(const char* machineId, const char* eventType);
 
 // MQTT Topics
-extern const String INIT_TOPIC;
-extern const String CONFIG_TOPIC;
-extern const String ACTION_TOPIC;
-extern const String STATE_TOPIC;
-extern const String COMMAND_TOPIC;
+extern String INIT_TOPIC;
+extern String CONFIG_TOPIC;
+extern String ACTION_TOPIC;
+extern String STATE_TOPIC;
+extern String COMMAND_TOPIC;
+
+// Update topics when MACHINE_ID changes
+void updateMqttTopics();
 
 // QoS Levels
 const uint32_t QOS0_AT_MOST_ONCE = 0;

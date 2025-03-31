@@ -91,6 +91,21 @@ String DisplayManager::formatTime(unsigned long seconds) {
     return String(timeBuffer);
 }
 
+// Clear the entire display
+void DisplayManager::clear() {
+    lcd.clear();
+}
+
+// Set cursor position
+void DisplayManager::setCursor(uint8_t col, uint8_t row) {
+    lcd.setCursor(col, row);
+}
+
+// Print text at current cursor position
+void DisplayManager::print(const String& text) {
+    lcd.print(text);
+}
+
 void DisplayManager::displayFreeState() {
     lcd.clear();
     displayCentered("MAQUINA LIBRE", 0);

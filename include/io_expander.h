@@ -50,6 +50,9 @@ public:
     
     // Clear the coin signal flag
     void clearCoinSignalFlag();
+    
+    // Check if the I/O expander is initialized
+    bool isInitialized() const { return _initialized; }
 
 private:
     uint8_t _address;
