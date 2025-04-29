@@ -41,7 +41,6 @@ DisplayManager* display;
 bool buttonState = false;
 bool lastButtonState = false;
 
-
 void mqtt_callback(char *topic, byte *payload, unsigned int len) {
     LOG_INFO("Message arrived from topic: %s", topic);
     
@@ -64,69 +63,9 @@ void mqtt_callback(char *topic, byte *payload, unsigned int len) {
                 } else if (level == "WARNING") {
                     controller->setLogLevel(LOG_WARNING);
                 } else if (level == "ERROR") {
+                    controller->setLogLevel(LOG_ERROR);
                 } else if (level == "NONE") {
                     controller->setLogLevel(LOG_NONE);
-                }
-            }
-            // Add test command for simulating coin insertion
-            else if (command == "simulate_coin") {
-                LOG_INFO("Received command to simulate coin insertion");
-                controller->simulateCoinInsertion();
-            }
-            // Add advanced coin signal simulation options
-            else if (command == "test_coin_signal" && doc.containsKey("pattern")) {
-                String pattern = doc["pattern"].as<String>();
-                LOG_INFO("Testing coin acceptor with pattern: %s", pattern.c_str());
-                
-                extern IoExpander ioExpander;
-                
-                if (pattern == "high_low_high") {
-                    // Simulate a SIG pin toggling HIGH->LOW->HIGH
-                    LOG_INFO("Simulating HIGH->LOW->HIGH pattern");
-                    // We can't directly set input pins, so this is for testing only
-                    controller->simulateCoinInsertion();
-                }
-                else if (pattern == "toggle") {
-                    // Just toggle the coin trigger function
-                    LOG_INFO("Simply toggling the coin detector");
-                    controller->simulateCoinInsertion();
-                }
-                else if (pattern == "counter") {
-                    // Trigger based on CNT pin
-                    LOG_INFO("Simulating coin counter pulse");
-                    controller->simulateCoinInsertion();
-                }
-                else if (pattern == "debug") {
-                    // Special diagnostic mode to read the raw coin signals
-                    LOG_INFO("=== COIN ACCEPTOR DIAGNOSTIC ===");
-                    
-                    // Read raw port value
-                    uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
-                    
-                    // Log the raw values in different formats
-                    LOG_INFO("Raw port value: 0x%02X | Binary: %d%d%d%d%d%d%d%d", 
-                           rawPortValue0,
-                           (rawPortValue0 & 0x80) ? 1 : 0, (rawPortValue0 & 0x40) ? 1 : 0,
-                           (rawPortValue0 & 0x20) ? 1 : 0, (rawPortValue0 & 0x10) ? 1 : 0,
-                           (rawPortValue0 & 0x08) ? 1 : 0, (rawPortValue0 & 0x04) ? 1 : 0,
-                           (rawPortValue0 & 0x02) ? 1 : 0, (rawPortValue0 & 0x01) ? 1 : 0);
-                    
-                    // Check the COIN_SIG bit specifically
-                    bool coin_bit = (rawPortValue0 & (1 << COIN_SIG)) ? 1 : 0;
-                    LOG_INFO("COIN_SIG (bit %d) = %d", COIN_SIG, coin_bit);
-                    
-                    // Hardware with 100KOhm pull-up resistor:
-                    // Bit=1 (HIGH): No coin present (default state with pull-up) = INACTIVE
-                    // Bit=0 (LOW): Coin inserted (pull-down when coin connects to ground) = ACTIVE
-                    bool coinActive = ((rawPortValue0 & (1 << COIN_SIG)) == 0);
-                    
-                    LOG_INFO("Current coin state: %s", 
-                            coinActive ? "ACTIVE (coin present, LOW/0)" : "INACTIVE (no coin, HIGH/1)");
-                    
-                    // Explain hardware configuration
-                    LOG_INFO("Hardware config: 100KOhm pull-up resistor");
-                    LOG_INFO("- Default state (no coin): Pin pulled HIGH (bit=1) = INACTIVE");
-                    LOG_INFO("- Coin inserted: Pin connected to ground/LOW (bit=0) = ACTIVE");
                 }
             }
             // Add debug command to print IO expander state
@@ -183,9 +122,10 @@ void setup() {
     LOG_DEBUG("Setting all relays to OFF...");
     ioExpander.writeRegister(OUTPUT_PORT1, 0x00);
     
-    // Enable interrupt for coin acceptor pins (COIN_SIG and COIN_CNT)
-    LOG_INFO("Enabling interrupt for coin acceptor pins...");
-    ioExpander.enableInterrupt(0, (1 << COIN_SIG) | (1 << COIN_CNT));
+    // Set up coin detection callback
+    ioExpander.setCoinDetectionCallback([]() {
+        LOG_INFO("Coin detected!");
+    });
     
     LOG_INFO("TCA9535 fully initialized. Ready to control relays and read buttons.");
   }
@@ -196,54 +136,37 @@ void setup() {
   
   // Initialize the display with correct LCD pins
   display = new DisplayManager(LCD_ADDR, LCD_COLS, LCD_ROWS, LCD_SDA_PIN, LCD_SCL_PIN);
+  
   // Initialize MQTT client with callback
   mqttClient.setCallback(mqtt_callback);
-  mqttClient.setBufferSize(512);
-
-  // Initialize modem and connect to network
-  LOG_INFO("Initializing modem and connecting to network...");
+  
+  // Set up SSL certificates
+  mqttClient.setCACert(AmazonRootCA);
+  mqttClient.setCertificate(AWSClientCertificate);
+  mqttClient.setPrivateKey(AWSClientPrivateKey);
+  
+  // Connect to cellular network
+  LOG_INFO("Connecting to cellular network...");
   if (mqttClient.begin(apn, gprsUser, gprsPass, pin)) {
-    // Configure SSL certificates
-    mqttClient.setCACert(AmazonRootCA);
-    mqttClient.setCertificate(AWSClientCertificate);
-    mqttClient.setPrivateKey(AWSClientPrivateKey);
+    LOG_INFO("Connected to cellular network!");
     
     // Connect to MQTT broker
     LOG_INFO("Connecting to MQTT broker...");
     if (mqttClient.connect(AWS_BROKER, AWS_BROKER_PORT, AWS_CLIENT_ID)) {
       LOG_INFO("Connected to MQTT broker!");
       
-      // // Subscribe to test topic
-      // mqttClient.subscribe("machines/machine001/test");
+      // Subscribe to topics
+      mqttClient.subscribe(INIT_TOPIC.c_str());
+      mqttClient.subscribe(CONFIG_TOPIC.c_str());
+      mqttClient.subscribe(COMMAND_TOPIC.c_str());
       
-      // // Publish hello message
-      // mqttClient.publish("machines/machine001/data", "hello world", QOS1_AT_LEAST_ONCE);
-      LOG_DEBUG("Subscribing to topic: %s", INIT_TOPIC.c_str());
-      bool result = mqttClient.subscribe(INIT_TOPIC.c_str());
-      LOG_DEBUG("Subscription result: %s", result ? "true" : "false");
-      
-      result = mqttClient.subscribe(CONFIG_TOPIC.c_str());
-      LOG_DEBUG("Subscription result: %s", result ? "true" : "false");
-      
-      result = mqttClient.subscribe(COMMAND_TOPIC.c_str());
-      LOG_DEBUG("Subscription to command topic: %s", result ? "true" : "false");
-      
-      delay(4000);
-      LOG_INFO("Publishing Setup Action Event...");
+      // Publish initial state
       controller->publishMachineSetupActionEvent();
     } else {
-      LOG_ERROR("Failed to connect to MQTT broker");
+      LOG_ERROR("Failed to connect to MQTT broker!");
     }
   } else {
-    LOG_ERROR("Failed to initialize modem");
-  }
-  
-  // Final blink pattern to indicate setup complete
-  for (int i = 0; i < 2; i++) {
-    digitalWrite(LED_PIN, LOW);
-    delay(200);
-    digitalWrite(LED_PIN, HIGH);
-    delay(200);
+    LOG_ERROR("Failed to connect to cellular network!");
   }
 }
 
@@ -297,87 +220,23 @@ void loop() {
           }
         }
       }
-    } else {
-      // Network is connected, but check MQTT connection
-      if (!mqttClient.isConnected()) {
-        // Only attempt MQTT reconnection every 15 seconds
-        if (currentTime - lastMqttReconnectAttempt > 15000) {
-          lastMqttReconnectAttempt = currentTime;
-          LOG_WARNING("Network connected but MQTT disconnected, attempting to reconnect...");
-          
-          // MQTT client will handle resubscribing to topics internally
-          mqttClient.reconnect();
-        }
-      }
     }
   }
   
-  // If connected to network, process MQTT messages
-  if (mqttClient.isNetworkConnected()) {
-    // Always process MQTT messages when connected (this handles incoming messages)
-    mqttClient.loop();
-       
-    // Status message every 60 seconds if connected
-    if (currentTime - lastStatusCheck > 60000) {
-      lastStatusCheck = currentTime;
-      LOG_INFO("System running normally, network connected");
-      
-      // Optional: publish a heartbeat message
-      // if (mqttClient.isConnected() && controller) {
-        // controller->publishHeartbeat();
-        // controller->update();
-      // }
-    }
+  // Handle MQTT client loop
+  mqttClient.loop();
+  
+  // Handle buttons and update controller
+  if (controller) {
+    controller->handleButtons();
+    controller->update();
   }
   
-  // Periodically check I/O expander raw values for debugging
-  static unsigned long lastIoDebugCheck = 0;
-  if (currentTime - lastIoDebugCheck > 4000) {  // Every 4 seconds
-    lastIoDebugCheck = currentTime;
-    LOG_DEBUG("Machine state: %s, Machine loaded: %d, Formatted: %s", 
-             getMachineStateString(controller->getCurrentState()),
-             controller->isMachineLoaded(),
-             controller->getTimestamp().c_str());  
-  }
-
-  // Check for interrupts from the IO expander
-  ioExpander.handleInterrupt();
+  // Check for coin detection
+  ioExpander.isCoinDetected();
   
-  // Run controller update if available - this will handle all buttons through the controller
-  if (currentTime - lastButtonCheck > 50) {
-    lastButtonCheck = currentTime;
-    
-    if (controller) {
-      controller->update();
-    }
-  }
-  
-  // Update display with current state
+  // Update display with current controller state
   if (display && controller) {
     display->update(controller);
-  }
-  
-  // Handle LED indicator
-  // Blink pattern based on connection status
-  static unsigned long lastLedToggle = 0;
-  static bool ledState = HIGH;
-  
-  if (mqttClient.isConnected()) {
-    // Solid LED when fully connected
-    digitalWrite(LED_PIN, HIGH);
-  } else if (mqttClient.isNetworkConnected()) {
-    // Slow blink when network is connected but MQTT is not
-    if (currentTime - lastLedToggle > 1000) {
-      lastLedToggle = currentTime;
-      ledState = !ledState;
-      digitalWrite(LED_PIN, ledState);
-    }
-  } else {
-    // Fast blink when not connected to network
-    if (currentTime - lastLedToggle > 300) {
-      lastLedToggle = currentTime;
-      ledState = !ledState;
-      digitalWrite(LED_PIN, ledState);
-    }
   }
 }

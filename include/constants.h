@@ -21,6 +21,7 @@ const int RELAY_INDICES[] = {RELAY1, RELAY2, RELAY3, RELAY4, RELAY5};
 // Timing Constants
 const unsigned long STATE_RUNNING_TIME = 120000 / 6; // 2 minutes in milliseconds
 const unsigned long TOKEN_TIME = 120000 / 6;         // Time per token (2 minutes)
+const unsigned long TOKEN_DURATION = 120000 / 6;     // Duration of a token (2 minutes)
 const unsigned long USER_INACTIVE_TIMEOUT = 120000 / 6; // Timeout for user inactivity
 
 // MQTT Topics

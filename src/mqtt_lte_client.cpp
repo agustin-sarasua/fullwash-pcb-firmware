@@ -330,7 +330,7 @@ void MqttLteClient::reconnect() {
     }
 }
 
-bool MqttLteClient::publish(const char* topic, const char* payload, const uint8_t qos) {
+bool MqttLteClient::publish(const char* topic, const char* payload) {
     // Serial.println("Publishing message...");
     if (!_mqttClient->connected()) {
         reconnect();

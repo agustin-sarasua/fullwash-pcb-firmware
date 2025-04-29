@@ -24,7 +24,7 @@ public:
     // MQTT functions
     void setCallback(void (*callback)(char*, byte*, unsigned int));
     bool connect(const char* broker, uint16_t port, const char* clientId);
-    bool publish(const char* topic, const char* payload, const uint8_t qos);
+    bool publish(const char* topic, const char* payload);
     bool subscribe(const char* topic);
     void loop();
     

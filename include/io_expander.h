@@ -45,12 +45,10 @@ public:
     // Handle interrupt (called from ISR or main loop)
     void handleInterrupt();
     
-    // Check if a coin signal has been detected
-    bool isCoinSignalDetected();
+    // Coin detection methods
+    bool isCoinDetected();
+    void setCoinDetectionCallback(std::function<void()> callback);
     
-    // Clear the coin signal flag
-    void clearCoinSignalFlag();
-
 private:
     uint8_t _address;
     int _sdaPin;
@@ -59,8 +57,16 @@ private:
     bool _initialized;
     std::function<void(uint8_t)> _interruptCallback;
     unsigned long _lastInterruptTime;
-    volatile bool _coinSignalDetected;
     static const unsigned long DEBOUNCE_INTERVAL = 50; // 50ms debounce
+    
+    // Coin detection members
+    std::function<void()> _coinDetectionCallback;
+    unsigned long _lastCoinCheckTime;
+    static const unsigned long COIN_CHECK_INTERVAL = 10; // 10ms between checks
+    static const int COIN_THRESHOLD = 500; // 500mV threshold for coin detection
+    static const int NOISE_THRESHOLD = 50; // 50mV noise threshold
+    int _consecutiveHighReadings; // Count of consecutive readings above threshold
+    static const int MIN_CONSECUTIVE_READINGS = 2; // Minimum consecutive readings to detect coin
 };
 
 #endif // IO_EXPANDER_H

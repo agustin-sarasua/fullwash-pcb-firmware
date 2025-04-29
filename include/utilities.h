@@ -40,8 +40,6 @@
 // Set serial for AT commands (to the module)
 #define SerialAT Serial1
 
-
-
 // Define button and relay pins on TCA9535
 #define BUTTON1          5   // BT1 is on P00
 #define BUTTON2          4   // BT2 is on P01
