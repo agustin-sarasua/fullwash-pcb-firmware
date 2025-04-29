@@ -17,12 +17,22 @@ CarWashController::CarWashController(MqttLteClient& client)
     // Force a read of the coin signal pin at startup to initialize correctly
     extern IoExpander ioExpander;
     uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
-    bool initialCoinSignal = !(rawPortValue0 & (1 << COIN_SIG));
-    lastCoinState = initialCoinSignal ? LOW : HIGH;
+    
+    // EXTENSIVE DEBUG: Log the raw values in different formats
+    LOG_INFO("STARTUP DEBUG - Raw port value: 0x%02X | Binary: %d%d%d%d%d%d%d%d", 
+           rawPortValue0,
+           (rawPortValue0 & 0x80) ? 1 : 0, (rawPortValue0 & 0x40) ? 1 : 0,
+           (rawPortValue0 & 0x20) ? 1 : 0, (rawPortValue0 & 0x10) ? 1 : 0,
+           (rawPortValue0 & 0x08) ? 1 : 0, (rawPortValue0 & 0x04) ? 1 : 0,
+           (rawPortValue0 & 0x02) ? 1 : 0, (rawPortValue0 & 0x01) ? 1 : 0);
+    LOG_INFO("STARTUP DEBUG - COIN_SIG (bit %d) = %d", COIN_SIG, (rawPortValue0 & (1 << COIN_SIG)) ? 1 : 0);
+    
+    bool initialCoinSignal = ((rawPortValue0 & (1 << COIN_SIG)) == 1); // LOW = coin present = ACTIVE
+    lastCoinState = initialCoinSignal;
     LOG_INFO("Coin detector initialized with state: %s", initialCoinSignal ? "ACTIVE" : "INACTIVE");
     
     // Check coin counter pin - optional hardware counter for coins
-    bool counterSignal = !(rawPortValue0 & (1 << COIN_CNT));
+    bool counterSignal = ((rawPortValue0 & (1 << COIN_CNT)) == 1);
     LOG_INFO("Coin counter initialized with state: %s", counterSignal ? "ACTIVE" : "INACTIVE");
     
     // IMPORTANT: Initialize these static variables to prevent false triggers at startup
@@ -356,25 +366,29 @@ void CarWashController::handleCoinAcceptor() {
         LOG_INFO("Coin detector startup period over, now actively monitoring");
     }
     
-    // NEW APPROACH: Check if the interrupt handler detected a coin signal
+    // FIXED: Check if the interrupt handler detected a coin signal
     if (ioExpander.isCoinSignalDetected()) {
         LOG_INFO("Interrupt-based coin signal detected!");
         
         // Read the current state to get more details
         uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
-        bool coinSignalActiveLow = !(rawPortValue0 & (1 << COIN_SIG));
-        bool coinCounterActiveLow = !(rawPortValue0 & (1 << COIN_CNT));
+        
+        // FIXED: For your hardware configuration, 3.3V = active coin, 0.05V = no coin
+        // When a coin passes (3.3V), the TCA9535 reads LOW (bit=0)
+        // When no coin is present (0.05V), the TCA9535 reads HIGH (bit=1)
+        bool coinSignalActive = ((rawPortValue0 & (1 << COIN_SIG)) == 0);
+        bool coinCounterActive = ((rawPortValue0 & (1 << COIN_CNT)) == 0);
         
         LOG_DEBUG("Coin pins state - SIG: %s, CNT: %s", 
-                coinSignalActiveLow ? "ACTIVE" : "INACTIVE",
-                coinCounterActiveLow ? "ACTIVE" : "INACTIVE");
+                coinSignalActive ? "ACTIVE (3.3V)" : "INACTIVE (0.05V)",
+                coinCounterActive ? "ACTIVE" : "INACTIVE");
         
         // Only process the coin if it's been long enough since the last coin
         if (currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
             LOG_INFO("Processing coin from interrupt detection");
             processCoinInsertion(currentTime);
         } else {
-            LOG_DEBUG("Ignoring coin signal - too soon after last coin (%lu ms)",
+            LOG_INFO("Ignoring coin signal - too soon after last coin (%lu ms)",
                     currentTime - lastCoinProcessedTime);
         }
         
@@ -383,15 +397,15 @@ void CarWashController::handleCoinAcceptor() {
         return;
     }
     
-    // FALLBACK: Still include the original polling method as a backup
+    // FALLBACK: Still include polling method as a backup
     // This is especially important during development or if interrupts aren't reliable
     
     // Read raw port value
     uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
     
-    // Get current state of both coin signal pins
-    bool coinSignalActiveLow = !(rawPortValue0 & (1 << COIN_SIG));
-    bool coinCounterActiveLow = !(rawPortValue0 & (1 << COIN_CNT));
+    // FIXED: Get current state of both coin signal pins with correct logic
+    bool coinSignalActive = ((rawPortValue0 & (1 << COIN_SIG)) == 0);
+    bool coinCounterActive = ((rawPortValue0 & (1 << COIN_CNT)) == 0);
     
     // Track the counter signal state 
     static bool lastCounterState = false;
@@ -403,12 +417,12 @@ void CarWashController::handleCoinAcceptor() {
     static unsigned long edgeWindowStart = 0;
     
     // PART 1: Counter-based detection (COIN_CNT pin)
-    if (coinCounterActiveLow != lastCounterState) {
+    if (coinCounterActive != lastCounterState) {
         LOG_INFO("Counter signal changed: %s -> %s", 
-                lastCounterState ? "LOW" : "HIGH", 
-                coinCounterActiveLow ? "LOW" : "HIGH");
+                lastCounterState ? "ACTIVE" : "INACTIVE", 
+                coinCounterActive ? "ACTIVE" : "INACTIVE");
         
-        if (coinCounterActiveLow && !lastCounterState) {
+        if (coinCounterActive && !lastCounterState) {
             counterActiveSince = currentTime;
             LOG_INFO("Counter signal ACTIVE - potential valid coin");
             
@@ -420,18 +434,32 @@ void CarWashController::handleCoinAcceptor() {
             }
         }
         
-        lastCounterState = coinCounterActiveLow;
+        lastCounterState = coinCounterActive;
     }
     
     // PART 2: Signal-based edge detection (COIN_SIG pin)
-    if (coinSignalActiveLow != lastCoinState) {
+    if (coinSignalActive != lastCoinState) {
         LOG_INFO("Coin signal edge: %s -> %s", 
-                lastCoinState ? "LOW" : "HIGH", 
-                coinSignalActiveLow ? "LOW" : "HIGH");
+                lastCoinState ? "ACTIVE (coin present, LOW/0)" : "INACTIVE (no coin, HIGH/1)", 
+                coinSignalActive ? "ACTIVE (coin present, LOW/0)" : "INACTIVE (no coin, HIGH/1)");
         
         unsigned long timeSinceLastEdge = currentTime - lastEdgeTime;
         lastEdgeTime = currentTime;
         
+        // CORRECTED: With 100KOhm pull-up resistor:
+        // Default state (no coin): Pin is pulled HIGH (bit=1) = INACTIVE
+        // When coin is inserted: Pin is connected to ground/LOW (bit=0) = ACTIVE
+        // We need to detect when the pin goes from INACTIVE (HIGH) to ACTIVE (LOW)
+        if (coinSignalActive && !lastCoinState) {
+            LOG_INFO("COIN INSERTED - Pin went from INACTIVE (HIGH/1) to ACTIVE (LOW/0)");
+            
+            if (currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
+                LOG_INFO("Processing coin insertion");
+                processCoinInsertion(currentTime);
+            }
+        }
+        
+        // Also maintain the multi-edge detection logic
         if (edgeCount == 0 || currentTime - edgeWindowStart > 1000) {
             edgeWindowStart = currentTime;
             edgeCount = 1;
@@ -455,7 +483,7 @@ void CarWashController::handleCoinAcceptor() {
             }
         }
         
-        lastCoinState = coinSignalActiveLow;
+        lastCoinState = coinSignalActive;
     }
     
     // Reset edge detection if it's been too long
@@ -465,7 +493,7 @@ void CarWashController::handleCoinAcceptor() {
     }
     
     // PART 3: Special case for long-active counter signal
-    if (coinCounterActiveLow && counterActiveSince > 0) {
+    if (coinCounterActive && counterActiveSince > 0) {
         unsigned long counterActiveDuration = currentTime - counterActiveSince;
         
         if (counterActiveDuration > COUNTER_ACTIVE_DURATION && 
@@ -481,8 +509,8 @@ void CarWashController::handleCoinAcceptor() {
     if (currentTime - lastDebugTime > 5000) {
         lastDebugTime = currentTime;
         LOG_DEBUG("Coin acceptor: Signal=%s, Counter=%s, EdgeCount=%d, LastProcess=%lums ago", 
-                coinSignalActiveLow ? "LOW" : "HIGH",
-                coinCounterActiveLow ? "LOW" : "HIGH",
+                coinSignalActive ? "ACTIVE (3.3V)" : "INACTIVE (0.05V)",
+                coinCounterActive ? "ACTIVE" : "INACTIVE",
                 edgeCount,
                 currentTime - lastCoinProcessedTime);
     }

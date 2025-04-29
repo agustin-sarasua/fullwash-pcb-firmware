@@ -285,7 +285,7 @@ void IoExpander::handleInterrupt() {
     if (currentTime - _lastInterruptTime < DEBOUNCE_INTERVAL) {
         return;
     }
-    
+
     // The TCA9535 interrupt is active LOW, so we check if the pin is LOW
     if (digitalRead(_intPin) == LOW) {
         // Read the input port to see what changed
@@ -293,16 +293,12 @@ void IoExpander::handleInterrupt() {
         
         LOG_DEBUG("Interrupt detected! Port 0 Value: 0x%02X", portValue);
         
-        // Check specifically for COIN_SIG (bit 7) or COIN_CNT (bit 6)
-        // Remember, in the hardware, these pins are active LOW
-        bool coinSigActive = !(portValue & (1 << COIN_SIG));
-        bool coinCntActive = !(portValue & (1 << COIN_CNT));
+        bool coinSigActive = ((portValue & (1 << COIN_SIG)) != 0);
         
-        // If either coin signal is active, set the flag
-        if (coinSigActive || coinCntActive) {
+        // If coin signal is active (3.3V), set the flag
+        if (coinSigActive) {
             _coinSignalDetected = true;
-            LOG_DEBUG("Coin signal detected in interrupt! SIG=%d, CNT=%d", 
-                    coinSigActive ? 1 : 0, coinCntActive ? 1 : 0);
+            LOG_DEBUG("Coin signal detected in interrupt! SIG=ACTIVE (3.3V)");
         }
         
         // If we have a callback registered, call it with the port value

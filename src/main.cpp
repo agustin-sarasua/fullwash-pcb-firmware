@@ -96,6 +96,38 @@ void mqtt_callback(char *topic, byte *payload, unsigned int len) {
                     LOG_INFO("Simulating coin counter pulse");
                     controller->simulateCoinInsertion();
                 }
+                else if (pattern == "debug") {
+                    // Special diagnostic mode to read the raw coin signals
+                    LOG_INFO("=== COIN ACCEPTOR DIAGNOSTIC ===");
+                    
+                    // Read raw port value
+                    uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
+                    
+                    // Log the raw values in different formats
+                    LOG_INFO("Raw port value: 0x%02X | Binary: %d%d%d%d%d%d%d%d", 
+                           rawPortValue0,
+                           (rawPortValue0 & 0x80) ? 1 : 0, (rawPortValue0 & 0x40) ? 1 : 0,
+                           (rawPortValue0 & 0x20) ? 1 : 0, (rawPortValue0 & 0x10) ? 1 : 0,
+                           (rawPortValue0 & 0x08) ? 1 : 0, (rawPortValue0 & 0x04) ? 1 : 0,
+                           (rawPortValue0 & 0x02) ? 1 : 0, (rawPortValue0 & 0x01) ? 1 : 0);
+                    
+                    // Check the COIN_SIG bit specifically
+                    bool coin_bit = (rawPortValue0 & (1 << COIN_SIG)) ? 1 : 0;
+                    LOG_INFO("COIN_SIG (bit %d) = %d", COIN_SIG, coin_bit);
+                    
+                    // Hardware with 100KOhm pull-up resistor:
+                    // Bit=1 (HIGH): No coin present (default state with pull-up) = INACTIVE
+                    // Bit=0 (LOW): Coin inserted (pull-down when coin connects to ground) = ACTIVE
+                    bool coinActive = ((rawPortValue0 & (1 << COIN_SIG)) == 0);
+                    
+                    LOG_INFO("Current coin state: %s", 
+                            coinActive ? "ACTIVE (coin present, LOW/0)" : "INACTIVE (no coin, HIGH/1)");
+                    
+                    // Explain hardware configuration
+                    LOG_INFO("Hardware config: 100KOhm pull-up resistor");
+                    LOG_INFO("- Default state (no coin): Pin pulled HIGH (bit=1) = INACTIVE");
+                    LOG_INFO("- Coin inserted: Pin connected to ground/LOW (bit=0) = ACTIVE");
+                }
             }
             // Add debug command to print IO expander state
             else if (command == "debug_io") {
