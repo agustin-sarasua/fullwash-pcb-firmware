@@ -393,43 +393,30 @@ void CarWashController::handleCoinAcceptor() {
     // Static variables for stuck signal detection
     static unsigned long lastSignalChangeTime = currentTime;
     static bool lastSignalState = coinSignalActive;
-    static bool signalStuck = false;
     
     // Log detailed signal state periodically
     static unsigned long lastSignalLogTime = 0;
     if (currentTime - lastSignalLogTime > 1000) { // Log every second
         lastSignalLogTime = currentTime;
-        LOG_INFO("Coin signal state: Raw=0x%02X, Bit=%d, Active=%d, LastState=%d, Stuck=%d", 
+        LOG_INFO("Coin signal state: Raw=0x%02X, Bit=%d, Active=%d, LastState=%d", 
                 rawPortValue0,
                 (rawPortValue0 & (1 << COIN_SIG)) ? 1 : 0,
                 coinSignalActive ? 1 : 0,
-                lastCoinState,
-                signalStuck ? 1 : 0);
+                lastCoinState);
     }
     
-    // Modified stuck signal detection - be more lenient due to rare pulses
-    if (coinSignalActive == lastSignalState) {
-        // Only consider it stuck after a much longer period (30 seconds instead of 10)
-        if (currentTime - lastSignalChangeTime > 30000) {
-            if (!signalStuck) {
-                signalStuck = true;
-                LOG_WARNING("Coin signal stuck %s for more than 30 seconds!", 
-                           coinSignalActive ? "HIGH" : "LOW");
-            }
-        }
-    } else {
-        // Signal changed, reset stuck detection
-        signalStuck = false;
-        lastSignalChangeTime = currentTime;
+    // We no longer need stuck signal detection with the interrupt approach
+    // Just track signal changes for debugging
+    if (coinSignalActive != lastSignalState) {
         lastSignalState = coinSignalActive;
+        lastSignalChangeTime = currentTime;
     }
     
-    // Log raw signal value for debugging - now logging every time
-    LOG_DEBUG("Raw coin signal: 0x%02X, Bit value: %d, Active: %d, Stuck: %d", 
+    // Log raw signal value for debugging - now logging only in debug mode
+    LOG_DEBUG("Raw coin signal: 0x%02X, Bit value: %d, Active: %d", 
              rawPortValue0, 
              (rawPortValue0 & (1 << COIN_SIG)) ? 1 : 0,
-             coinSignalActive ? 1 : 0,
-             signalStuck ? 1 : 0);
+             coinSignalActive ? 1 : 0);
     
     // Static variables for pulse detection - optimized for very short pulses
     static unsigned long lastPulseTime = 0;
@@ -492,11 +479,10 @@ void CarWashController::handleCoinAcceptor() {
     static unsigned long lastDebugTime = 0;
     if (currentTime - lastDebugTime > 5000) { // Every 5 seconds to reduce noise
         lastDebugTime = currentTime;
-        LOG_DEBUG("Coin acceptor status: Signal=%s, PulseDetection=%s, LastProcess=%lums ago, Stuck=%d", 
+        LOG_DEBUG("Coin acceptor status: Signal=%s, PulseDetection=%s, LastProcess=%lums ago", 
                 coinSignalActive ? "HIGH" : "LOW",
                 pulseDetectionActive ? "ACTIVE" : "INACTIVE",
-                currentTime - lastCoinProcessedTime,
-                signalStuck ? 1 : 0);
+                currentTime - lastCoinProcessedTime);
     }
 }
 

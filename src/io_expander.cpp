@@ -10,6 +10,9 @@ void IRAM_ATTR coinAcceptorISR() {
     // Record the time of the interrupt
     lastInterruptTime = millis();
     coinPinInterruptDetected = true;
+    
+    // No need for additional logic in the ISR - 
+    // keep it minimal to ensure it returns quickly
 }
 
 IoExpander::IoExpander(uint8_t address, int sdaPin, int sclPin, int intPin)
@@ -24,9 +27,9 @@ bool IoExpander::begin() {
     pinMode(_intPin, INPUT_PULLUP);
     LOG_DEBUG("INT pin configured");
     
-    // Attach interrupt to INT pin for coin acceptor
+    // Attach interrupt to INT pin for coin acceptor - CHANGE mode to capture both edges
     attachInterrupt(digitalPinToInterrupt(_intPin), coinAcceptorISR, CHANGE);
-    LOG_INFO("Coin acceptor interrupt attached");
+    LOG_INFO("Coin acceptor interrupt attached to detect both rising and falling edges");
     
     // Check if device is responding
     Wire.beginTransmission(_address);
