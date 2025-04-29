@@ -291,7 +291,7 @@ void CarWashController::stopMachine(TriggerType triggerType) {
 void CarWashController::activateButton(int buttonIndex, TriggerType triggerType) {
     LOG_INFO("Activating button: %d", buttonIndex+1);  // +1 for human-readable button number
 
-    if (config.tokens <= 0) {
+    if (config.tokens + config.physicalTokens <= 0) {
         LOG_WARNING("Cannot activate - no tokens left");
         return;
     }
@@ -330,8 +330,9 @@ void CarWashController::activateButton(int buttonIndex, TriggerType triggerType)
     // Prioritize using physical tokens first
     if (config.physicalTokens > 0) {
         config.physicalTokens--;
+    } else {
+        config.tokens--;
     }
-    config.tokens--;
 
     publishActionEvent(buttonIndex, ACTION_START, triggerType);
 }
@@ -369,27 +370,35 @@ void CarWashController::handleCoinAcceptor() {
     bool interruptDetected = ioExpander.wasInterruptDetected();
     if (interruptDetected) {
         unsigned long interruptTime = ioExpander.getLastInterruptTime();
-        LOG_INFO("Coin acceptor interrupt detected at %lu ms", interruptTime);
         
         // Verify with a direct read of the port
         uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
         bool coinSignalActive = (rawPortValue0 & (1 << COIN_SIG)) != 0;
         
         // Log state after interrupt
-        LOG_DEBUG("Post-interrupt signal state: Raw=0x%02X, Bit=%d, Active=%d", 
+        LOG_DEBUG("Interrupt detected at %lu ms, Raw=0x%02X, COIN_SIG Bit=%d, Active=%d", 
+                interruptTime,
                 rawPortValue0,
                 (rawPortValue0 & (1 << COIN_SIG)) ? 1 : 0,
                 coinSignalActive ? 1 : 0);
         
-        // If enough time has passed since last coin processing
-        if (currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
-            LOG_INFO("Processing coin from interrupt trigger");
-            processCoinInsertion(currentTime);
+        // FIXED: Only treat as a coin interrupt if the COIN_SIG pin is active
+        // This prevents button presses from being recognized as coins
+        if (coinSignalActive) {
+            LOG_INFO("Coin acceptor interrupt detected at %lu ms", interruptTime);
+            
+            // If enough time has passed since last coin processing
+            if (currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
+                LOG_INFO("Processing coin from interrupt trigger");
+                processCoinInsertion(currentTime);
+            } else {
+                LOG_DEBUG("Ignoring coin interrupt - too soon after previous coin (%lu ms)",
+                        currentTime - lastCoinProcessedTime);
+            }
         } else {
-            LOG_DEBUG("Ignoring coin interrupt - too soon after previous coin (%lu ms)",
-                    currentTime - lastCoinProcessedTime);
+            LOG_DEBUG("Interrupt detected but not from coin acceptor, ignoring");
         }
-        return; // Skip the rest of the processing, we've handled the coin
+        return; // Skip the rest of the processing, we've handled the interrupt
     }
     
     // Continue with regular polling (as a backup to the interrupt method)
@@ -501,7 +510,6 @@ void CarWashController::processCoinInsertion(unsigned long currentTime) {
     if (config.isLoaded) {
         LOG_INFO("Adding physical token to existing session");
         config.physicalTokens++;
-        config.tokens++;
     } else {
         LOG_INFO("Creating new manual session from coin insertion");
         
@@ -512,7 +520,6 @@ void CarWashController::processCoinInsertion(unsigned long currentTime) {
         config.userId = "unknown";
         config.userName = "";
         config.physicalTokens = 1;
-        config.tokens = 1;
         config.isLoaded = true;
         
         currentState = STATE_IDLE;
@@ -548,10 +555,11 @@ void CarWashController::update() {
             return;
         }
     }
-    LOG_INFO("####  Last action time: %lu", lastActionTime);
-    LOG_INFO("####  Current time: %lu", currentTime);
-    LOG_INFO("####  User inactive timeout: %lu", USER_INACTIVE_TIMEOUT);
-    LOG_INFO("####  Current state: %s", getMachineStateString(currentState));
+    // LOG_INFO("####  Last action time: %lu", lastActionTime);
+    // LOG_INFO("####  Current time: %lu", currentTime);
+    // LOG_INFO("####  User inactive timeout: %lu", USER_INACTIVE_TIMEOUT);
+    // LOG_INFO("####  Current state: %s", getMachineStateString(currentState));
+    
     // if (currentTime - lastActionTime > USER_INACTIVE_TIMEOUT && currentState != STATE_FREE) {
     if ((currentTime >= lastActionTime) && (currentTime - lastActionTime > USER_INACTIVE_TIMEOUT) && currentState != STATE_FREE) {
         LOG_INFO("Stopping machine due to user inactivity");
@@ -715,7 +723,7 @@ void CarWashController::publishCoinInsertedEvent() {
     doc["session_id"] = config.sessionId;
     doc["user_id"] = config.userId;
     doc["token_channel"] = "PHYSICAL";
-    doc["tokens_left"] = config.tokens;
+    doc["tokens_left"] = config.tokens + config.physicalTokens;
     doc["physical_tokens"] = config.physicalTokens;
 
     String jsonString;
@@ -746,7 +754,7 @@ void CarWashController::publishActionEvent(int buttonIndex, MachineAction machin
     doc["session_id"] = config.sessionId;
     doc["user_id"] = config.userId;
     doc["token_channel"] = (config.physicalTokens > 0) ? "PHYSICAL" : "DIGITAL";
-    doc["tokens_left"] = config.tokens;
+    doc["tokens_left"] = config.tokens + config.physicalTokens;
     doc["physical_tokens"] = config.physicalTokens;
 
     if (currentState == STATE_RUNNING) {
@@ -775,7 +783,7 @@ void CarWashController::publishPeriodicState(bool force) {
             sessionMetadata["session_id"] = config.sessionId;
             sessionMetadata["user_id"] = config.userId;
             sessionMetadata["user_name"] = config.userName;
-            sessionMetadata["tokens_left"] = config.tokens;
+            sessionMetadata["tokens_left"] = config.tokens + config.physicalTokens;
             sessionMetadata["physical_tokens"] = config.physicalTokens;
             sessionMetadata["timestamp"] = config.timestamp;
             LOG_DEBUG("Session original timestamp: %s", config.timestamp.c_str());

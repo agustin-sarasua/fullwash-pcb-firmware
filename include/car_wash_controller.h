@@ -36,7 +36,7 @@ public:
     
     // Additional getters for LCD display
     String getUserName() const { return config.userName; }
-    int getTokensLeft() const { return config.tokens; }
+    int getTokensLeft() const { return config.tokens + config.physicalTokens; }
     unsigned long getTimeToInactivityTimeout() const;
     unsigned long getSecondsLeft();
 
