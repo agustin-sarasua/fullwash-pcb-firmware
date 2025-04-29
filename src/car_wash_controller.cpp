@@ -56,13 +56,17 @@ void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payl
         return;
     }
     if (String(topic) == INIT_TOPIC) {
+        LOG_INFO("Received initialization message from backend");
         config.sessionId = doc["session_id"].as<String>();
         config.userId = doc["user_id"].as<String>();
         config.userName = doc["user_name"].as<String>();
         config.tokens = doc["tokens"].as<int>();
         config.physicalTokens = 0;  // No physical tokens when session is initialized remotely
         config.timestamp = doc["timestamp"].as<String>();
+        LOG_INFO("Received timestamp from backend: '%s'", config.timestamp.c_str());
+        
         config.timestampMillis = millis();
+        
         config.isLoaded = true;
         currentState = STATE_IDLE;
         lastActionTime = millis();
@@ -70,9 +74,14 @@ void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payl
         digitalWrite(LED_PIN_INIT, HIGH);
         LOG_INFO("Machine loaded with new configuration");
     } else if (String(topic) == CONFIG_TOPIC) {
+        LOG_INFO("Received configuration update message");
         LOG_DEBUG("Updating machine configuration timestamp: %s", doc["timestamp"].as<String>().c_str());
         config.timestamp = doc["timestamp"].as<String>();
+        LOG_INFO("Received timestamp from backend: '%s'", config.timestamp.c_str());
+        
         config.timestampMillis = millis();
+        LOG_INFO("Timestamp updated with timestampMillis: %lu", config.timestampMillis);
+        
         config.sessionId = "";
         config.userId = "";
         config.userName = "";
@@ -412,12 +421,6 @@ void CarWashController::handleCoinAcceptor() {
         lastSignalChangeTime = currentTime;
     }
     
-    // Log raw signal value for debugging - now logging only in debug mode
-    LOG_DEBUG("Raw coin signal: 0x%02X, Bit value: %d, Active: %d", 
-             rawPortValue0, 
-             (rawPortValue0 & (1 << COIN_SIG)) ? 1 : 0,
-             coinSignalActive ? 1 : 0);
-    
     // Static variables for pulse detection - optimized for very short pulses
     static unsigned long lastPulseTime = 0;
     static unsigned long pulseDetectionStart = 0;
@@ -491,7 +494,7 @@ void CarWashController::processCoinInsertion(unsigned long currentTime) {
     LOG_INFO("Coin detected!");
     
     // Update activity tracking - crucial for debouncing and cooldown periods
-    lastActionTime = currentTime;
+    lastActionTime = millis();
     lastCoinProcessedTime = currentTime; // This is critical for the cooldown between coins
     
     // Update or create session
@@ -545,8 +548,12 @@ void CarWashController::update() {
             return;
         }
     }
-    
-    if (currentTime - lastActionTime > USER_INACTIVE_TIMEOUT && currentState != STATE_FREE) {
+    LOG_INFO("####  Last action time: %lu", lastActionTime);
+    LOG_INFO("####  Current time: %lu", currentTime);
+    LOG_INFO("####  User inactive timeout: %lu", USER_INACTIVE_TIMEOUT);
+    LOG_INFO("####  Current state: %s", getMachineStateString(currentState));
+    // if (currentTime - lastActionTime > USER_INACTIVE_TIMEOUT && currentState != STATE_FREE) {
+    if ((currentTime >= lastActionTime) && (currentTime - lastActionTime > USER_INACTIVE_TIMEOUT) && currentState != STATE_FREE) {
         LOG_INFO("Stopping machine due to user inactivity");
         stopMachine(AUTOMATIC);
     }
@@ -558,7 +565,9 @@ void CarWashController::publishMachineSetupActionEvent() {
     StaticJsonDocument<512> doc;
     doc["machine_id"] = MACHINE_ID;
     doc["action"] = getMachineActionString(ACTION_SETUP);
-    doc["timestamp"] = getTimestamp();
+    String timestamp = getTimestamp();
+    LOG_INFO("Using timestamp in machine setup event: %s", timestamp.c_str());
+    doc["timestamp"] = timestamp;
     
     String jsonString;
     serializeJson(doc, jsonString);
@@ -588,24 +597,34 @@ unsigned long CarWashController::getSecondsLeft() {
 
 String CarWashController::getTimestamp() {
     // First, let's add some debug logging
-    LOG_DEBUG("Raw timestamp: %s", config.timestamp.c_str());
+    LOG_INFO("Getting timestamp. Raw value: '%s'", config.timestamp.c_str());
     LOG_DEBUG("Timestamp millis: %lu", config.timestampMillis);
     LOG_DEBUG("Current millis: %lu", millis());
     
-    // If timestamp is empty, return early
+    // If timestamp is empty, create a timestamp using current time
     if (config.timestamp.length() == 0) {
+        LOG_INFO("Empty timestamp detected, generating new timestamp");
         return "No timestamp";
     }
+    
+    LOG_INFO("Parsing existing timestamp: '%s'", config.timestamp.c_str());
     
     // Manual string parsing for reliability
     String ts = config.timestamp;
     int tPos = ts.indexOf('T');
     int dotPos = ts.indexOf('.');
+    int zPos = ts.indexOf('Z');
     int plusPos = ts.indexOf('+');
     
-    // Verify we have the expected format
-    if (tPos <= 0 || dotPos <= 0 || plusPos <= 0) {
-        LOG_ERROR("Timestamp format invalid");
+    LOG_DEBUG("Timestamp format indicators - T pos: %d, dot pos: %d, Z pos: %d, plus pos: %d", 
+              tPos, dotPos, zPos, plusPos);
+    
+    // Verify we have the expected format - either Z format or + format
+    bool validZFormat = (tPos > 0 && dotPos > 0 && zPos > 0);
+    bool validPlusFormat = (tPos > 0 && dotPos > 0 && plusPos > 0);
+    
+    if (!validZFormat && !validPlusFormat) {
+        LOG_ERROR("Timestamp format invalid - T:%d dot:%d Z:%d plus:%d", tPos, dotPos, zPos, plusPos);
         return "Invalid format";
     }
     
@@ -621,8 +640,12 @@ String CarWashController::getTimestamp() {
     
     // Extract microseconds
     long microseconds = 0;
-    if (dotPos > 0 && plusPos > dotPos) {
-        microseconds = ts.substring(dotPos+1, plusPos).toInt();
+    if (dotPos > 0) {
+        if (validZFormat) {
+            microseconds = ts.substring(dotPos+1, zPos).toInt();
+        } else if (validPlusFormat) {
+            microseconds = ts.substring(dotPos+1, plusPos).toInt();
+        }
     }
     
     // Debug the parsed components
@@ -646,8 +669,10 @@ String CarWashController::getTimestamp() {
     unsigned long millisOffset = 0;
     if (config.timestampMillis > 0) {
         millisOffset = millis() - config.timestampMillis;
+        LOG_DEBUG("Millis offset: %lu (millis() - timestampMillis)", millisOffset);
+    } else {
+        LOG_WARNING("config.timestampMillis is 0, unable to calculate offset");
     }
-    LOG_DEBUG("Millis offset: %lu", millisOffset);
     
     // Adjust the time with the elapsed milliseconds
     time_t adjustedTime = serverEpoch + (millisOffset / 1000);
@@ -656,6 +681,9 @@ String CarWashController::getTimestamp() {
         adjustedTime += 1;
         milliseconds -= 1000;
     }
+    
+    LOG_DEBUG("Time adjusted by %lu seconds and %d milliseconds", 
+              (millisOffset / 1000), (millisOffset % 1000));
     
     // Convert back to time components
     tmElements_t adjustedTm;
@@ -667,7 +695,7 @@ String CarWashController::getTimestamp() {
             adjustedTm.Year + 1970, adjustedTm.Month, adjustedTm.Day,
             adjustedTm.Hour, adjustedTm.Minute, adjustedTm.Second, milliseconds);
     
-    LOG_DEBUG("Formatted timestamp: %s", isoTimestamp);
+    LOG_INFO("Formatted timestamp with offset: %s", isoTimestamp);
     
     return String(isoTimestamp);
 }
@@ -675,10 +703,13 @@ String CarWashController::getTimestamp() {
 void CarWashController::publishCoinInsertedEvent() {
     if (!config.isLoaded) return;
 
+    LOG_INFO("Publishing coin inserted event");
     StaticJsonDocument<512> doc;
 
     doc["machine_id"] = MACHINE_ID;
-    doc["timestamp"] = getTimestamp();
+    String timestamp = getTimestamp();
+    LOG_INFO("Using timestamp in coin event: %s", timestamp.c_str());
+    doc["timestamp"] = timestamp;
     doc["action"] = getMachineActionString(ACTION_TOKEN_INSERTED);
     doc["trigger_type"] = "MANUAL";
     doc["session_id"] = config.sessionId;
@@ -702,10 +733,13 @@ void CarWashController::simulateCoinInsertion() {
 void CarWashController::publishActionEvent(int buttonIndex, MachineAction machineAction, TriggerType triggerType) {
     if (!config.isLoaded) return;
 
+    LOG_INFO("Publishing action event: %s", getMachineActionString(machineAction));
     StaticJsonDocument<512> doc;
 
     doc["machine_id"] = MACHINE_ID;
-    doc["timestamp"] = getTimestamp();
+    String timestamp = getTimestamp();
+    LOG_INFO("Using timestamp in action event: %s", timestamp.c_str());
+    doc["timestamp"] = timestamp;
     doc["action"] = getMachineActionString(machineAction);
     doc["trigger_type"] = (triggerType == MANUAL) ? "MANUAL" : "AUTOMATIC";
     doc["button_name"] = String("BUTTON_") + String(buttonIndex + 1);
@@ -730,7 +764,9 @@ void CarWashController::publishPeriodicState(bool force) {
         LOG_INFO("Publishing Periodic State");
         StaticJsonDocument<512> doc;
         doc["machine_id"] = MACHINE_ID;
-        doc["timestamp"] = getTimestamp();
+        String timestamp = getTimestamp();
+        LOG_INFO("Using timestamp in periodic state: %s", timestamp.c_str());
+        doc["timestamp"] = timestamp;
         doc["status"] = getMachineStateString(currentState);
         LOG_DEBUG("Status: %s", doc["status"].as<String>().c_str());
 
@@ -742,6 +778,7 @@ void CarWashController::publishPeriodicState(bool force) {
             sessionMetadata["tokens_left"] = config.tokens;
             sessionMetadata["physical_tokens"] = config.physicalTokens;
             sessionMetadata["timestamp"] = config.timestamp;
+            LOG_DEBUG("Session original timestamp: %s", config.timestamp.c_str());
             if (tokenStartTime > 0) {
                 sessionMetadata["seconds_left"] = getSecondsLeft();
             }
