@@ -34,6 +34,10 @@ public:
     
     // Toggle relay and return new state
     bool toggleRelay(uint8_t relay);
+    
+    // Interrupt handling for coin acceptor
+    bool wasInterruptDetected();
+    unsigned long getLastInterruptTime();
 
 private:
     uint8_t _address;

@@ -356,79 +356,147 @@ void CarWashController::handleCoinAcceptor() {
         LOG_INFO("Coin detector startup period over, now actively monitoring");
     }
     
+    // Check if we detected an interrupt - this is critical for fast pulse detection
+    bool interruptDetected = ioExpander.wasInterruptDetected();
+    if (interruptDetected) {
+        unsigned long interruptTime = ioExpander.getLastInterruptTime();
+        LOG_INFO("Coin acceptor interrupt detected at %lu ms", interruptTime);
+        
+        // Verify with a direct read of the port
+        uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
+        bool coinSignalActive = (rawPortValue0 & (1 << COIN_SIG)) != 0;
+        
+        // Log state after interrupt
+        LOG_DEBUG("Post-interrupt signal state: Raw=0x%02X, Bit=%d, Active=%d", 
+                rawPortValue0,
+                (rawPortValue0 & (1 << COIN_SIG)) ? 1 : 0,
+                coinSignalActive ? 1 : 0);
+        
+        // If enough time has passed since last coin processing
+        if (currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
+            LOG_INFO("Processing coin from interrupt trigger");
+            processCoinInsertion(currentTime);
+        } else {
+            LOG_DEBUG("Ignoring coin interrupt - too soon after previous coin (%lu ms)",
+                    currentTime - lastCoinProcessedTime);
+        }
+        return; // Skip the rest of the processing, we've handled the coin
+    }
+    
+    // Continue with regular polling (as a backup to the interrupt method)
     // Read raw port value
     uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
     
-    // Get current state of coin signal pin
-    bool coinSignalActiveLow = !(rawPortValue0 & (1 << COIN_SIG));
+    // Get current state of coin signal pin - NO LONGER INVERTING THE SIGNAL
+    bool coinSignalActive = (rawPortValue0 & (1 << COIN_SIG)) != 0;
     
-    // *** IMPROVED EDGE DETECTION APPROACH ***
-    // This approach is more generic and works with various coin acceptor signal patterns
+    // Static variables for stuck signal detection
+    static unsigned long lastSignalChangeTime = currentTime;
+    static bool lastSignalState = coinSignalActive;
+    static bool signalStuck = false;
     
-    // Static variables to track edges and timing patterns
-    static unsigned long lastEdgeTime = 0;
-    static int edgeCount = 0;
-    static unsigned long edgeWindowStart = 0;
-    
-    // Only process this signal if the state has changed (this is an edge)
-    if (coinSignalActiveLow != lastCoinState) {
-        // Log transition for debugging
-        LOG_INFO("Coin signal edge: %s -> %s", 
-                lastCoinState ? "LOW" : "HIGH", 
-                coinSignalActiveLow ? "LOW" : "HIGH");
-        
-        // Calculate timing between edges
-        unsigned long timeSinceLastEdge = currentTime - lastEdgeTime;
-        lastEdgeTime = currentTime;
-        
-        // Start a new counting window if this is the first edge or it's been a while
-        if (edgeCount == 0 || currentTime - edgeWindowStart > 1000) {
-            edgeWindowStart = currentTime;
-            edgeCount = 1;
-        } else {
-            // Count this edge
-            edgeCount++;
-            
-            // Calculate how long the window has been going
-            unsigned long windowDuration = currentTime - edgeWindowStart;
-            
-            // Look for these patterns that might indicate a coin:
-            // Multiple edges within a configurable time window (typical for most coin acceptors)
-            if (edgeCount >= COIN_MIN_EDGES && windowDuration < COIN_EDGE_WINDOW && 
-                currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
-                
-                LOG_INFO("Detected coin pattern: %d edges in %lu ms window", 
-                        edgeCount, windowDuration);
-                
-                // Process the coin and reset our edge tracking
-                processCoinInsertion(currentTime);
-                edgeCount = 0;
-            }
-            
-            // Prevent overflow by resetting if we somehow get too many edges without detection
-            if (edgeCount > 10) {
-                edgeCount = 0;
-            }
-        }
-        
-        // Update state for next comparison
-        lastCoinState = coinSignalActiveLow;
+    // Log detailed signal state periodically
+    static unsigned long lastSignalLogTime = 0;
+    if (currentTime - lastSignalLogTime > 1000) { // Log every second
+        lastSignalLogTime = currentTime;
+        LOG_INFO("Coin signal state: Raw=0x%02X, Bit=%d, Active=%d, LastState=%d, Stuck=%d", 
+                rawPortValue0,
+                (rawPortValue0 & (1 << COIN_SIG)) ? 1 : 0,
+                coinSignalActive ? 1 : 0,
+                lastCoinState,
+                signalStuck ? 1 : 0);
     }
     
-    // Reset edge detection if it's been too long without completing a pattern
-    if (edgeCount > 0 && currentTime - edgeWindowStart > 1000) {
-        LOG_DEBUG("Resetting incomplete edge pattern after timeout");
-        edgeCount = 0;
+    // Modified stuck signal detection - be more lenient due to rare pulses
+    if (coinSignalActive == lastSignalState) {
+        // Only consider it stuck after a much longer period (30 seconds instead of 10)
+        if (currentTime - lastSignalChangeTime > 30000) {
+            if (!signalStuck) {
+                signalStuck = true;
+                LOG_WARNING("Coin signal stuck %s for more than 30 seconds!", 
+                           coinSignalActive ? "HIGH" : "LOW");
+            }
+        }
+    } else {
+        // Signal changed, reset stuck detection
+        signalStuck = false;
+        lastSignalChangeTime = currentTime;
+        lastSignalState = coinSignalActive;
+    }
+    
+    // Log raw signal value for debugging - now logging every time
+    LOG_DEBUG("Raw coin signal: 0x%02X, Bit value: %d, Active: %d, Stuck: %d", 
+             rawPortValue0, 
+             (rawPortValue0 & (1 << COIN_SIG)) ? 1 : 0,
+             coinSignalActive ? 1 : 0,
+             signalStuck ? 1 : 0);
+    
+    // Static variables for pulse detection - optimized for very short pulses
+    static unsigned long lastPulseTime = 0;
+    static unsigned long pulseDetectionStart = 0;
+    static bool pulseDetectionActive = false;
+    static int consecutiveSamples = 0;
+    static bool lastSampleState = false;
+    
+    // Fast sampling pulse detection for short pulses (~50μs)
+    // If there's a state change from the last reading
+    if (coinSignalActive != lastCoinState) {
+        // A transition happened, update the last state
+        lastCoinState = coinSignalActive;
+        
+        // If we see a LOW->HIGH transition (or HIGH->LOW, depending on your hardware)
+        if (coinSignalActive) {  // Coin triggers HIGH pulse
+            LOG_DEBUG("Detected possible coin pulse start");
+            pulseDetectionActive = true;
+            pulseDetectionStart = currentTime;
+            consecutiveSamples = 1;
+            lastSampleState = true;
+        }
+    }
+    
+    // If we're in active pulse detection mode
+    if (pulseDetectionActive) {
+        // Check if we've been in this mode too long (timeout after 100ms)
+        if (currentTime - pulseDetectionStart > 100) {
+            LOG_DEBUG("Pulse detection timeout - resetting");
+            pulseDetectionActive = false;
+        }
+        // If we've seen enough consecutive samples of the same type (HIGH)
+        else if (consecutiveSamples >= 2) {
+            LOG_INFO("Valid coin pulse detected!");
+            pulseDetectionActive = false;
+            
+            // Only process this coin if we haven't processed one recently
+            if (currentTime - lastPulseTime > COIN_PROCESS_COOLDOWN) {
+                lastPulseTime = currentTime;
+                processCoinInsertion(currentTime);
+            } else {
+                LOG_DEBUG("Ignoring coin pulse - too soon after previous pulse (%lu ms)",
+                        currentTime - lastPulseTime);
+            }
+        }
+        // Otherwise increment our sample counter if we see another HIGH
+        else if (coinSignalActive && lastSampleState) {
+            consecutiveSamples++;
+            LOG_DEBUG("Consecutive HIGH sample #%d detected", consecutiveSamples);
+        }
+        // If we see a change back to LOW while in detection mode, this is normal
+        // Since our pulse is only 50μs, we'll likely see it go back LOW quickly
+        else if (!coinSignalActive && lastSampleState) {
+            lastSampleState = false;
+            LOG_DEBUG("Pulse returned to LOW - this is expected for short pulses");
+        }
     }
     
     // Periodic debug logging
     static unsigned long lastDebugTime = 0;
     if (currentTime - lastDebugTime > 5000) { // Every 5 seconds to reduce noise
         lastDebugTime = currentTime;
-        LOG_DEBUG("Coin acceptor: Signal=%s, EdgeCount=%d, LastProcess=%lums ago", 
-                coinSignalActiveLow ? "LOW" : "HIGH",
-                edgeCount,
-                currentTime - lastCoinProcessedTime);
+        LOG_DEBUG("Coin acceptor status: Signal=%s, PulseDetection=%s, LastProcess=%lums ago, Stuck=%d", 
+                coinSignalActive ? "HIGH" : "LOW",
+                pulseDetectionActive ? "ACTIVE" : "INACTIVE",
+                currentTime - lastCoinProcessedTime,
+                signalStuck ? 1 : 0);
     }
 }
 
@@ -466,16 +534,21 @@ void CarWashController::processCoinInsertion(unsigned long currentTime) {
 }
 
 void CarWashController::update() {
-    // Serial.println("CarWashController::update");
-    if (config.timestamp == "") {
-        return;
+    static unsigned long lastUpdateLog = 0;
+    unsigned long currentTime = millis();
+    
+    // Log update loop every 5 seconds
+    if (currentTime - lastUpdateLog > 5000) {
+        lastUpdateLog = currentTime;
+        LOG_DEBUG("Update loop running - State: %s, Machine loaded: %d", 
+                 getMachineStateString(currentState),
+                 config.isLoaded);
     }
     
     // Handle buttons and coin acceptor
     handleButtons();
     handleCoinAcceptor();
     
-    unsigned long currentTime = millis();
     publishPeriodicState();
     
     if (currentState == STATE_RUNNING) {

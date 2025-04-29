@@ -111,8 +111,8 @@ void mqtt_callback(char *topic, byte *payload, unsigned int len) {
 }
 
 void setup() {
-  // Initialize Logger with default log level
-  Logger::init(DEFAULT_LOG_LEVEL, 115200);
+  // Initialize Logger with DEBUG level for more detailed logging
+  Logger::init(LOG_DEBUG, 115200);
   delay(1000); // Give time for serial to initialize
   
   LOG_INFO("Starting fullwash-pcb-firmware...");
@@ -150,6 +150,21 @@ void setup() {
     // Initialize all relays to OFF state
     LOG_DEBUG("Setting all relays to OFF...");
     ioExpander.writeRegister(OUTPUT_PORT1, 0x00);
+    
+    // Configure the polarity for Port 0 
+    // This helps with coin acceptor pulse detection by inverting the polarity
+    // For the coin signal pin (P06, bit 7)
+    LOG_DEBUG("Configuring polarity for coin signal...");
+    uint8_t currentPolarity = ioExpander.readRegister(POLARITY_PORT0);
+    
+    // Configure polarity for Port 0, bit 7 (COIN_SIG) to invert it
+    // This makes it easier to detect short pulses
+    // Set bit to 1 for inverted polarity, 0 for normal polarity
+    uint8_t polarityMask = (1 << COIN_SIG);
+    uint8_t newPolarity = currentPolarity | polarityMask;
+    ioExpander.writeRegister(POLARITY_PORT0, newPolarity);
+    
+    LOG_INFO("Coin signal polarity set to INVERTED for better pulse detection");
     
     LOG_INFO("TCA9535 fully initialized. Ready to control relays and read buttons.");
   }

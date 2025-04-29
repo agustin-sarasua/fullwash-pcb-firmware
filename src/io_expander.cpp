@@ -1,6 +1,17 @@
 #include "io_expander.h"
 #include "utilities.h"
 
+// Volatile variables for interrupt handling
+volatile bool coinPinInterruptDetected = false;
+volatile unsigned long lastInterruptTime = 0;
+
+// ISR for coin acceptor
+void IRAM_ATTR coinAcceptorISR() {
+    // Record the time of the interrupt
+    lastInterruptTime = millis();
+    coinPinInterruptDetected = true;
+}
+
 IoExpander::IoExpander(uint8_t address, int sdaPin, int sclPin, int intPin)
     : _address(address), _sdaPin(sdaPin), _sclPin(sclPin), _intPin(intPin), _initialized(false) {
 }
@@ -12,6 +23,10 @@ bool IoExpander::begin() {
     // Set INT pin as input
     pinMode(_intPin, INPUT_PULLUP);
     LOG_DEBUG("INT pin configured");
+    
+    // Attach interrupt to INT pin for coin acceptor
+    attachInterrupt(digitalPinToInterrupt(_intPin), coinAcceptorISR, CHANGE);
+    LOG_INFO("Coin acceptor interrupt attached");
     
     // Check if device is responding
     Wire.beginTransmission(_address);
@@ -240,4 +255,16 @@ void IoExpander::printDebugInfo() {
             (relayState & 0x20) ? 1 : 0, (relayState & 0x10) ? 1 : 0,
             (relayState & 0x08) ? 1 : 0, (relayState & 0x04) ? 1 : 0,
             (relayState & 0x02) ? 1 : 0, (relayState & 0x01) ? 1 : 0);
+}
+
+// Check if an interrupt was detected
+bool IoExpander::wasInterruptDetected() {
+    bool result = coinPinInterruptDetected;
+    coinPinInterruptDetected = false; // Reset the flag
+    return result;
+}
+
+// Get the last interrupt time
+unsigned long IoExpander::getLastInterruptTime() {
+    return lastInterruptTime;
 }
