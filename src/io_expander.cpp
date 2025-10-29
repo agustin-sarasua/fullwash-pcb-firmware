@@ -3,7 +3,12 @@
 
 IoExpander::IoExpander(uint8_t address, int sdaPin, int sclPin, int intPin)
     : _address(address), _sdaPin(sdaPin), _sclPin(sclPin), _intPin(intPin), 
-      _initialized(false), _lastInterruptTime(0), _coinSignalDetected(false) {
+      _initialized(false), _lastInterruptTime(0), _coinSignalDetected(false),
+      _buttonDetected(false), _detectedButtonId(255), _intCnt(0), _portVal(0) {
+    // Initialize button timing arrays
+    for (int i = 0; i < 6; i++) {
+        _lastButtonTime[i] = 0;
+    }
 }
 
 bool IoExpander::begin() {
@@ -288,10 +293,12 @@ void IoExpander::handleInterrupt() {
 
     // The TCA9535 interrupt is active LOW, so we check if the pin is LOW
     if (digitalRead(_intPin) == LOW) {
+        _intCnt++;
         // Read the input port to see what changed
+        LOG_DEBUG("IntPin:%d, cnt:%d", digitalRead(_intPin), _intCnt);
         uint8_t portValue = readRegister(INPUT_PORT0);
         
-        LOG_DEBUG("Interrupt detected! Port 0 Value: 0x%02X", portValue);
+        // LOG_DEBUG("Interrupt detected! Port 0 Value: 0x%02X", portValue);
         
         bool coinSigActive = ((portValue & (1 << COIN_SIG)) != 0);
         
@@ -315,6 +322,41 @@ bool IoExpander::isCoinSignalDetected() {
     return _coinSignalDetected;
 }
 
+void IoExpander::setCoinSignal(uint8_t sign) {
+    if (sign) {
+        _coinSignalDetected = true;
+    } else {
+        _coinSignalDetected = false;
+    }
+}
+
 void IoExpander::clearCoinSignalFlag() {
     _coinSignalDetected = false;
+}
+
+// Button detection methods implementation
+bool IoExpander::isButtonDetected() {
+    return _buttonDetected;
+}
+
+uint8_t IoExpander::getDetectedButtonId() {
+    return _detectedButtonId;
+}
+
+void IoExpander::setButtonFlag(uint8_t buttonId, bool state) {
+    if (buttonId < 6) {
+        unsigned long currentTime = millis();
+        // Simple debouncing - only set if enough time has passed
+        if (state && (currentTime - _lastButtonTime[buttonId] > DEBOUNCE_INTERVAL)) {
+            _buttonDetected = true;
+            _detectedButtonId = buttonId;
+            _lastButtonTime[buttonId] = currentTime;
+            LOG_DEBUG("Button %d flag set (debounced)", buttonId + 1);
+        }
+    }
+}
+
+void IoExpander::clearButtonFlag() {
+    _buttonDetected = false;
+    _detectedButtonId = 255; // Invalid button ID
 }
