@@ -1,8 +1,10 @@
 #include "car_wash_controller.h"
 #include "io_expander.h"
+#include "rtc_manager.h"
 
 CarWashController::CarWashController(MqttLteClient& client)
     : mqttClient(client),
+      rtcManager(nullptr),
       currentState(STATE_FREE),
       lastActionTime(0),
       activeButton(-1),
@@ -58,6 +60,11 @@ CarWashController::CarWashController(MqttLteClient& client)
     config.physicalTokens = 0;
 }
 
+void CarWashController::setRTCManager(RTCManager* rtc) {
+    rtcManager = rtc;
+    LOG_INFO("RTC Manager connected to controller");
+}
+
 void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payload, unsigned len) {
     StaticJsonDocument<512> doc;
     DeserializationError error = deserializeJson(doc, payload, len);
@@ -73,6 +80,18 @@ void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payl
         config.physicalTokens = 0;  // No physical tokens when session is initialized remotely
         config.timestamp = doc["timestamp"].as<String>();
         config.timestampMillis = millis();
+        
+        // Sync RTC with server timestamp if RTC is available
+        if (rtcManager && rtcManager->isInitialized() && config.timestamp.length() > 0) {
+            LOG_INFO("Syncing RTC with server timestamp: %s", config.timestamp.c_str());
+            if (rtcManager->setDateTimeFromISO(config.timestamp)) {
+                LOG_INFO("RTC synchronized successfully!");
+                rtcManager->printDebugInfo();
+            } else {
+                LOG_WARNING("Failed to sync RTC with server timestamp");
+            }
+        }
+        
         config.isLoaded = true;
         currentState = STATE_IDLE;
         lastActionTime = millis();
@@ -83,6 +102,17 @@ void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payl
         LOG_DEBUG("Updating machine configuration timestamp: %s", doc["timestamp"].as<String>().c_str());
         config.timestamp = doc["timestamp"].as<String>();
         config.timestampMillis = millis();
+        
+        // Sync RTC with server timestamp if RTC is available
+        if (rtcManager && rtcManager->isInitialized() && config.timestamp.length() > 0) {
+            LOG_INFO("Syncing RTC with server timestamp: %s", config.timestamp.c_str());
+            if (rtcManager->setDateTimeFromISO(config.timestamp)) {
+                LOG_INFO("RTC synchronized successfully!");
+            } else {
+                LOG_WARNING("Failed to sync RTC with server timestamp");
+            }
+        }
+        
         config.sessionId = "";
         config.userId = "";
         config.userName = "";
@@ -612,7 +642,15 @@ unsigned long CarWashController::getSecondsLeft() {
 }
 
 String CarWashController::getTimestamp() {
-    // First, let's add some debug logging
+    // PRIORITY 1: Use RTC if available and initialized
+    if (rtcManager && rtcManager->isInitialized()) {
+        String rtcTimestamp = rtcManager->getTimestampWithMillis();
+        LOG_DEBUG("Using RTC timestamp: %s", rtcTimestamp.c_str());
+        return rtcTimestamp;
+    }
+    
+    // FALLBACK: Use millis()-based calculation if RTC is not available
+    LOG_DEBUG("RTC not available, using millis() based timestamp");
     LOG_DEBUG("Raw timestamp: %s", config.timestamp.c_str());
     LOG_DEBUG("Timestamp millis: %lu", config.timestampMillis);
     LOG_DEBUG("Current millis: %lu", millis());
@@ -692,7 +730,7 @@ String CarWashController::getTimestamp() {
             adjustedTm.Year + 1970, adjustedTm.Month, adjustedTm.Day,
             adjustedTm.Hour, adjustedTm.Minute, adjustedTm.Second, milliseconds);
     
-    LOG_DEBUG("Formatted timestamp: %s", isoTimestamp);
+    LOG_DEBUG("Formatted timestamp (millis-based): %s", isoTimestamp);
     
     return String(isoTimestamp);
 }

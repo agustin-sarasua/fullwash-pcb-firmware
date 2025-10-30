@@ -72,4 +72,7 @@
 #define LCD_SDA_PIN      21   // Separate I2C pins for LCD
 #define LCD_SCL_PIN      22   // Separate I2C pins for LCD
 
+// RTC Configuration
+#define RTC_DS1340_ADDR  0x68 // DS1340Z RTC I2C address (shared bus with LCD)
+
 #endif // UTILITIES_H

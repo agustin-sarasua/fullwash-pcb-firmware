@@ -10,6 +10,9 @@
 #include "constants.h"
 #include "logger.h"
 
+// Forward declaration
+class RTCManager;
+
 class CarWashController {
 public:
     CarWashController(MqttLteClient& client);
@@ -34,6 +37,9 @@ public:
     String getTimestamp();
     void setLogLevel(LogLevel level);
     
+    // RTC integration
+    void setRTCManager(RTCManager* rtc);
+    
     // Additional getters for LCD display
     String getUserName() const { return config.userName; }
     int getTokensLeft() const { return config.tokens; }
@@ -42,6 +48,7 @@ public:
 
 private:
     MqttLteClient& mqttClient;
+    RTCManager* rtcManager;  // Pointer to RTC manager for accurate timestamps
     MachineState currentState;
     MachineConfig config;
     
