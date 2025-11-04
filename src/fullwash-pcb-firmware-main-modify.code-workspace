@@ -21,6 +21,12 @@
 		},
 		{
 			"path": "../../../../../avocabo_workspace/avocabo-backend"
+		},
+		{
+			"path": "../../../../../workspace/avocabo-infra"
+		},
+		{
+			"path": "../../../../../avocabo_workspace/avocabo_mono"
 		}
 	],
 	"settings": {

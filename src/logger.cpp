@@ -1,7 +1,7 @@
 #include "../include/logger.h"
 #include <stdarg.h>
 
-LogLevel Logger::currentLevel = LOG_INFO;
+LogLevel Logger::currentLevel = LOG_DEBUG;
 bool Logger::initialized = false;
 const char* Logger::levelNames[] = {"NONE", "ERROR", "WARNING", "INFO", "DEBUG"};
 

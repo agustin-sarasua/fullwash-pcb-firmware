@@ -28,6 +28,10 @@ bool RTCManager::begin() {
     
     LOG_INFO("DS1340 RTC found!");
     
+    // Mark as initialized now that we've confirmed the RTC responds
+    // This allows isOscillatorRunning() and startOscillator() to work
+    _initialized = true;
+    
     // Check if oscillator is running
     if (!isOscillatorRunning()) {
         LOG_WARNING("RTC oscillator is stopped! Starting it now...");
@@ -39,8 +43,6 @@ bool RTCManager::begin() {
     } else {
         LOG_INFO("RTC oscillator is running");
     }
-    
-    _initialized = true;
     
     // Read current time for verification
     time_t currentTime = getDateTime();
