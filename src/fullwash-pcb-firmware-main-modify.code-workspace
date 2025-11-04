@@ -18,6 +18,9 @@
 		},
 		{
 			"path": "../../../../../workspace/fullwash-app"
+		},
+		{
+			"path": "../../../../../avocabo_workspace/avocabo-backend"
 		}
 	],
 	"settings": {

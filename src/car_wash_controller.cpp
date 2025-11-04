@@ -79,7 +79,14 @@ void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payl
         config.tokens = doc["tokens"].as<int>();
         config.physicalTokens = 0;  // No physical tokens when session is initialized remotely
         config.timestamp = doc["timestamp"].as<String>();
-        config.timestampMillis = millis();
+        
+        // Only store timestampMillis if RTC not available (for fallback timestamp calculation)
+        // If RTC is available, we don't need millis() offset since RTC is the primary time source
+        if (rtcManager && rtcManager->isInitialized()) {
+            config.timestampMillis = 0;  // Not needed, RTC handles timestamps
+        } else {
+            config.timestampMillis = millis();  // Store for fallback timestamp calculation
+        }
         
         // Sync RTC with server timestamp if RTC is available
         if (rtcManager && rtcManager->isInitialized() && config.timestamp.length() > 0) {
@@ -99,26 +106,33 @@ void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payl
         digitalWrite(LED_PIN_INIT, HIGH);
         LOG_INFO("Machine loaded with new configuration");
     } else if (String(topic) == CONFIG_TOPIC) {
-        LOG_DEBUG("Updating machine configuration timestamp: %s", doc["timestamp"].as<String>().c_str());
+        LOG_INFO("Received config message from server");
         config.timestamp = doc["timestamp"].as<String>();
-        config.timestampMillis = millis();
+        
+        // Only store timestampMillis if RTC not available (for fallback timestamp calculation)
+        // If RTC is available, we don't need millis() offset since RTC is the primary time source
+        if (rtcManager && rtcManager->isInitialized()) {
+            config.timestampMillis = 0;  // Not needed, RTC handles timestamps
+        } else {
+            config.timestampMillis = millis();  // Store for fallback timestamp calculation
+        }
         
         // Sync RTC with server timestamp if RTC is available
+        // This is now only sent when RTC time is invalid, so always sync when received
         if (rtcManager && rtcManager->isInitialized() && config.timestamp.length() > 0) {
             LOG_INFO("Syncing RTC with server timestamp: %s", config.timestamp.c_str());
             if (rtcManager->setDateTimeFromISO(config.timestamp)) {
                 LOG_INFO("RTC synchronized successfully!");
+                rtcManager->printDebugInfo();
             } else {
                 LOG_WARNING("Failed to sync RTC with server timestamp");
             }
+        } else if (!rtcManager || !rtcManager->isInitialized()) {
+            LOG_WARNING("Cannot sync RTC - RTC not initialized");
         }
         
-        config.sessionId = "";
-        config.userId = "";
-        config.userName = "";
-        config.tokens = 0;
-        config.physicalTokens = 0;
-        config.isLoaded = false;
+        // Note: Config no longer clears session data
+        // Session is only cleared on STOP action or timeout
     } else {
         LOG_WARNING("Unknown topic: %s", topic);
     }
@@ -615,6 +629,19 @@ void CarWashController::publishMachineSetupActionEvent() {
     doc["action"] = getMachineActionString(ACTION_SETUP);
     doc["timestamp"] = getTimestamp();
     
+    // Include RTC status to help backend decide if time sync is needed
+    if (rtcManager) {
+        doc["rtc_valid"] = rtcManager->isTimeValid();
+        if (rtcManager->isInitialized()) {
+            doc["rtc_initialized"] = true;
+        } else {
+            doc["rtc_initialized"] = false;
+        }
+    } else {
+        doc["rtc_valid"] = false;
+        doc["rtc_initialized"] = false;
+    }
+    
     String jsonString;
     serializeJson(doc, jsonString);
     mqttClient.publish(ACTION_TOPIC.c_str(), jsonString.c_str(), QOS1_AT_LEAST_ONCE);
@@ -706,9 +733,30 @@ String CarWashController::getTimestamp() {
     LOG_DEBUG("Server epoch: %lu", (unsigned long)serverEpoch);
     
     // Calculate time elapsed since timestamp was set
+    // Handle millis() overflow safely (overflow occurs every ~50 days on ESP32)
     unsigned long millisOffset = 0;
     if (config.timestampMillis > 0) {
-        millisOffset = millis() - config.timestampMillis;
+        unsigned long currentMillis = millis();
+        // Check for overflow: if currentMillis < config.timestampMillis, overflow occurred
+        if (currentMillis >= config.timestampMillis) {
+            // Normal case: no overflow
+            millisOffset = currentMillis - config.timestampMillis;
+        } else {
+            // Overflow occurred - calculate correctly accounting for wraparound
+            // On ESP32, unsigned long is 32-bit, so max value is 4,294,967,295
+            // Formula: (max_value - old_value) + new_value + 1
+            const unsigned long MAX_ULONG = 0xFFFFFFFFUL;  // 4,294,967,295
+            millisOffset = (MAX_ULONG - config.timestampMillis) + currentMillis + 1;
+            
+            // Safety check: if more than 2 days have passed, timestamp is probably stale
+            // This could indicate a serious problem (power loss, system restart, etc.)
+            if (millisOffset > 86400000UL * 2) {  // 2 days in milliseconds
+                LOG_ERROR("Timestamp calculation error: millis() overflow detected and timestamp appears stale (>2 days)");
+                // Still return the calculation, but log the warning
+            } else {
+                LOG_DEBUG("Millis overflow detected, calculated offset: %lu ms", millisOffset);
+            }
+        }
     }
     LOG_DEBUG("Millis offset: %lu", millisOffset);
     

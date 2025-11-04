@@ -21,10 +21,11 @@ const char* AWS_CLIENT_ID = "fullwash-machine-001";
 const uint16_t AWS_BROKER_PORT = 8883;
 
 // GSM connection settings
-const char apn[] = "internet"; // Replace with your carrier's APN if needed
+// const char apn[] = "internet";
+const char apn[] = "antel.lte"; // Replace with your carrier's APN if needed
 const char gprsUser[] = "";
 const char gprsPass[] = "";
-const char pin[] = "3846";
+const char pin[] = "0281";
 
 // Create MQTT LTE client
 MqttLteClient mqttClient(SerialAT, MODEM_PWRKEY, MODEM_DTR, MODEM_FLIGHT, MODEM_TX, MODEM_RX);

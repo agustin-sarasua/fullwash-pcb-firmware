@@ -132,6 +132,19 @@ public:
     bool startOscillator();
     
     /**
+     * @brief Check if RTC time is valid and doesn't need sync
+     * 
+     * RTC time is considered valid if:
+     * - RTC is initialized
+     * - Time is after 2020-01-01 (reasonable starting point)
+     * - Oscillator is running
+     * 
+     * @return true if RTC time is valid (no sync needed)
+     * @return false if RTC time is invalid or needs sync
+     */
+    bool isTimeValid();
+    
+    /**
      * @brief Print current RTC time to serial for debugging
      */
     void printDebugInfo();
@@ -214,4 +227,5 @@ private:
 };
 
 #endif // RTC_MANAGER_H
+
 

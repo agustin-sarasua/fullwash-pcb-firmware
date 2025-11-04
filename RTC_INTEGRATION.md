@@ -347,3 +347,4 @@ The RTC integration provides robust, accurate timekeeping for the fullwash-pcb-f
 
 All timestamps used in MQTT messages and system events now benefit from RTC accuracy.
 
+

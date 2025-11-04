@@ -171,6 +171,39 @@ bool RTCManager::startOscillator() {
     return writeRegister(REG_SECONDS, seconds);
 }
 
+bool RTCManager::isTimeValid() {
+    if (!_initialized) {
+        return false;
+    }
+    
+    // Check if oscillator is running
+    if (!isOscillatorRunning()) {
+        LOG_DEBUG("RTC time invalid: oscillator is stopped");
+        return false;
+    }
+    
+    // Check if time is reasonable (after 2020-01-01)
+    time_t currentTime = getDateTime();
+    if (currentTime == 0) {
+        LOG_DEBUG("RTC time invalid: failed to read time");
+        return false;
+    }
+    
+    // 2020-01-01 00:00:00 UTC = 1577836800
+    if (currentTime < 1577836800UL) {
+        LOG_DEBUG("RTC time invalid: time is before 2020 (epoch: %lu)", (unsigned long)currentTime);
+        return false;
+    }
+    
+    // Check if time is not too far in the future (e.g., 2100-01-01 = 4102444800)
+    if (currentTime > 4102444800UL) {
+        LOG_DEBUG("RTC time invalid: time is too far in future (epoch: %lu)", (unsigned long)currentTime);
+        return false;
+    }
+    
+    return true;
+}
+
 bool RTCManager::setDateTime(time_t epochTime) {
     if (!_initialized || epochTime == 0) return false;
     
@@ -394,4 +427,5 @@ void RTCManager::printDebugInfo() {
     
     LOG_DEBUG("========================");
 }
+
 
