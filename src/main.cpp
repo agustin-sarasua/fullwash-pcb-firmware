@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include "mqtt_lte_client.h"
 #include "io_expander.h"
 #include "utilities.h"
@@ -8,6 +10,7 @@
 #include "logger.h"
 #include "display_manager.h"
 #include "rtc_manager.h"
+#include "ble_config_manager.h"
 
 #include "certs/AmazonRootCA.h"
 #include "certs/AWSClientCertificate.h"
@@ -17,7 +20,7 @@
 
 // Server details
 const char* AWS_BROKER = "a3foc0mc6v7ap0-ats.iot.us-east-1.amazonaws.com";
-const char* AWS_CLIENT_ID = "fullwash-machine-001";
+String AWS_CLIENT_ID = "fullwash-machine-001";  // Will be updated dynamically based on BLE config
 const uint16_t AWS_BROKER_PORT = 8883;
 
 // GSM connection settings
@@ -41,6 +44,9 @@ CarWashController* controller;
 
 // Create display manager
 DisplayManager* display;
+
+// Create BLE config manager
+BLEConfigManager* bleConfigManager;
 
 // FreeRTOS task handles
 TaskHandle_t TaskCoinDetectorHandle = NULL;
@@ -216,6 +222,9 @@ void TaskNetworkManager(void *pvParameters) {
         if (currentTime - lastNetworkCheck > 30000) {
             lastNetworkCheck = currentTime;
             
+            // Yield before potentially long network operations
+            vTaskDelay(pdMS_TO_TICKS(50));
+            
             if (!mqttClient.isNetworkConnected()) {
                 LOG_WARNING("Lost cellular network connection");
                 
@@ -224,6 +233,9 @@ void TaskNetworkManager(void *pvParameters) {
                     lastConnectionAttempt = currentTime;
                     
                     LOG_INFO("Attempting to reconnect to cellular network...");
+                    
+                    // Yield before network operation to let IDLE task run
+                    vTaskDelay(pdMS_TO_TICKS(100));
                     
                     // Monitor stack before network operation
                     UBaseType_t stackBefore = uxTaskGetStackHighWaterMark(NULL);
@@ -250,6 +262,11 @@ void TaskNetworkManager(void *pvParameters) {
                         UBaseType_t stackAfter = uxTaskGetStackHighWaterMark(NULL);
                         LOG_DEBUG("Stack after network init: %d bytes remaining", stackAfter);
                         
+                        // Cleanup SSL client since network was lost (old SSL session is invalid)
+                        LOG_INFO("Cleaning up SSL state after network loss");
+                        mqttClient.cleanupSSLClient();
+                        vTaskDelay(500 / portTICK_PERIOD_MS); // Reduced from 1000ms to prevent watchdog timeout
+                        
                         // Reconfigure SSL certificates
                         mqttClient.setCACert(AmazonRootCA);
                         mqttClient.setCertificate(AWSClientCertificate);
@@ -259,8 +276,11 @@ void TaskNetworkManager(void *pvParameters) {
                         UBaseType_t stackBeforeSSL = uxTaskGetStackHighWaterMark(NULL);
                         LOG_DEBUG("Stack before MQTT SSL connect: %d bytes remaining", stackBeforeSSL);
                         
+                        // Yield before SSL connection (this can take several seconds)
+                        vTaskDelay(pdMS_TO_TICKS(100));
+                        
                         // Connect to MQTT broker with improved error handling
-                        if (mqttClient.connect(AWS_BROKER, AWS_BROKER_PORT, AWS_CLIENT_ID)) {
+                        if (mqttClient.connect(AWS_BROKER, AWS_BROKER_PORT, AWS_CLIENT_ID.c_str())) {
                             LOG_INFO("MQTT broker connection restored!");
                             
                             // Monitor stack after SSL connection
@@ -292,14 +312,23 @@ void TaskNetworkManager(void *pvParameters) {
                     if (currentTime - lastMqttReconnectAttempt > 15000) {
                         lastMqttReconnectAttempt = currentTime;
                         LOG_WARNING("Network connected but MQTT disconnected, attempting to reconnect...");
+                        
+                        // Yield before reconnection attempt (SSL operations can block)
+                        vTaskDelay(pdMS_TO_TICKS(50));
                         mqttClient.reconnect();
                     }
                 }
             }
         }
         
+        // Yield periodically even when not checking network
+        vTaskDelay(pdMS_TO_TICKS(100));
+        
         // Process MQTT messages if connected
         if (mqttClient.isNetworkConnected()) {
+            // Yield to other tasks before potentially blocking operation
+            vTaskDelay(pdMS_TO_TICKS(10));
+            
             mqttClient.loop();
             
             // Status message every 60 seconds if connected
@@ -314,8 +343,10 @@ void TaskNetworkManager(void *pvParameters) {
             }
         }
         
-        // Small delay to prevent task from consuming too much CPU
-        vTaskDelay(xMqttCheckDelay);
+        // Longer delay to prevent task from consuming too much CPU
+        // This allows lower priority tasks (including IDLE task) to run
+        // CRITICAL: Must delay here to prevent watchdog timeout
+        vTaskDelay(pdMS_TO_TICKS(200));  // Increased to 200ms to give more time for IDLE task
     }
 }
 
@@ -505,6 +536,82 @@ void mqtt_callback(char *topic, byte *payload, unsigned int len) {
                     LOG_WARNING("RTC is not initialized");
                 }
             }
+            // Add command to get BLE configuration status
+            else if (command == "debug_ble") {
+                LOG_INFO("=== Configuration Status ===");
+                extern BLEConfigManager* bleConfigManager;
+                
+                // Read from persistent storage
+                Preferences debugPrefs;
+                debugPrefs.begin(PREFS_NAMESPACE, true);
+                String storedMachineNum = debugPrefs.getString(PREFS_MACHINE_NUM, "99");
+                String storedEnv = debugPrefs.getString(PREFS_ENVIRONMENT, "prod");
+                debugPrefs.end();
+                
+                LOG_INFO("Stored Machine Number: %s", storedMachineNum.c_str());
+                LOG_INFO("Stored Environment: %s", storedEnv.c_str());
+                LOG_INFO("Current MACHINE_ID: %s", MACHINE_ID.c_str());
+                LOG_INFO("Current AWS_CLIENT_ID: %s", AWS_CLIENT_ID.c_str());
+                LOG_INFO("BLE Status: %s", bleConfigManager && bleConfigManager->isInitialized() ? "Active" : "Deinitialized (saves memory)");
+                LOG_INFO("Free Heap: %d bytes", ESP.getFreeHeap());
+                LOG_INFO("============================");
+            }
+            // Add command to remotely update machine number (for authorized users)
+            else if (command == "set_machine_number" && doc.containsKey("number")) {
+                String newNumber = doc["number"].as<String>();
+                LOG_INFO("Remote machine number change requested: %s", newNumber.c_str());
+                
+                // Update directly in Preferences (BLE might be deinitialized)
+                Preferences updatePrefs;
+                updatePrefs.begin(PREFS_NAMESPACE, false);
+                
+                // Get current environment
+                String currentEnv = updatePrefs.getString(PREFS_ENVIRONMENT, "prod");
+                
+                // Update machine number
+                size_t written = updatePrefs.putString(PREFS_MACHINE_NUM, newNumber);
+                updatePrefs.end();
+                
+                if (written > 0) {
+                    LOG_INFO("Machine number updated successfully in storage: %s", newNumber.c_str());
+                    LOG_INFO("*** RESTART REQUIRED FOR CHANGES TO TAKE EFFECT ***");
+                    
+                    // Update runtime variables (will be lost on restart, but good for immediate use)
+                    updateMQTTTopics(newNumber, currentEnv);
+                    AWS_CLIENT_ID = String("fullwash-machine-") + newNumber;
+                    LOG_INFO("AWS Client ID updated to: %s", AWS_CLIENT_ID.c_str());
+                    LOG_INFO("NOTE: Restart device to fully apply changes");
+                } else {
+                    LOG_ERROR("Failed to update machine number in storage");
+                }
+            }
+            // Add command to remotely update environment (for authorized users)
+            else if (command == "set_environment" && doc.containsKey("environment")) {
+                String newEnv = doc["environment"].as<String>();
+                LOG_INFO("Remote environment change requested: %s", newEnv.c_str());
+                
+                // Update directly in Preferences (BLE might be deinitialized)
+                Preferences updatePrefs;
+                updatePrefs.begin(PREFS_NAMESPACE, false);
+                
+                // Get current machine number
+                String currentMachineNum = updatePrefs.getString(PREFS_MACHINE_NUM, "99");
+                
+                // Update environment
+                size_t written = updatePrefs.putString(PREFS_ENVIRONMENT, newEnv);
+                updatePrefs.end();
+                
+                if (written > 0) {
+                    LOG_INFO("Environment updated successfully in storage: %s", newEnv.c_str());
+                    LOG_INFO("*** RESTART REQUIRED FOR CHANGES TO TAKE EFFECT ***");
+                    
+                    // Update runtime variables (will be lost on restart, but good for immediate use)
+                    updateMQTTTopics(currentMachineNum, newEnv);
+                    LOG_INFO("NOTE: Restart device to fully apply changes");
+                } else {
+                    LOG_ERROR("Failed to update environment in storage");
+                }
+            }
             // Add command to manually set RTC time from server
             else if (command == "sync_rtc" && doc.containsKey("timestamp")) {
                 String timestamp = doc["timestamp"].as<String>();
@@ -534,6 +641,68 @@ void setup() {
   delay(1000); // Give time for serial to initialize
   
   LOG_INFO("Starting fullwash-pcb-firmware...");
+  
+  // Check if machine is already configured by loading from preferences
+  LOG_INFO("=== Checking Machine Configuration ===");
+  bleConfigManager = new BLEConfigManager();
+  
+  // Load configuration without initializing BLE yet
+  Preferences prefs;
+  prefs.begin(PREFS_NAMESPACE, true); // Read-only mode
+  String machineNum = prefs.getString(PREFS_MACHINE_NUM, "99");
+  String environment = prefs.getString(PREFS_ENVIRONMENT, "prod");
+  prefs.end();
+  
+  bool needsConfiguration = (machineNum == "99"); // Default value means not configured
+  
+  if (needsConfiguration) {
+    LOG_INFO("Machine NOT configured (machine number: %s)", machineNum.c_str());
+    LOG_INFO("=== INITIAL SETUP MODE ===");
+    LOG_INFO("Starting BLE for initial configuration...");
+    
+    // Initialize BLE and wait for configuration
+    if (bleConfigManager->begin()) {
+      LOG_INFO("BLE is now advertising. Please connect to configure the machine.");
+      LOG_INFO("Device name: %s", BLE_DEVICE_NAME);
+      LOG_INFO("Use password: %s (default - should be changed)", DEFAULT_MASTER_PASSWORD);
+      LOG_INFO("Waiting for configuration... MQTT will connect after setup.");
+      
+      // Wait for machine number to be changed from default
+      LOG_INFO("Setup will continue once machine number is set via BLE.");
+      unsigned long bleStartTime = millis();
+      // const unsigned long BLE_SETUP_TIMEOUT = 150000; // 2.5 minutes timeout
+      const unsigned long BLE_SETUP_TIMEOUT = 10000; // 10 seconds timeout
+      
+      while (bleConfigManager->getMachineNumber() == "99") {
+        bleConfigManager->update();
+        delay(1000);
+        
+        // Timeout check
+        if (millis() - bleStartTime > BLE_SETUP_TIMEOUT) {
+          LOG_WARNING("BLE setup timeout after 5 minutes. Using default configuration.");
+          break;
+        }
+      }
+      
+      // Configuration complete
+      machineNum = bleConfigManager->getMachineNumber();
+      environment = bleConfigManager->getEnvironment();
+      LOG_INFO("Configuration received! Machine: %s, Environment: %s", 
+               machineNum.c_str(), environment.c_str());
+    } else {
+      LOG_ERROR("Failed to initialize BLE - using defaults");
+    }
+  } else {
+    LOG_INFO("Machine already configured: %s (environment: %s)", 
+             machineNum.c_str(), environment.c_str());
+    LOG_INFO("Skipping BLE initialization to save memory for MQTT.");
+  }
+  
+  // Update MQTT topics with the configuration
+  updateMQTTTopics(machineNum, environment);
+  AWS_CLIENT_ID = String("fullwash-machine-") + machineNum;
+  LOG_INFO("AWS Client ID set to: %s", AWS_CLIENT_ID.c_str());
+  LOG_INFO("====================================");
   
   // Set up the built-in LED
   pinMode(LED_PIN, OUTPUT);
@@ -625,6 +794,8 @@ void setup() {
   if (rtcManager->begin()) {
     LOG_INFO("RTC initialization successful!");
     rtcManager->printDebugInfo();
+    // Connect RTC to logger for timestamps
+    Logger::setRTCManager(rtcManager);
   } else {
     LOG_ERROR("Failed to initialize RTC!");
     LOG_WARNING("System will continue without RTC. Timestamps may be inaccurate.");
@@ -640,6 +811,18 @@ void setup() {
   mqttClient.setCallback(mqtt_callback);
   mqttClient.setBufferSize(512);
 
+  // Deinitialize BLE if it was initialized (to free memory for MQTT/SSL)
+  // BLE consumes ~30-40KB of heap which is needed for SSL/TLS handshake
+  if (bleConfigManager && bleConfigManager->isInitialized()) {
+    LOG_INFO("=== Freeing BLE Memory for MQTT ===");
+    LOG_INFO("Current free heap: %d bytes", ESP.getFreeHeap());
+    bleConfigManager->deinit();
+    delay(1000); // Give system time to clean up
+    LOG_INFO("After BLE deinit, free heap: %d bytes", ESP.getFreeHeap());
+    LOG_INFO("BLE deinitialized - memory freed for MQTT/SSL");
+    LOG_INFO("===================================");
+  }
+
   // Initialize modem and connect to network (in setup, network task will handle reconnections)
   LOG_INFO("Initializing modem and connecting to network...");
   if (mqttClient.begin(apn, gprsUser, gprsPass, pin)) {
@@ -650,7 +833,7 @@ void setup() {
     
     // Connect to MQTT broker
     LOG_INFO("Connecting to MQTT broker...");
-    if (mqttClient.connect(AWS_BROKER, AWS_BROKER_PORT, AWS_CLIENT_ID)) {
+    if (mqttClient.connect(AWS_BROKER, AWS_BROKER_PORT, AWS_CLIENT_ID.c_str())) {
       LOG_INFO("Connected to MQTT broker!");
       
       LOG_DEBUG("Subscribing to topic: %s", INIT_TOPIC.c_str());
@@ -675,24 +858,26 @@ void setup() {
   
   // Create Network Manager task (handles all network/MQTT operations)
   LOG_INFO("Creating Network Manager task...");
-  xTaskCreate(
+  xTaskCreatePinnedToCore(
       TaskNetworkManager,           // Task function
       "NetworkManager",             // Task name
       16384,                        // Stack size (bytes) - SSL/TLS requires large stack (16KB)
       NULL,                         // Task parameters
       2,                            // Priority (2 = medium priority)
-      &TaskNetworkManagerHandle     // Task handle
+      &TaskNetworkManagerHandle,    // Task handle
+      1                             // Pin to core 1 (APP CPU)
   );
   
   // Create Watchdog task (monitors system health)
   LOG_INFO("Creating Watchdog task...");
-  xTaskCreate(
+  xTaskCreatePinnedToCore(
       TaskWatchdog,                 // Task function
       "Watchdog",                   // Task name
       2048,                         // Stack size (bytes)
       NULL,                         // Task parameters
       1,                            // Priority (1 = lowest priority - monitoring only)
-      &TaskWatchdogHandle           // Task handle
+      &TaskWatchdogHandle,          // Task handle
+      1                             // Pin to core 1 (APP CPU)
   );
   
   LOG_INFO("All FreeRTOS tasks created successfully");
@@ -711,10 +896,17 @@ void loop() {
   static unsigned long lastButtonCheck = 0;
   static unsigned long lastIoDebugCheck = 0;
   static unsigned long lastLedToggle = 0;
+  static unsigned long lastBleUpdate = 0;
   static bool ledState = HIGH;
   
   // Current time
   unsigned long currentTime = millis();
+  
+  // Update BLE config manager (check auth timeout, etc.) - only if BLE is still initialized
+  if (bleConfigManager && bleConfigManager->isInitialized() && currentTime - lastBleUpdate > 1000) {
+    lastBleUpdate = currentTime;
+    bleConfigManager->update();
+  }
   
   // NOTE: Network operations are now handled by TaskNetworkManager
   // No need to check network status or process MQTT messages here

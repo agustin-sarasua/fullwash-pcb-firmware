@@ -184,6 +184,8 @@ void CarWashController::handleButtons() {
                 
                 // Process button action
                 if (config.isLoaded) {
+                    LOG_INFO("Button %d: config.isLoaded=true, currentState=%d, tokens=%d", 
+                            i+1, currentState, config.tokens);
                     if (currentState == STATE_IDLE) {
                         LOG_INFO("Activating button %d in IDLE state", i+1);
                         activateButton(i, MANUAL);
@@ -198,7 +200,7 @@ void CarWashController::handleButtons() {
                                    i+1, currentState, activeButton);
                     }
                 } else {
-                    LOG_WARNING("Button press ignored - config not loaded!");
+                    LOG_WARNING("Button press ignored - config not loaded! (config.isLoaded=false)");
                 }
             }
         } else {
@@ -231,12 +233,12 @@ void CarWashController::handleButtons() {
             Serial.printf("** STOP BUTTON PRESSED AND DEBOUNCED **\n");
             LOG_INFO("STOP button pressed and debounced!");
             
-            // Process button action
-            if (currentState == STATE_RUNNING) {
-                LOG_INFO("Stopping machine via STOP button");
+            // Process button action - stop button should log out user whenever machine is loaded
+            if (config.isLoaded) {
+                LOG_INFO("Logging out user via STOP button (currentState=%d)", currentState);
                 stopMachine(MANUAL);
             } else {
-                LOG_WARNING("STOP button pressed but ignored - not in running state (state=%d)", currentState);
+                LOG_WARNING("STOP button pressed but ignored - machine not loaded (config.isLoaded=false)");
             }
         }
     } else {
@@ -375,12 +377,14 @@ void CarWashController::stopMachine(TriggerType triggerType) {
 }
 
 void CarWashController::activateButton(int buttonIndex, TriggerType triggerType) {
-    LOG_INFO("Activating button: %d", buttonIndex+1);  // +1 for human-readable button number
+    LOG_INFO("Activating button: %d (triggerType=%s)", buttonIndex+1, triggerType == MANUAL ? "MANUAL" : "AUTOMATIC");
 
     if (config.tokens <= 0) {
-        LOG_WARNING("Cannot activate - no tokens left");
+        LOG_WARNING("Cannot activate button %d - no tokens left (tokens=%d)", buttonIndex+1, config.tokens);
         return;
     }
+    
+    LOG_INFO("Activating button %d: tokens=%d, state=%d -> STATE_RUNNING", buttonIndex+1, config.tokens, currentState);
 
     digitalWrite(RUNNING_LED_PIN, HIGH);
     currentState = STATE_RUNNING;
@@ -665,6 +669,13 @@ void CarWashController::processCoinInsertion(unsigned long currentTime) {
 
 void CarWashController::update() {
     // Serial.println("CarWashController::update");
+    
+    // Always publish periodic state even if not configured
+    // This allows monitoring of machine status before initialization
+    unsigned long currentTime = millis();
+    publishPeriodicState();
+    
+    // Skip session-related updates if not initialized
     if (config.timestamp == "") {
         return;
     }
@@ -672,9 +683,6 @@ void CarWashController::update() {
     // Handle buttons and coin acceptor
     handleButtons();
     handleCoinAcceptor();
-    
-    unsigned long currentTime = millis();
-    publishPeriodicState();
     
     if (currentState == STATE_RUNNING) {
         unsigned long totalElapsedTime = tokenTimeElapsed + (currentTime - tokenStartTime);
@@ -739,22 +747,34 @@ unsigned long CarWashController::getSecondsLeft() {
 }
 
 String CarWashController::getTimestamp() {
-    // PRIORITY 1: Use RTC if available and initialized
-    if (rtcManager && rtcManager->isInitialized()) {
+    // PRIORITY 1: Use RTC if available, initialized, AND time is valid
+    if (rtcManager && rtcManager->isInitialized() && rtcManager->isTimeValid()) {
         String rtcTimestamp = rtcManager->getTimestampWithMillis();
         LOG_DEBUG("Using RTC timestamp: %s", rtcTimestamp.c_str());
         return rtcTimestamp;
     }
     
-    // FALLBACK: Use millis()-based calculation if RTC is not available
-    LOG_DEBUG("RTC not available, using millis() based timestamp");
+    // Log why RTC is not being used
+    if (rtcManager && rtcManager->isInitialized() && !rtcManager->isTimeValid()) {
+        time_t rtcTime = rtcManager->getDateTime();
+        LOG_WARNING("RTC is initialized but time is invalid (epoch: %lu). Falling back to millis() based timestamp", 
+                   (unsigned long)rtcTime);
+        LOG_WARNING("RTC timestamp would be: %s", rtcManager->getTimestampWithMillis().c_str());
+    } else if (!rtcManager || !rtcManager->isInitialized()) {
+        LOG_DEBUG("RTC not available or not initialized, using millis() based timestamp");
+    }
+    
+    // FALLBACK: Use millis()-based calculation if RTC is not available or invalid
     LOG_DEBUG("Raw timestamp: %s", config.timestamp.c_str());
     LOG_DEBUG("Timestamp millis: %lu", config.timestampMillis);
     LOG_DEBUG("Current millis: %lu", millis());
     
     // If timestamp is empty, return early
     if (config.timestamp.length() == 0) {
-        return "No timestamp";
+        LOG_WARNING("Cannot generate timestamp: RTC time invalid and config.timestamp is empty. "
+                   "Machine needs to receive INIT or CONFIG message to set timestamp.");
+        // Return a placeholder that indicates the issue
+        return "2000-01-01T00:00:00.000Z";  // Invalid timestamp placeholder
     }
     
     // Manual string parsing for reliability

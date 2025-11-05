@@ -1,19 +1,22 @@
 #include "mqtt_lte_client.h"
+#include <freertos/semphr.h>
 
 MqttLteClient::MqttLteClient(HardwareSerial& modemSerial, int pwrKeyPin, int dtrPin, int flightPin, 
                            int txPin, int rxPin)
     : _modemSerial(modemSerial), _pwrKeyPin(pwrKeyPin), _dtrPin(dtrPin), _flightPin(flightPin),
       _txPin(txPin), _rxPin(rxPin), _initialized(false), _networkConnected(false), _mqttConnected(false) {
+    _mutex = xSemaphoreCreateRecursiveMutex();
     
     _modem = new TinyGsm(_modemSerial);
     _gsmClient = new TinyGsmClient(*_modem);
     _sslClient = new SSLClient(_gsmClient);
     
-    // Configure SSL client with increased timeouts for poor cellular connections
-    _sslClient->setTimeout(30000);  // 30 second timeout for SSL operations
+    // Configure SSL client with short timeouts to prevent watchdog issues
+    // ESP32 task watchdog is ~5 seconds, so keep SSL operations well under that
+    _sslClient->setTimeout(4000);  // 4 second timeout for SSL operations (safe for watchdog)
     
     _mqttClient = new PubSubClient(*_sslClient);
-    _mqttClient->setSocketTimeout(30);  // 30 second timeout for socket operations
+    _mqttClient->setSocketTimeout(4);  // 4 second timeout for socket operations
 
     _subscribedTopics.reserve(5);
 }
@@ -265,30 +268,41 @@ bool MqttLteClient::initModemAndConnectNetwork() {
 }
 
 void MqttLteClient::setCACert(const char* caCert) {
+    if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
     _sslClient->setCACert(caCert);
+    if (_mutex) xSemaphoreGiveRecursive(_mutex);
 }
 
 void MqttLteClient::setCertificate(const char* clientCert) {
+    if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
     _sslClient->setCertificate(clientCert);
+    if (_mutex) xSemaphoreGiveRecursive(_mutex);
 }
 
 void MqttLteClient::setPrivateKey(const char* privateKey) {
+    if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
     _sslClient->setPrivateKey(privateKey);
+    if (_mutex) xSemaphoreGiveRecursive(_mutex);
 }
 
 void MqttLteClient::setCallback(void (*callback)(char*, byte*, unsigned int)) {
+    if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
     _callback = callback;
     _mqttClient->setCallback(_callback);
+    if (_mutex) xSemaphoreGiveRecursive(_mutex);
 }
 
 bool MqttLteClient::connect(const char* broker, uint16_t port, const char* clientId) {
+    if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
     _broker = broker;
     _port = port;
     _clientId = clientId;
     
     _mqttClient->setServer(_broker, _port);
     
-    _mqttClient->setKeepAlive(120); // Increase from default 15s to 120s
+    // Keep-alive reduced to 60s to prevent SSL timeout issues
+    // SSL sessions were failing at ~106s with 120s keep-alive
+    _mqttClient->setKeepAlive(60);
 
     // Check signal quality before attempting SSL connection
     int signalQuality = getSignalQuality();
@@ -298,35 +312,21 @@ bool MqttLteClient::connect(const char* broker, uint16_t port, const char* clien
         Serial.println("/31) - SSL connection may fail");
     }
 
-    // Loop until we're reconnected or timeout (increased to 30s for SSL handshake)
-    unsigned long startTime = millis();
-    int attemptCount = 0;
-    const int maxAttempts = 3;
+    // Make a single connection attempt to prevent long blocking
+    // Retries are handled by the calling code (NetworkManager task)
+    Serial.print("Attempting MQTT connection...");
     
-    while (!_mqttClient->connected() && attemptCount < maxAttempts && millis() - startTime < 30000) {
-        attemptCount++;
-        Serial.print("Attempting MQTT connection (");
-        Serial.print(attemptCount);
-        Serial.print("/");
-        Serial.print(maxAttempts);
-        Serial.print(")...");
-        
-        // Attempt to connect
-        if (_mqttClient->connect(_clientId)) {
-            Serial.println("connected");
-            _mqttConnected = true;
-            _consecutiveFailures = 0; // Reset failure counter on success
-            return true;
-        } else {
-            Serial.print("failed, rc=");
-            Serial.print(_mqttClient->state());
-            Serial.println("...trying again");
-            
-            _consecutiveFailures++;
-            
-            // Progressive delay between retries
-            delay(attemptCount * 2000); // 2s, 4s, 6s...
-        }
+    // Attempt to connect (this can block for up to 4 seconds during SSL handshake)
+    if (_mqttClient->connect(_clientId)) {
+        Serial.println("connected");
+        _mqttConnected = true;
+        _consecutiveFailures = 0; // Reset failure counter on success
+        if (_mutex) xSemaphoreGiveRecursive(_mutex);
+        return true;
+    } else {
+        Serial.print("failed, rc=");
+        Serial.println(_mqttClient->state());
+        _consecutiveFailures++;
     }
     
     // If we've had multiple consecutive failures, log warning
@@ -337,111 +337,165 @@ bool MqttLteClient::connect(const char* broker, uint16_t port, const char* clien
         Serial.println("This may indicate certificate issues or very poor signal");
     }
     
+    if (_mutex) xSemaphoreGiveRecursive(_mutex);
     return false;
 }
 
+void MqttLteClient::cleanupSSLClient() {
+    if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
+    Serial.println("[DEBUG] Cleaning up SSL client to clear corrupted state");
+    
+    // Disconnect MQTT client first
+    if (_mqttClient && _mqttClient->connected()) {
+        _mqttClient->disconnect();
+    }
+    
+    // Stop SSL client
+    if (_sslClient) {
+        _sslClient->stop();
+    }
+    
+    Serial.println("[DEBUG] SSL client cleanup complete");
+    if (_mutex) xSemaphoreGiveRecursive(_mutex);
+}
+
 void MqttLteClient::reconnect() {
+    if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
     // Loop until we're reconnected or timeout
     unsigned long now = millis();
     if (now - _lastReconnectAttempt < _reconnectInterval) {
+        if (_mutex) xSemaphoreGiveRecursive(_mutex);
         return; // Don't try too frequently
     }
     _lastReconnectAttempt = now;
 
-    unsigned long startTime = millis();
-    bool reconnected = false;
-    
-    while (!_mqttClient->connected() && millis() - startTime < 10000) {
-        Serial.print("Attempting MQTT connection...");
-        
-        // Attempt to connect
-        if (_mqttClient->connect(_clientId)) {
-            Serial.println("connected");
-            _mqttConnected = true;
-            reconnected = true;
-            break;  // Exit the loop on successful connection
-        } else {
-            Serial.print("failed, rc=");
-            Serial.print(_mqttClient->state());
-            Serial.println("...trying again");
-            delay(1000);
+    // After multiple consecutive failures, cleanup SSL state
+    // This helps recover from corrupted SSL sessions
+    if (_consecutiveFailures >= 3 && _consecutiveFailures % 3 == 0) {
+        Serial.print("[INFO] ");
+        Serial.print(_consecutiveFailures);
+        Serial.println(" consecutive failures - performing SSL cleanup");
+        // We already hold the mutex, call internal cleanup directly
+        if (_mqttClient && _mqttClient->connected()) {
+            _mqttClient->disconnect();
         }
+        if (_sslClient) {
+            _sslClient->stop();
+        }
+        // Note: No delay needed here, cleanup returns immediately
     }
+
+    // Make ONE attempt per call instead of blocking in a loop
+    // This prevents watchdog timeouts by allowing the FreeRTOS task to yield
+    Serial.print("Attempting MQTT connection...");
     
-    // If successfully reconnected, re-subscribe to all previously subscribed topics
-    if (!reconnected) {
-        // Exponential backoff - double the interval up to 2 minutes
-        _reconnectInterval = min(_reconnectInterval * 2, 120000);
-    } else {
+    // Attempt to connect (this is a non-blocking call with timeout)
+    if (_mqttClient->connect(_clientId)) {
+        Serial.println("connected");
+        _mqttConnected = true;
+        _consecutiveFailures = 0; // Reset on success
+        
+        // Re-subscribe to all previously subscribed topics
         for (const String& topic : _subscribedTopics) {
             Serial.print("Re-subscribing to topic: ");
             Serial.println(topic);
             _mqttClient->subscribe(topic.c_str());
         }
-        _reconnectInterval = 5000;
+        _reconnectInterval = 5000; // Reset interval on success
+    } else {
+        Serial.print("failed, rc=");
+        Serial.println(_mqttClient->state());
+        _consecutiveFailures++;
+        
+        // Exponential backoff - double the interval up to 2 minutes
+        _reconnectInterval = min(_reconnectInterval * 2, 120000);
     }
+    if (_mutex) xSemaphoreGiveRecursive(_mutex);
 }
 
 bool MqttLteClient::publish(const char* topic, const char* payload, const uint8_t qos) {
-    // Serial.println("Publishing message...");
+    if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
     if (!_mqttClient->connected()) {
+        // Recursive lock safe
         reconnect();
     }
-    
+    bool ok = false;
     if (_mqttClient->connected()) {
-        // Serial.print("Publishing to topic: ");
-        // Serial.println(topic);
-        bool result = _mqttClient->publish(topic, payload);
-        // Serial.print("Publish result: ");
-        // Serial.println(result);
-        return result;
+        ok = _mqttClient->publish(topic, payload);
     }
-    
-    return false;
+    if (_mutex) xSemaphoreGiveRecursive(_mutex);
+    return ok;
 }
 
 bool MqttLteClient::subscribe(const char* topic) {
+    if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
     if (!_mqttClient->connected()) {
         Serial.println("Reconnecting MQTT client before subscribing...");
         reconnect();
     }
-    
+    bool result = false;
     if (_mqttClient->connected()) {
         Serial.print("Subscribing to topic: ");
         Serial.println(topic);
-        bool result = _mqttClient->subscribe(topic);
-        
+        result = _mqttClient->subscribe(topic);
         if (result) {
-            // Store the topic in our list of subscribed topics for re-subscription after reconnect
             _subscribedTopics.push_back(String(topic));
         }
-        
-        return result;
     }
-    
-    return false;
+    if (_mutex) xSemaphoreGiveRecursive(_mutex);
+    return result;
 }
 
 void MqttLteClient::loop() {
+    if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
     static unsigned long lastConnectionCheck = 0;
-    // Only check connection status periodically to avoid overwhelming the client
-    if (millis() - lastConnectionCheck > 5000) {  // Check every 5 seconds
+    static unsigned long lastHealthLog = 0;
+    
+    // Check connection status more frequently to detect issues early
+    if (millis() - lastConnectionCheck > 5000) {  // Check every 5 seconds (increased from 10s)
         lastConnectionCheck = millis();
         
         if (!_mqttClient->connected() && _networkConnected) {
-            Serial.println("MQTT disconnected, reconnecting...");
-            reconnect();
+            // Get MQTT client state for diagnostics
+            int state = _mqttClient->state();
+            Serial.print("MQTT disconnected (state: ");
+            Serial.print(state);
+            Serial.println("), will reconnect on next call...");
+            
+            // Track disconnections to trigger cleanup if needed
+            if (state < 0) {
+                // Negative states indicate connection errors
+                _consecutiveFailures++;
+            }
+            
+            // Don't call reconnect() here - let it be called from NetworkManager
+            // This prevents potential blocking in the loop() function
+        } else if (_mqttClient->connected()) {
+            // Reset failure counter when connected
+            if (_consecutiveFailures > 0) {
+                _consecutiveFailures = 0;
+            }
         }
     }
-    // Always call the PubSubClient loop
+    
+    // Periodic health logging (every 60 seconds)
+    if (_mqttClient->connected() && millis() - lastHealthLog > 60000) {
+        lastHealthLog = millis();
+        Serial.println("[MQTT HEALTH] Connection stable");
+    }
+    
+    // Always call the PubSubClient loop (this handles keep-alive pings automatically)
     if (_mqttClient->connected()) {
-        // Serial.println("Calling MQTT loop...");
         _mqttClient->loop();
     }
+    if (_mutex) xSemaphoreGiveRecursive(_mutex);
 }
 
 bool MqttLteClient::isConnected() {
-    return _mqttClient->connected();
+    if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
+    bool c = _mqttClient->connected();
+    if (_mutex) xSemaphoreGiveRecursive(_mutex);
+    return c;
 }
 
 bool MqttLteClient::isNetworkConnected() {
@@ -452,9 +506,11 @@ bool MqttLteClient::isNetworkConnected() {
 }
 
 void MqttLteClient::setBufferSize(size_t size) {
+    if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
     if (_mqttClient) {
         _mqttClient->setBufferSize(size);
     }
+    if (_mutex) xSemaphoreGiveRecursive(_mutex);
 }
 
 String MqttLteClient::getLocalIP() {

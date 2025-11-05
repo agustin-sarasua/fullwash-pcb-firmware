@@ -28,7 +28,7 @@ public:
 private:
     // Display specific screens based on machine state
     void displayFreeState();
-    void displayIdleState(CarWashController* controller);
+    void displayIdleState(CarWashController* controller, bool stateChanged);
     void displayRunningState(CarWashController* controller);
     // void displayPausedState(CarWashController* controller);
     void displayPausedState(CarWashController* controller, MachineState previousState);

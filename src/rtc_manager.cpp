@@ -193,7 +193,8 @@ bool RTCManager::isTimeValid() {
     
     // 2020-01-01 00:00:00 UTC = 1577836800
     if (currentTime < 1577836800UL) {
-        LOG_DEBUG("RTC time invalid: time is before 2020 (epoch: %lu)", (unsigned long)currentTime);
+        LOG_WARNING("RTC time invalid: time is before 2020 (epoch: %lu, ISO: %s)", 
+                   (unsigned long)currentTime, getTimestamp().c_str());
         return false;
     }
     
@@ -247,11 +248,29 @@ bool RTCManager::setDateTime(uint16_t year, uint8_t month, uint8_t day,
     LOG_INFO("Setting RTC time: %04d-%02d-%02d %02d:%02d:%02d", 
              year, month, day, hour, minute, second);
     
+    // Log what we're about to write
+    LOG_DEBUG("Writing RTC registers: [0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X]",
+              data[0], data[1], data[2], data[3], data[4], data[5], data[6]);
+    
     // Write all registers at once
     bool success = writeRegisters(REG_SECONDS, data, 7);
     
     if (success) {
         LOG_INFO("RTC time set successfully");
+        
+        // Verify the write by reading back immediately
+        delay(10); // Small delay to ensure write is complete
+        time_t readBack = getDateTime();
+        if (readBack > 0) {
+            LOG_INFO("RTC write verified - read back: epoch=%lu", (unsigned long)readBack);
+            if (readBack < 1577836800UL) {
+                LOG_ERROR("RTC write verification FAILED - read back invalid time (epoch=%lu)", 
+                         (unsigned long)readBack);
+            }
+        } else {
+            LOG_WARNING("RTC write verification - failed to read back time");
+        }
+        
         // Update cached values
         _lastReadMillis = millis();
         
@@ -320,6 +339,12 @@ time_t RTCManager::getDateTime() {
     uint8_t month = bcdToDec(data[5]);
     uint8_t year = bcdToDec(data[6]);
     
+    // Log raw register values for debugging
+    LOG_DEBUG("RTC raw registers: [0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X] -> "
+              "%04d-%02d-%02d %02d:%02d:%02d",
+              data[0], data[1], data[2], data[3], data[4], data[5], data[6],
+              2000 + year, month, day, hour, minute, second);
+    
     // Check if oscillator was stopped
     if (data[0] & 0x80) {
         LOG_WARNING("RTC oscillator stop flag is set! Time may be invalid.");
@@ -335,6 +360,12 @@ time_t RTCManager::getDateTime() {
     tm.Second = second;
     
     time_t epochTime = makeTime(tm);
+    
+    // Log if time seems invalid
+    if (epochTime < 1577836800UL) { // Before 2020-01-01
+        LOG_WARNING("RTC read invalid time: epoch=%lu -> %04d-%02d-%02d %02d:%02d:%02d (year=%d)",
+                   (unsigned long)epochTime, 2000 + year, month, day, hour, minute, second, year);
+    }
     
     // Cache the reading
     _lastReadTime = epochTime;
@@ -367,7 +398,13 @@ String RTCManager::getTimestampWithMillis() {
     time_t currentTime = getDateTime();
     
     if (currentTime == 0) {
+        LOG_WARNING("RTC getDateTime() returned 0 - RTC read failed");
         return "RTC Error";
+    }
+    
+    // Log if time is invalid (for debugging)
+    if (!isTimeValid()) {
+        LOG_WARNING("RTC time is invalid (epoch: %lu) but still returning timestamp", (unsigned long)currentTime);
     }
     
     // Calculate milliseconds since last RTC read

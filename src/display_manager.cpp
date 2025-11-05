@@ -27,10 +27,11 @@ void DisplayManager::update(CarWashController* controller) {
     
     MachineState currentState = controller->getCurrentState();
     MachineState previousState = lastState;
+    bool stateChanged = (currentState != lastState);
     
     // Only update when state changes or every second
     unsigned long currentTime = millis();
-    bool shouldUpdate = (currentState != lastState) || 
+    bool shouldUpdate = stateChanged || 
                         (currentTime - lastUpdateTime >= 1000);
     
     if (!shouldUpdate) return;
@@ -39,12 +40,13 @@ void DisplayManager::update(CarWashController* controller) {
     lastState = currentState;
     
     // Update display based on current state
+    // Pass stateChanged flag so display functions know if this is a state transition
     switch (currentState) {
         case STATE_FREE:
             displayFreeState();
             break;
         case STATE_IDLE:
-            displayIdleState(controller);
+            displayIdleState(controller, stateChanged);
             break;
         case STATE_RUNNING:
             displayRunningState(controller);
@@ -102,7 +104,7 @@ void DisplayManager::displayFreeState() {
     lcd.print("2. Inserte fichas");
 }
 
-void DisplayManager::displayIdleState(CarWashController* controller) {
+void DisplayManager::displayIdleState(CarWashController* controller, bool stateChanged) {
     // Check if tokens or username changed
     int tokens = controller->getTokensLeft();
     String userName = controller->getUserName();
@@ -112,7 +114,18 @@ void DisplayManager::displayIdleState(CarWashController* controller) {
                          (userName != lastUserName) ||
                          (userInactivityTime != lastSecondsLeft);
     
-    if (!contentChanged && lastState == STATE_IDLE) return;
+    // Always update on state change (e.g., FREE -> IDLE transition)
+    // If state hasn't changed, update() was called because 1 second passed
+    // In IDLE state, we should always refresh to show countdown updates
+    // Only skip if absolutely nothing changed (very rare case)
+    if (!stateChanged && !contentChanged) {
+        // Double-check: if inactivity timeout, tokens, and username are all unchanged, skip
+        if (userInactivityTime == lastSecondsLeft && 
+            tokens == lastTokens && 
+            userName == lastUserName) {
+            return;
+        }
+    }
     
     lastTokens = tokens;
     lastUserName = userName;
@@ -142,17 +155,13 @@ void DisplayManager::displayIdleState(CarWashController* controller) {
 }
 
 void DisplayManager::displayRunningState(CarWashController* controller) {
-    // Check if tokens or username or time changed
+    // Always update during running state to show countdown timer
+    // The update() method already throttles calls to once per second
     int tokens = controller->getTokensLeft();
     String userName = controller->getUserName();
     unsigned long secondsLeft = controller->getSecondsLeft();
     
-    bool contentChanged = (tokens != lastTokens) || 
-                         (userName != lastUserName) ||
-                         (secondsLeft != lastSecondsLeft);
-    
-    if (!contentChanged && lastState == STATE_RUNNING) return;
-    
+    // Update stored values
     lastTokens = tokens;
     lastUserName = userName;
     lastSecondsLeft = secondsLeft;

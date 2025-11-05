@@ -6,6 +6,8 @@
 #include "SSLClient.h"
 #include <PubSubClient.h>
 #include <vector>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 class MqttLteClient {
 public:
@@ -38,6 +40,9 @@ public:
     String getLocalIP();
     int getSignalQuality();
     bool isValidIP(const String& ip);
+    
+    // SSL cleanup for reconnection
+    void cleanupSSLClient();
     
 private:
     // Private methods
@@ -75,6 +80,7 @@ private:
     TinyGsmClient* _gsmClient;
     SSLClient* _sslClient;
     PubSubClient* _mqttClient;
+    SemaphoreHandle_t _mutex; // Recursive mutex to guard MQTT/SSL operations
     
     // State tracking
     bool _initialized;

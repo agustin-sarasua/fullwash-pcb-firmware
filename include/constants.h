@@ -24,17 +24,18 @@ const unsigned long TOKEN_TIME = 120000 / 6;         // Time per token (2 minute
 const unsigned long USER_INACTIVE_TIMEOUT = 120000 / 6; // Timeout for user inactivity
 
 // MQTT Topics
-extern const char* MACHINE_ID;
+extern String MACHINE_ID;  // Changed to String to allow dynamic loading
 
-// Function declaration
-String buildTopicName(const char* machineId, const char* eventType);
+// Function declarations
+String buildTopicName(const String& machineId, const char* eventType, const String& environment = "prod");
+void updateMQTTTopics(const String& machineId, const String& environment = "prod");  // New function to update topics dynamically
 
-// MQTT Topics
-extern const String INIT_TOPIC;
-extern const String CONFIG_TOPIC;
-extern const String ACTION_TOPIC;
-extern const String STATE_TOPIC;
-extern const String COMMAND_TOPIC;
+// MQTT Topics (will be initialized dynamically)
+extern String INIT_TOPIC;
+extern String CONFIG_TOPIC;
+extern String ACTION_TOPIC;
+extern String STATE_TOPIC;
+extern String COMMAND_TOPIC;
 
 // QoS Levels
 const uint32_t QOS0_AT_MOST_ONCE = 0;
