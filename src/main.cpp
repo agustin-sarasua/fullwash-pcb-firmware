@@ -45,6 +45,12 @@ DisplayManager* display;
 // FreeRTOS task handles
 TaskHandle_t TaskCoinDetectorHandle = NULL;
 TaskHandle_t TaskButtonDetectorHandle = NULL;
+TaskHandle_t TaskNetworkManagerHandle = NULL;
+TaskHandle_t TaskWatchdogHandle = NULL;
+
+// FreeRTOS mutexes for shared resources
+SemaphoreHandle_t xIoExpanderMutex = NULL;
+SemaphoreHandle_t xControllerMutex = NULL;
 
 /**
  * FreeRTOS Task: Coin Detector
@@ -57,6 +63,9 @@ TaskHandle_t TaskButtonDetectorHandle = NULL;
  * - Reads PORT0 register to get current coin signal state
  * - Detects HIGH->LOW transition (coin insertion)
  * - Sets coin signal flag for controller to process
+ * 
+ * Thread Safety:
+ * - Uses mutex protection when accessing ioExpander
  */
 void TaskCoinDetector(void *pvParameters) {
     const TickType_t xDelay = 50 / portTICK_PERIOD_MS; // 50ms polling interval
@@ -71,20 +80,27 @@ void TaskCoinDetector(void *pvParameters) {
     for(;;) {
         // Check if interrupt pin is LOW (hardware detected a change)
         if (digitalRead(INT_PIN) == LOW) {
-            _portVal = ioExpander.readRegister(INPUT_PORT0);
-            
-            // Check if COIN_SIG state has changed
-            if (coins_sig_state != (_portVal & (1 << COIN_SIG))) {
-                // Detect HIGH->LOW transition (coin inserted)
-                if (coins_sig_state == (1 << COIN_SIG)) {
-                    ioExpander.setCoinSignal(1);
-                    ioExpander._intCnt++;
-                    LOG_DEBUG("Interrupt detected! Port 0 Value: 0x%02X, coins times: %d", 
-                             _portVal, ioExpander._intCnt);
+            // Protect IO expander access with mutex
+            if (xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                _portVal = ioExpander.readRegister(INPUT_PORT0);
+                
+                // Check if COIN_SIG state has changed
+                if (coins_sig_state != (_portVal & (1 << COIN_SIG))) {
+                    // Detect HIGH->LOW transition (coin inserted)
+                    if (coins_sig_state == (1 << COIN_SIG)) {
+                        ioExpander.setCoinSignal(1);
+                        ioExpander._intCnt++;
+                        LOG_DEBUG("Interrupt detected! Port 0 Value: 0x%02X, coins times: %d", 
+                                 _portVal, ioExpander._intCnt);
+                    }
+                    
+                    // Update state for next comparison
+                    coins_sig_state = (_portVal & (1 << COIN_SIG));
                 }
                 
-                // Update state for next comparison
-                coins_sig_state = (_portVal & (1 << COIN_SIG));
+                xSemaphoreGive(xIoExpanderMutex);
+            } else {
+                LOG_WARNING("Failed to acquire IO expander mutex in coin detector task");
             }
         }
         
@@ -103,6 +119,9 @@ void TaskCoinDetector(void *pvParameters) {
  * - Reads PORT0 register to get current button states
  * - Detects button press events (HIGH->LOW transition, buttons are active LOW)
  * - Sets button flags with debouncing for controller to process
+ * 
+ * Thread Safety:
+ * - Uses mutex protection when accessing ioExpander
  */
 void TaskButtonDetector(void *pvParameters) {
     const TickType_t xDelay = 20 / portTICK_PERIOD_MS; // 20ms for responsive button detection
@@ -116,37 +135,270 @@ void TaskButtonDetector(void *pvParameters) {
     for(;;) {
         // Check if interrupt pin is LOW (button state change detected)
         if (digitalRead(INT_PIN) == LOW) {
-            uint8_t currentPortValue = ioExpander.readRegister(INPUT_PORT0);
+            uint8_t currentPortValue = 0;
             
-            // Check if any button state changed
-            if (currentPortValue != lastPortValue) {
-                LOG_DEBUG("Button state change detected. Port: 0x%02X -> 0x%02X", 
-                         lastPortValue, currentPortValue);
+            // Protect IO expander access with mutex
+            if (xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                currentPortValue = ioExpander.readRegister(INPUT_PORT0);
                 
-                // Check each button for press events (transition from HIGH to LOW)
-                for (int i = 0; i < NUM_BUTTONS; i++) {
-                    int buttonPin;
-                    if (i < NUM_BUTTONS - 1) {
-                        buttonPin = BUTTON_INDICES[i]; // Function buttons 1-5
-                    } else {
-                        buttonPin = STOP_BUTTON_PIN;   // Stop button (BUTTON6)
+                // Check if any button state changed
+                if (currentPortValue != lastPortValue) {
+                    LOG_DEBUG("Button state change detected. Port: 0x%02X -> 0x%02X", 
+                             lastPortValue, currentPortValue);
+                    
+                    // Check each button for press events (transition from HIGH to LOW)
+                    for (int i = 0; i < NUM_BUTTONS; i++) {
+                        int buttonPin;
+                        if (i < NUM_BUTTONS - 1) {
+                            buttonPin = BUTTON_INDICES[i]; // Function buttons 1-5
+                        } else {
+                            buttonPin = STOP_BUTTON_PIN;   // Stop button (BUTTON6)
+                        }
+                        
+                        bool currentButtonPressed = !(currentPortValue & (1 << buttonPin));
+                        bool lastButtonPressed = !(lastPortValue & (1 << buttonPin));
+                        
+                        // Detect button press (transition from released to pressed)
+                        if (currentButtonPressed && !lastButtonPressed) {
+                            LOG_INFO("Button %d pressed detected in task", i + 1);
+                            ioExpander.setButtonFlag(i, true);
+                        }
                     }
                     
-                    bool currentButtonPressed = !(currentPortValue & (1 << buttonPin));
-                    bool lastButtonPressed = !(lastPortValue & (1 << buttonPin));
-                    
-                    // Detect button press (transition from released to pressed)
-                    if (currentButtonPressed && !lastButtonPressed) {
-                        LOG_INFO("Button %d pressed detected in task", i + 1);
-                        ioExpander.setButtonFlag(i, true);
-                    }
+                    lastPortValue = currentPortValue;
                 }
                 
-                lastPortValue = currentPortValue;
+                xSemaphoreGive(xIoExpanderMutex);
+            } else {
+                LOG_WARNING("Failed to acquire IO expander mutex in button detector task");
             }
         }
         
         vTaskDelay(xDelay); // Wait 20ms before next check
+    }
+}
+
+/**
+ * FreeRTOS Task: Network Manager
+ * 
+ * This task handles all network and MQTT operations to prevent blocking the main loop.
+ * It manages:
+ * - Network connection monitoring
+ * - MQTT connection and reconnection
+ * - MQTT message processing
+ * - Network status updates
+ * 
+ * Priority: 2 (Medium priority - important but not critical like hardware tasks)
+ */
+void TaskNetworkManager(void *pvParameters) {
+    const TickType_t xNetworkCheckDelay = pdMS_TO_TICKS(30000);  // Check network every 30 seconds
+    const TickType_t xMqttCheckDelay = pdMS_TO_TICKS(5000);      // Check MQTT every 5 seconds
+    const TickType_t xReconnectDelay = pdMS_TO_TICKS(60000);     // Reconnect attempt interval
+    
+    unsigned long lastNetworkCheck = 0;
+    unsigned long lastConnectionAttempt = 0;
+    unsigned long lastMqttReconnectAttempt = 0;
+    unsigned long lastStatusCheck = 0;
+    
+    LOG_INFO("Network manager task started");
+    
+    // Wait a bit for system to initialize
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
+    
+    // Log initial stack high water mark
+    UBaseType_t initialStackHighWater = uxTaskGetStackHighWaterMark(NULL);
+    LOG_INFO("Network task initial stack high water mark: %d bytes", initialStackHighWater);
+    
+    for(;;) {
+        unsigned long currentTime = millis();
+        
+        // Check network status periodically
+        if (currentTime - lastNetworkCheck > 30000) {
+            lastNetworkCheck = currentTime;
+            
+            if (!mqttClient.isNetworkConnected()) {
+                LOG_WARNING("Lost cellular network connection");
+                
+                // Only attempt reconnection every 60 seconds
+                if (currentTime - lastConnectionAttempt > 60000) {
+                    lastConnectionAttempt = currentTime;
+                    
+                    LOG_INFO("Attempting to reconnect to cellular network...");
+                    
+                    // Monitor stack before network operation
+                    UBaseType_t stackBefore = uxTaskGetStackHighWaterMark(NULL);
+                    LOG_DEBUG("Stack before network init: %d bytes remaining", stackBefore);
+                    
+                    if (mqttClient.begin(apn, gprsUser, gprsPass, pin)) {
+                        LOG_INFO("Successfully reconnected to cellular network!");
+                        
+                        // Validate IP address
+                        String ip = mqttClient.getLocalIP();
+                        if (mqttClient.isValidIP(ip)) {
+                            LOG_INFO("Valid IP address obtained: %s", ip.c_str());
+                        } else {
+                            LOG_ERROR("Invalid IP address: %s - skipping MQTT connection attempt", ip.c_str());
+                            vTaskDelay(10000 / portTICK_PERIOD_MS); // Wait 10s before retry
+                            continue; // Skip to next iteration
+                        }
+                        
+                        // Log signal quality
+                        int signalQuality = mqttClient.getSignalQuality();
+                        LOG_INFO("Signal quality: %d/31", signalQuality);
+                        
+                        // Monitor stack after network operation
+                        UBaseType_t stackAfter = uxTaskGetStackHighWaterMark(NULL);
+                        LOG_DEBUG("Stack after network init: %d bytes remaining", stackAfter);
+                        
+                        // Reconfigure SSL certificates
+                        mqttClient.setCACert(AmazonRootCA);
+                        mqttClient.setCertificate(AWSClientCertificate);
+                        mqttClient.setPrivateKey(AWSClientPrivateKey);
+                        
+                        // Monitor stack before SSL connection (this is the critical part)
+                        UBaseType_t stackBeforeSSL = uxTaskGetStackHighWaterMark(NULL);
+                        LOG_DEBUG("Stack before MQTT SSL connect: %d bytes remaining", stackBeforeSSL);
+                        
+                        // Connect to MQTT broker with improved error handling
+                        if (mqttClient.connect(AWS_BROKER, AWS_BROKER_PORT, AWS_CLIENT_ID)) {
+                            LOG_INFO("MQTT broker connection restored!");
+                            
+                            // Monitor stack after SSL connection
+                            UBaseType_t stackAfterSSL = uxTaskGetStackHighWaterMark(NULL);
+                            LOG_DEBUG("Stack after MQTT SSL connect: %d bytes remaining", stackAfterSSL);
+                            mqttClient.subscribe(INIT_TOPIC.c_str());
+                            mqttClient.subscribe(CONFIG_TOPIC.c_str());
+                            mqttClient.subscribe(COMMAND_TOPIC.c_str());
+                            
+                            // Notify that we're back online
+                            if (controller) {
+                                vTaskDelay(4000 / portTICK_PERIOD_MS);
+                                controller->publishMachineSetupActionEvent();
+                            }
+                        } else {
+                            LOG_ERROR("Failed to connect to MQTT broker after network recovery");
+                            LOG_INFO("Waiting 30 seconds before next attempt to allow SSL state to clear");
+                            vTaskDelay(30000 / portTICK_PERIOD_MS); // Wait 30s after SSL failure
+                        }
+                    } else {
+                        LOG_ERROR("Failed to reconnect to cellular network");
+                        vTaskDelay(10000 / portTICK_PERIOD_MS); // Wait 10s before retry
+                    }
+                }
+            } else {
+                // Network is connected, but check MQTT connection
+                if (!mqttClient.isConnected()) {
+                    // Only attempt MQTT reconnection every 15 seconds
+                    if (currentTime - lastMqttReconnectAttempt > 15000) {
+                        lastMqttReconnectAttempt = currentTime;
+                        LOG_WARNING("Network connected but MQTT disconnected, attempting to reconnect...");
+                        mqttClient.reconnect();
+                    }
+                }
+            }
+        }
+        
+        // Process MQTT messages if connected
+        if (mqttClient.isNetworkConnected()) {
+            mqttClient.loop();
+            
+            // Status message every 60 seconds if connected
+            if (currentTime - lastStatusCheck > 60000) {
+                lastStatusCheck = currentTime;
+                
+                // Monitor stack usage during normal operation
+                UBaseType_t stackHighWater = uxTaskGetStackHighWaterMark(NULL);
+                int signalQuality = mqttClient.getSignalQuality();
+                LOG_INFO("System running normally, network connected. Stack: %d bytes, Signal: %d/31", 
+                         stackHighWater, signalQuality);
+            }
+        }
+        
+        // Small delay to prevent task from consuming too much CPU
+        vTaskDelay(xMqttCheckDelay);
+    }
+}
+
+/**
+ * FreeRTOS Task: System Watchdog
+ * 
+ * This task monitors system health and task status:
+ * - Monitors all FreeRTOS tasks for crashes or hangs
+ * - Checks stack usage for all tasks
+ * - Monitors system resources (heap, etc.)
+ * - Logs system health status
+ * 
+ * Priority: 1 (Lowest priority - monitoring only)
+ */
+void TaskWatchdog(void *pvParameters) {
+    const TickType_t xWatchdogDelay = pdMS_TO_TICKS(10000); // Check every 10 seconds
+    
+    LOG_INFO("Watchdog task started");
+    
+    // Wait for all tasks to be created
+    vTaskDelay(3000 / portTICK_PERIOD_MS);
+    
+    for(;;) {
+        // Check coin detector task
+        if (TaskCoinDetectorHandle != NULL) {
+            eTaskState coinTaskState = eTaskGetState(TaskCoinDetectorHandle);
+            if (coinTaskState == eDeleted || coinTaskState == eInvalid) {
+                LOG_ERROR("Coin detector task died! State: %d", coinTaskState);
+                // Task crashed - would need to restart, but for now just log
+            } else {
+                UBaseType_t stackHighWater = uxTaskGetStackHighWaterMark(TaskCoinDetectorHandle);
+                if (stackHighWater < 256) { // Less than 256 bytes free
+                    LOG_WARNING("Coin detector task stack low: %d bytes remaining", stackHighWater);
+                }
+            }
+        }
+        
+        // Check button detector task
+        if (TaskButtonDetectorHandle != NULL) {
+            eTaskState buttonTaskState = eTaskGetState(TaskButtonDetectorHandle);
+            if (buttonTaskState == eDeleted || buttonTaskState == eInvalid) {
+                LOG_ERROR("Button detector task died! State: %d", buttonTaskState);
+            } else {
+                UBaseType_t stackHighWater = uxTaskGetStackHighWaterMark(TaskButtonDetectorHandle);
+                if (stackHighWater < 256) {
+                    LOG_WARNING("Button detector task stack low: %d bytes remaining", stackHighWater);
+                }
+            }
+        }
+        
+        // Check network manager task
+        if (TaskNetworkManagerHandle != NULL) {
+            eTaskState networkTaskState = eTaskGetState(TaskNetworkManagerHandle);
+            if (networkTaskState == eDeleted || networkTaskState == eInvalid) {
+                LOG_ERROR("Network manager task died! State: %d", networkTaskState);
+            } else {
+                UBaseType_t stackHighWater = uxTaskGetStackHighWaterMark(TaskNetworkManagerHandle);
+                if (stackHighWater < 1024) {  // Network task needs more headroom for SSL/TLS
+                    LOG_WARNING("Network manager task stack low: %d bytes remaining", stackHighWater);
+                }
+            }
+        }
+        
+        // Monitor heap usage
+        size_t freeHeap = ESP.getFreeHeap();
+        size_t minFreeHeap = ESP.getMinFreeHeap();
+        size_t totalHeap = ESP.getHeapSize();
+        
+        if (freeHeap < 10000) { // Less than 10KB free
+            LOG_WARNING("Heap memory low: %d bytes free (min: %d, total: %d)", 
+                       freeHeap, minFreeHeap, totalHeap);
+        }
+        
+        // Periodic health status (every 5 checks = 50 seconds)
+        static int checkCount = 0;
+        checkCount++;
+        if (checkCount >= 5) {
+            checkCount = 0;
+            LOG_INFO("System health check - Free heap: %d bytes, Min free: %d bytes", 
+                    freeHeap, minFreeHeap);
+        }
+        
+        vTaskDelay(xWatchdogDelay);
     }
 }
 
@@ -327,6 +579,17 @@ void setup() {
     // Configure INT_PIN with internal pull-up for reliable detection
     pinMode(INT_PIN, INPUT_PULLUP);
     
+    // Initialize FreeRTOS mutexes for shared resources
+    LOG_INFO("Initializing FreeRTOS mutexes...");
+    xIoExpanderMutex = xSemaphoreCreateMutex();
+    xControllerMutex = xSemaphoreCreateMutex();
+    
+    if (xIoExpanderMutex == NULL || xControllerMutex == NULL) {
+        LOG_ERROR("Failed to create mutexes!");
+    } else {
+        LOG_INFO("Mutexes created successfully");
+    }
+    
     // Create FreeRTOS tasks for dedicated interrupt handling
     LOG_INFO("Creating FreeRTOS tasks for coin and button detection...");
     
@@ -335,7 +598,7 @@ void setup() {
         "CoinDetector",             // Task name (for debugging)
         2048,                       // Stack size (bytes)
         NULL,                       // Task parameters
-        1,                          // Priority (1 = low priority)
+        3,                          // Priority (3 = medium-high priority for hardware)
         &TaskCoinDetectorHandle     // Task handle
     );
     
@@ -344,11 +607,11 @@ void setup() {
         "ButtonDetector",           // Task name (for debugging)
         2048,                       // Stack size (bytes)
         NULL,                       // Task parameters
-        2,                          // Priority (2 = higher than coin task for responsiveness)
+        4,                          // Priority (4 = higher than coin task for responsiveness)
         &TaskButtonDetectorHandle   // Task handle
     );
     
-    LOG_INFO("FreeRTOS tasks created successfully (CoinDetector: priority 1, ButtonDetector: priority 2)");
+    LOG_INFO("FreeRTOS tasks created successfully (CoinDetector: priority 3, ButtonDetector: priority 4)");
   }
   // Initialize Wire1 for the LCD display and RTC (shared I2C bus)
   LOG_INFO("Initializing Wire1 (I2C) for LCD and RTC...");
@@ -377,7 +640,7 @@ void setup() {
   mqttClient.setCallback(mqtt_callback);
   mqttClient.setBufferSize(512);
 
-  // Initialize modem and connect to network
+  // Initialize modem and connect to network (in setup, network task will handle reconnections)
   LOG_INFO("Initializing modem and connecting to network...");
   if (mqttClient.begin(apn, gprsUser, gprsPass, pin)) {
     // Configure SSL certificates
@@ -390,11 +653,6 @@ void setup() {
     if (mqttClient.connect(AWS_BROKER, AWS_BROKER_PORT, AWS_CLIENT_ID)) {
       LOG_INFO("Connected to MQTT broker!");
       
-      // // Subscribe to test topic
-      // mqttClient.subscribe("machines/machine001/test");
-      
-      // // Publish hello message
-      // mqttClient.publish("machines/machine001/data", "hello world", QOS1_AT_LEAST_ONCE);
       LOG_DEBUG("Subscribing to topic: %s", INIT_TOPIC.c_str());
       bool result = mqttClient.subscribe(INIT_TOPIC.c_str());
       LOG_DEBUG("Subscription result: %s", result ? "true" : "false");
@@ -415,6 +673,30 @@ void setup() {
     LOG_ERROR("Failed to initialize modem");
   }
   
+  // Create Network Manager task (handles all network/MQTT operations)
+  LOG_INFO("Creating Network Manager task...");
+  xTaskCreate(
+      TaskNetworkManager,           // Task function
+      "NetworkManager",             // Task name
+      16384,                        // Stack size (bytes) - SSL/TLS requires large stack (16KB)
+      NULL,                         // Task parameters
+      2,                            // Priority (2 = medium priority)
+      &TaskNetworkManagerHandle     // Task handle
+  );
+  
+  // Create Watchdog task (monitors system health)
+  LOG_INFO("Creating Watchdog task...");
+  xTaskCreate(
+      TaskWatchdog,                 // Task function
+      "Watchdog",                   // Task name
+      2048,                         // Stack size (bytes)
+      NULL,                         // Task parameters
+      1,                            // Priority (1 = lowest priority - monitoring only)
+      &TaskWatchdogHandle           // Task handle
+  );
+  
+  LOG_INFO("All FreeRTOS tasks created successfully");
+  
   // Final blink pattern to indicate setup complete
   for (int i = 0; i < 2; i++) {
     digitalWrite(LED_PIN, LOW);
@@ -426,85 +708,18 @@ void setup() {
 
 void loop() {
   // Timing variables for various operations
-  static unsigned long lastStatusCheck = 0;
-  static unsigned long lastNetworkCheck = 0;
-  static unsigned long lastConnectionAttempt = 0;
   static unsigned long lastButtonCheck = 0;
-  static unsigned long lastMqttReconnectAttempt = 0;
+  static unsigned long lastIoDebugCheck = 0;
+  static unsigned long lastLedToggle = 0;
+  static bool ledState = HIGH;
   
   // Current time
   unsigned long currentTime = millis();
   
-  // Check network status every 30 seconds
-  if (currentTime - lastNetworkCheck > 30000) {
-    lastNetworkCheck = currentTime;
-    
-    if (!mqttClient.isNetworkConnected()) {
-      LOG_WARNING("Lost cellular network connection");
-      
-      // Only attempt reconnection every 60 seconds to avoid overwhelming the modem
-      if (currentTime - lastConnectionAttempt > 60000) {
-        lastConnectionAttempt = currentTime;
-        
-        LOG_INFO("Attempting to reconnect to cellular network...");
-        if (mqttClient.begin(apn, gprsUser, gprsPass, pin)) {
-          LOG_INFO("Successfully reconnected to cellular network!");
-          
-          // Reconfigure SSL certificates
-          mqttClient.setCACert(AmazonRootCA);
-          mqttClient.setCertificate(AWSClientCertificate);
-          mqttClient.setPrivateKey(AWSClientPrivateKey);
-          
-          // Connect to MQTT broker
-          if (mqttClient.connect(AWS_BROKER, AWS_BROKER_PORT, AWS_CLIENT_ID)) {
-            LOG_INFO("MQTT broker connection restored!");
-            mqttClient.subscribe(INIT_TOPIC.c_str());
-            mqttClient.subscribe(CONFIG_TOPIC.c_str());
-            mqttClient.subscribe(COMMAND_TOPIC.c_str());
-            
-            // Notify that we're back online
-            if (controller) {
-                delay(4000);
-                controller->publishMachineSetupActionEvent();
-            }
-          }
-        }
-      }
-    } else {
-      // Network is connected, but check MQTT connection
-      if (!mqttClient.isConnected()) {
-        // Only attempt MQTT reconnection every 15 seconds
-        if (currentTime - lastMqttReconnectAttempt > 15000) {
-          lastMqttReconnectAttempt = currentTime;
-          LOG_WARNING("Network connected but MQTT disconnected, attempting to reconnect...");
-          
-          // MQTT client will handle resubscribing to topics internally
-          mqttClient.reconnect();
-        }
-      }
-    }
-  }
-  
-  // If connected to network, process MQTT messages
-  if (mqttClient.isNetworkConnected()) {
-    // Always process MQTT messages when connected (this handles incoming messages)
-    mqttClient.loop();
-       
-    // Status message every 60 seconds if connected
-    if (currentTime - lastStatusCheck > 60000) {
-      lastStatusCheck = currentTime;
-      LOG_INFO("System running normally, network connected");
-      
-      // Optional: publish a heartbeat message
-      // if (mqttClient.isConnected() && controller) {
-        // controller->publishHeartbeat();
-        // controller->update();
-      // }
-    }
-  }
+  // NOTE: Network operations are now handled by TaskNetworkManager
+  // No need to check network status or process MQTT messages here
   
   // Periodically check I/O expander raw values for debugging
-  static unsigned long lastIoDebugCheck = 0;
   if (currentTime - lastIoDebugCheck > 4000) {  // Every 4 seconds
     lastIoDebugCheck = currentTime;
     LOG_DEBUG("Machine state: %s, Machine loaded: %d, Formatted: %s", 
@@ -515,7 +730,6 @@ void loop() {
 
   // NOTE: Interrupt handling is now done by FreeRTOS tasks (TaskCoinDetector and TaskButtonDetector)
   // The old ioExpander.handleInterrupt() call is no longer needed
-  // ioExpander.handleInterrupt();
   
   // Run controller update - now processes flags set by FreeRTOS tasks
   if (currentTime - lastButtonCheck > 50) {
@@ -533,12 +747,11 @@ void loop() {
   
   // Handle LED indicator
   // Blink pattern based on connection status
-  static unsigned long lastLedToggle = 0;
-  static bool ledState = HIGH;
-  
+  // Note: Network status is checked less frequently to avoid blocking
   if (mqttClient.isConnected()) {
     // Solid LED when fully connected
     digitalWrite(LED_PIN, HIGH);
+    ledState = HIGH;
   } else if (mqttClient.isNetworkConnected()) {
     // Slow blink when network is connected but MQTT is not
     if (currentTime - lastLedToggle > 1000) {
@@ -554,4 +767,8 @@ void loop() {
       digitalWrite(LED_PIN, ledState);
     }
   }
+  
+  // Small delay to prevent loop from consuming too much CPU
+  // FreeRTOS will schedule other tasks during this delay
+  delay(10);
 }

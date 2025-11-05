@@ -34,6 +34,11 @@ public:
     void setBufferSize(size_t size);
     void reconnect();
     
+    // Network diagnostics
+    String getLocalIP();
+    int getSignalQuality();
+    bool isValidIP(const String& ip);
+    
 private:
     // Private methods
     void powerOnModem();
@@ -51,6 +56,7 @@ private:
 
     unsigned long _lastReconnectAttempt = 0;
     int _reconnectInterval = 5000; // Start with 5 seconds
+    int _consecutiveFailures = 0; // Track consecutive SSL failures
     
     // Network configuration
     const char* _apn;

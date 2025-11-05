@@ -1,6 +1,11 @@
 #include "car_wash_controller.h"
 #include "io_expander.h"
 #include "rtc_manager.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+
+// External mutex for ioExpander access (defined in main.cpp)
+extern SemaphoreHandle_t xIoExpanderMutex;
 
 CarWashController::CarWashController(MqttLteClient& client)
     : mqttClient(client),
@@ -18,7 +23,11 @@ CarWashController::CarWashController(MqttLteClient& client)
           
     // Force a read of the coin signal pin at startup to initialize correctly
     extern IoExpander ioExpander;
-    uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
+    uint8_t rawPortValue0 = 0;
+    if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
+        xSemaphoreGive(xIoExpanderMutex);
+    }
     
     // EXTENSIVE DEBUG: Log the raw values in different formats
     LOG_INFO("STARTUP DEBUG - Raw port value: 0x%02X | Binary: %d%d%d%d%d%d%d%d", 
@@ -141,8 +150,15 @@ void CarWashController::handleButtons() {
     // Get reference to the IO expander (assumed to be a global or accessible)
     extern IoExpander ioExpander;
 
-    // Dump raw port values for debugging
-    uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
+    // Protect IO expander access with mutex
+    uint8_t rawPortValue0 = 0;
+    if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
+        xSemaphoreGive(xIoExpanderMutex);
+    } else {
+        LOG_WARNING("Failed to acquire IO expander mutex in handleButtons()");
+        return; // Skip button handling if mutex not available
+    }
     
     // Print raw state for debugging
     
@@ -237,14 +253,23 @@ void CarWashController::pauseMachine() {
     if (activeButton >= 0) {
         // Read relay state before deactivation
         extern IoExpander ioExpander;
-        uint8_t relayStateBefore = ioExpander.readRegister(OUTPUT_PORT1);
-        LOG_DEBUG("Pausing - Relay port state before: 0x%02X", relayStateBefore);
+        uint8_t relayStateBefore = 0;
+        uint8_t relayStateAfter = 0;
         
-        // Turn off the active relay
-        ioExpander.setRelay(RELAY_INDICES[activeButton], false);
-        
-        // Verify relay state after deactivation
-        uint8_t relayStateAfter = ioExpander.readRegister(OUTPUT_PORT1);
+        if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            relayStateBefore = ioExpander.readRegister(OUTPUT_PORT1);
+            LOG_DEBUG("Pausing - Relay port state before: 0x%02X", relayStateBefore);
+            
+            // Turn off the active relay
+            ioExpander.setRelay(RELAY_INDICES[activeButton], false);
+            
+            // Verify relay state after deactivation
+            relayStateAfter = ioExpander.readRegister(OUTPUT_PORT1);
+            xSemaphoreGive(xIoExpanderMutex);
+        } else {
+            LOG_WARNING("Failed to acquire IO expander mutex in pauseMachine()");
+            return;
+        }
         LOG_DEBUG("Pausing - Relay port state after: 0x%02X", relayStateAfter);
         
         // Check relay bit is actually cleared
@@ -270,14 +295,23 @@ void CarWashController::resumeMachine(int buttonIndex) {
     
     // Turn on the corresponding relay when resuming
     extern IoExpander ioExpander;
-    uint8_t relayStateBefore = ioExpander.readRegister(OUTPUT_PORT1);
-    LOG_DEBUG("Resuming - Relay port state before: 0x%02X", relayStateBefore);
-   
-    // Turn on the relay for the active button
-    ioExpander.setRelay(RELAY_INDICES[buttonIndex], true);
+    uint8_t relayStateBefore = 0;
+    uint8_t relayStateAfter = 0;
     
-    // Verify relay state after activation
-    uint8_t relayStateAfter = ioExpander.readRegister(OUTPUT_PORT1);
+    if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        relayStateBefore = ioExpander.readRegister(OUTPUT_PORT1);
+        LOG_DEBUG("Resuming - Relay port state before: 0x%02X", relayStateBefore);
+       
+        // Turn on the relay for the active button
+        ioExpander.setRelay(RELAY_INDICES[buttonIndex], true);
+        
+        // Verify relay state after activation
+        relayStateAfter = ioExpander.readRegister(OUTPUT_PORT1);
+        xSemaphoreGive(xIoExpanderMutex);
+    } else {
+        LOG_WARNING("Failed to acquire IO expander mutex in resumeMachine()");
+        return;
+    }
     LOG_DEBUG("Resuming - Relay port state after: 0x%02X", relayStateAfter);
     
     // Check if relay bit was actually set
@@ -300,14 +334,22 @@ void CarWashController::stopMachine(TriggerType triggerType) {
     if (activeButton >= 0) {
         // Add relay state debugging
         extern IoExpander ioExpander;
-        uint8_t relayStateBefore = ioExpander.readRegister(OUTPUT_PORT1);
-        LOG_DEBUG("Stopping - Relay port state before: 0x%02X", relayStateBefore);
+        uint8_t relayStateBefore = 0;
+        uint8_t relayStateAfter = 0;
         
-        // Turn off the active relay
-        ioExpander.setRelay(RELAY_INDICES[activeButton], false);
-        
-        // Verify relay state after deactivation
-        uint8_t relayStateAfter = ioExpander.readRegister(OUTPUT_PORT1);
+        if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            relayStateBefore = ioExpander.readRegister(OUTPUT_PORT1);
+            LOG_DEBUG("Stopping - Relay port state before: 0x%02X", relayStateBefore);
+            
+            // Turn off the active relay
+            ioExpander.setRelay(RELAY_INDICES[activeButton], false);
+            
+            // Verify relay state after deactivation
+            relayStateAfter = ioExpander.readRegister(OUTPUT_PORT1);
+            xSemaphoreGive(xIoExpanderMutex);
+        } else {
+            LOG_WARNING("Failed to acquire IO expander mutex in stopMachine()");
+        }
         LOG_DEBUG("Stopping - Relay port state after: 0x%02X", relayStateAfter);
         
         // Check relay bit is actually cleared
@@ -349,14 +391,23 @@ void CarWashController::activateButton(int buttonIndex, TriggerType triggerType)
     
     // Read current relay state before activation
     extern IoExpander ioExpander;
-    uint8_t relayStateBefore = ioExpander.readRegister(OUTPUT_PORT1);
-    LOG_DEBUG("Relay port state before activation: 0x%02X", relayStateBefore);
+    uint8_t relayStateBefore = 0;
+    uint8_t relayStateAfter = 0;
     
-    // Turn on the corresponding relay
-    ioExpander.setRelay(RELAY_INDICES[buttonIndex], true);
-    
-    // Verify relay state after activation
-    uint8_t relayStateAfter = ioExpander.readRegister(OUTPUT_PORT1);
+    if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        relayStateBefore = ioExpander.readRegister(OUTPUT_PORT1);
+        LOG_DEBUG("Relay port state before activation: 0x%02X", relayStateBefore);
+        
+        // Turn on the corresponding relay
+        ioExpander.setRelay(RELAY_INDICES[buttonIndex], true);
+        
+        // Verify relay state after activation
+        relayStateAfter = ioExpander.readRegister(OUTPUT_PORT1);
+        xSemaphoreGive(xIoExpanderMutex);
+    } else {
+        LOG_WARNING("Failed to acquire IO expander mutex in activateButton()");
+        return;
+    }
     LOG_DEBUG("Relay port state after activation: 0x%02X", relayStateAfter);
     
     // Check if relay bit was actually set
@@ -384,7 +435,12 @@ void CarWashController::tokenExpired() {
     if (activeButton >= 0) {
         // Turn off the active relay
         extern IoExpander ioExpander;
-        ioExpander.setRelay(RELAY_INDICES[activeButton], false);
+        if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            ioExpander.setRelay(RELAY_INDICES[activeButton], false);
+            xSemaphoreGive(xIoExpanderMutex);
+        } else {
+            LOG_WARNING("Failed to acquire IO expander mutex in tokenExpired()");
+        }
     }
     activeButton = -1;
     currentState = STATE_IDLE;
@@ -407,7 +463,11 @@ void CarWashController::handleCoinAcceptor() {
             return;
         }
         // Re-initialize coin state at the end of startup period to avoid false edge detection
-        uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
+        uint8_t rawPortValue0 = 0;
+        if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
+            xSemaphoreGive(xIoExpanderMutex);
+        }
         bool initialCoinSignal = ((rawPortValue0 & (1 << COIN_SIG)) == 0);
         lastCoinState = initialCoinSignal ? LOW : HIGH;
         lastCoinProcessedTime = currentTime; // Reset cooldown timer
@@ -421,7 +481,11 @@ void CarWashController::handleCoinAcceptor() {
     // Additional grace period after startup - ignore any edge detection for 1 second after startup ends
     if (startupEndTime > 0 && (currentTime - startupEndTime) < 1000) {
         // Re-read and update state during grace period to prevent false edge detection
-        uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
+        uint8_t rawPortValue0 = 0;
+        if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
+            xSemaphoreGive(xIoExpanderMutex);
+        }
         bool currentCoinSignal = ((rawPortValue0 & (1 << COIN_SIG)) == 0);
         lastCoinState = currentCoinSignal ? LOW : HIGH;
         return;
@@ -433,7 +497,15 @@ void CarWashController::handleCoinAcceptor() {
         LOG_INFO("Interrupt-based coin signal detected!");
         
         // Read the current state to get more details
-        uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
+        uint8_t rawPortValue0 = 0;
+        if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
+            ioExpander.clearCoinSignalFlag();
+            xSemaphoreGive(xIoExpanderMutex);
+        } else {
+            LOG_WARNING("Failed to acquire IO expander mutex in handleCoinAcceptor()");
+            return;
+        }
         
         // For your hardware configuration, 3.3V = active coin, 0.05V = no coin
         // When a coin passes (3.3V), the TCA9535 reads LOW (bit=0)
@@ -452,8 +524,6 @@ void CarWashController::handleCoinAcceptor() {
                     currentTime - lastCoinProcessedTime);
         }
         
-        // Clear the flag for next detection
-        ioExpander.clearCoinSignalFlag();
         return;
     }
     
@@ -461,7 +531,14 @@ void CarWashController::handleCoinAcceptor() {
     // This is especially important during development or if interrupts aren't reliable
     
     // Read raw port value
-    uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
+    uint8_t rawPortValue0 = 0;
+    if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
+        xSemaphoreGive(xIoExpanderMutex);
+    } else {
+        LOG_WARNING("Failed to acquire IO expander mutex in handleCoinAcceptor() fallback");
+        return;
+    }
     
     // Get current state of coin signal pin with correct logic
     // When coin is present: Pin is LOW (bit=0) = ACTIVE

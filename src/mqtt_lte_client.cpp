@@ -8,7 +8,12 @@ MqttLteClient::MqttLteClient(HardwareSerial& modemSerial, int pwrKeyPin, int dtr
     _modem = new TinyGsm(_modemSerial);
     _gsmClient = new TinyGsmClient(*_modem);
     _sslClient = new SSLClient(_gsmClient);
+    
+    // Configure SSL client with increased timeouts for poor cellular connections
+    _sslClient->setTimeout(30000);  // 30 second timeout for SSL operations
+    
     _mqttClient = new PubSubClient(*_sslClient);
+    _mqttClient->setSocketTimeout(30);  // 30 second timeout for socket operations
 
     _subscribedTopics.reserve(5);
 }
@@ -228,10 +233,28 @@ bool MqttLteClient::initModemAndConnectNetwork() {
     if (_modem->isGprsConnected()) {
         Serial.println("GPRS connected");
         
-        // Get IP address
+        // Get and validate IP address
         String ip = _modem->localIP().toString();
         Serial.print("IP address: ");
         Serial.println(ip);
+        
+        // Validate IP address before declaring success
+        if (!isValidIP(ip)) {
+            Serial.print("Invalid IP address received: ");
+            Serial.println(ip);
+            Serial.println("GPRS connection appears unstable, will retry");
+            return false;
+        }
+        
+        // Get and log signal quality
+        int signalQuality = _modem->getSignalQuality();
+        Serial.print("Signal quality: ");
+        Serial.print(signalQuality);
+        Serial.println("/31");
+        
+        if (signalQuality < 10) {
+            Serial.println("WARNING: Poor signal quality detected, connection may be unstable");
+        }
         
         _networkConnected = true;
         return true;
@@ -267,22 +290,51 @@ bool MqttLteClient::connect(const char* broker, uint16_t port, const char* clien
     
     _mqttClient->setKeepAlive(120); // Increase from default 15s to 120s
 
-    // Loop until we're reconnected or timeout
+    // Check signal quality before attempting SSL connection
+    int signalQuality = getSignalQuality();
+    if (signalQuality > 0 && signalQuality < 10) {
+        Serial.print("WARNING: Poor signal quality (");
+        Serial.print(signalQuality);
+        Serial.println("/31) - SSL connection may fail");
+    }
+
+    // Loop until we're reconnected or timeout (increased to 30s for SSL handshake)
     unsigned long startTime = millis();
-    while (!_mqttClient->connected() && millis() - startTime < 10000) {
-        Serial.print("Attempting MQTT connection...");
+    int attemptCount = 0;
+    const int maxAttempts = 3;
+    
+    while (!_mqttClient->connected() && attemptCount < maxAttempts && millis() - startTime < 30000) {
+        attemptCount++;
+        Serial.print("Attempting MQTT connection (");
+        Serial.print(attemptCount);
+        Serial.print("/");
+        Serial.print(maxAttempts);
+        Serial.print(")...");
         
         // Attempt to connect
         if (_mqttClient->connect(_clientId)) {
             Serial.println("connected");
             _mqttConnected = true;
+            _consecutiveFailures = 0; // Reset failure counter on success
             return true;
         } else {
             Serial.print("failed, rc=");
             Serial.print(_mqttClient->state());
             Serial.println("...trying again");
-            delay(1000);
+            
+            _consecutiveFailures++;
+            
+            // Progressive delay between retries
+            delay(attemptCount * 2000); // 2s, 4s, 6s...
         }
+    }
+    
+    // If we've had multiple consecutive failures, log warning
+    if (_consecutiveFailures > 3) {
+        Serial.print("WARNING: ");
+        Serial.print(_consecutiveFailures);
+        Serial.println(" consecutive SSL/MQTT connection failures");
+        Serial.println("This may indicate certificate issues or very poor signal");
     }
     
     return false;
@@ -403,4 +455,82 @@ void MqttLteClient::setBufferSize(size_t size) {
     if (_mqttClient) {
         _mqttClient->setBufferSize(size);
     }
+}
+
+String MqttLteClient::getLocalIP() {
+    if (_modem && _networkConnected) {
+        return _modem->localIP().toString();
+    }
+    return "0.0.0.0";
+}
+
+int MqttLteClient::getSignalQuality() {
+    if (_modem) {
+        return _modem->getSignalQuality();
+    }
+    return 0;
+}
+
+bool MqttLteClient::isValidIP(const String& ip) {
+    // Check for invalid patterns
+    if (ip.length() < 7 || ip == "0.0.0.0") {
+        return false;
+    }
+    
+    // Check for corrupted IP addresses (like "7.0.0.0" or malformed ones)
+    // Valid private IPs usually start with 10., 172.16-31., or 192.168.
+    // But cellular networks may use different ranges, so we just check basic validity
+    
+    int dotCount = 0;
+    for (unsigned int i = 0; i < ip.length(); i++) {
+        if (ip[i] == '.') {
+            dotCount++;
+        } else if (!isdigit(ip[i])) {
+            // Invalid character in IP
+            return false;
+        }
+    }
+    
+    // Should have exactly 3 dots
+    if (dotCount != 3) {
+        return false;
+    }
+    
+    // Parse octets and validate range
+    int octets[4] = {0, 0, 0, 0};
+    int octetIndex = 0;
+    String currentOctet = "";
+    
+    for (unsigned int i = 0; i < ip.length(); i++) {
+        if (ip[i] == '.') {
+            if (currentOctet.length() == 0 || octetIndex >= 3) {
+                return false; // Empty octet or too many octets
+            }
+            octets[octetIndex++] = currentOctet.toInt();
+            currentOctet = "";
+        } else {
+            currentOctet += ip[i];
+        }
+    }
+    
+    // Last octet
+    if (currentOctet.length() > 0 && octetIndex == 3) {
+        octets[3] = currentOctet.toInt();
+    } else {
+        return false;
+    }
+    
+    // Validate each octet is in valid range (0-255)
+    for (int i = 0; i < 4; i++) {
+        if (octets[i] < 0 || octets[i] > 255) {
+            return false;
+        }
+    }
+    
+    // Additional check: 0.x.x.x is usually invalid
+    if (octets[0] == 0) {
+        return false;
+    }
+    
+    return true;
 }
