@@ -7,6 +7,7 @@
 #include "car_wash_controller.h"
 #include "logger.h"
 #include "display_manager.h"
+#include "rtc_manager.h"
 
 #include "certs/AmazonRootCA.h"
 #include "certs/AWSClientCertificate.h"
@@ -20,10 +21,11 @@ const char* AWS_CLIENT_ID = "fullwash-machine-001";
 const uint16_t AWS_BROKER_PORT = 8883;
 
 // GSM connection settings
-const char apn[] = "internet"; // Replace with your carrier's APN if needed
+// const char apn[] = "internet";
+const char apn[] = "antel.lte"; // Replace with your carrier's APN if needed
 const char gprsUser[] = "";
 const char gprsPass[] = "";
-const char pin[] = "3846";
+const char pin[] = "0281";
 
 // Create MQTT LTE client
 MqttLteClient mqttClient(SerialAT, MODEM_PWRKEY, MODEM_DTR, MODEM_FLIGHT, MODEM_TX, MODEM_RX);
@@ -31,16 +33,122 @@ MqttLteClient mqttClient(SerialAT, MODEM_PWRKEY, MODEM_DTR, MODEM_FLIGHT, MODEM_
 // Create IO Expander
 IoExpander ioExpander(TCA9535_ADDR, I2C_SDA_PIN, I2C_SCL_PIN, INT_PIN);
 
+// Create RTC Manager (uses Wire1, shared with LCD)
+RTCManager* rtcManager;
+
 // Create controller
 CarWashController* controller;
 
 // Create display manager
 DisplayManager* display;
 
-// Button states
-bool buttonState = false;
-bool lastButtonState = false;
+// FreeRTOS task handles
+TaskHandle_t TaskCoinDetectorHandle = NULL;
+TaskHandle_t TaskButtonDetectorHandle = NULL;
 
+/**
+ * FreeRTOS Task: Coin Detector
+ * 
+ * This task monitors the coin acceptor signal pin (COIN_SIG) for state changes.
+ * It runs independently to detect coin insertions reliably without blocking the main loop.
+ * 
+ * Detection Logic:
+ * - Monitors INT_PIN (active LOW when hardware detects a change)
+ * - Reads PORT0 register to get current coin signal state
+ * - Detects HIGH->LOW transition (coin insertion)
+ * - Sets coin signal flag for controller to process
+ */
+void TaskCoinDetector(void *pvParameters) {
+    const TickType_t xDelay = 50 / portTICK_PERIOD_MS; // 50ms polling interval
+    uint8_t coins_sig_state = (1 << COIN_SIG); // Initialize to HIGH (no coin)
+    uint8_t _portVal = 0;
+    
+    // Wait for IO expander to be fully initialized
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    
+    LOG_INFO("Coin detector task started");
+    
+    for(;;) {
+        // Check if interrupt pin is LOW (hardware detected a change)
+        if (digitalRead(INT_PIN) == LOW) {
+            _portVal = ioExpander.readRegister(INPUT_PORT0);
+            
+            // Check if COIN_SIG state has changed
+            if (coins_sig_state != (_portVal & (1 << COIN_SIG))) {
+                // Detect HIGH->LOW transition (coin inserted)
+                if (coins_sig_state == (1 << COIN_SIG)) {
+                    ioExpander.setCoinSignal(1);
+                    ioExpander._intCnt++;
+                    LOG_DEBUG("Interrupt detected! Port 0 Value: 0x%02X, coins times: %d", 
+                             _portVal, ioExpander._intCnt);
+                }
+                
+                // Update state for next comparison
+                coins_sig_state = (_portVal & (1 << COIN_SIG));
+            }
+        }
+        
+        vTaskDelay(xDelay); // Wait 50ms before next check
+    }
+}
+
+/**
+ * FreeRTOS Task: Button Detector
+ * 
+ * This task monitors all button pins (BUTTON1-6) for press events.
+ * It runs independently with faster polling for responsive button detection.
+ * 
+ * Detection Logic:
+ * - Monitors INT_PIN (active LOW when button state changes)
+ * - Reads PORT0 register to get current button states
+ * - Detects button press events (HIGH->LOW transition, buttons are active LOW)
+ * - Sets button flags with debouncing for controller to process
+ */
+void TaskButtonDetector(void *pvParameters) {
+    const TickType_t xDelay = 20 / portTICK_PERIOD_MS; // 20ms for responsive button detection
+    uint8_t lastPortValue = 0xFF; // All buttons released initially (active LOW)
+    
+    // Wait for IO expander to be initialized
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    
+    LOG_INFO("Button detector task started");
+    
+    for(;;) {
+        // Check if interrupt pin is LOW (button state change detected)
+        if (digitalRead(INT_PIN) == LOW) {
+            uint8_t currentPortValue = ioExpander.readRegister(INPUT_PORT0);
+            
+            // Check if any button state changed
+            if (currentPortValue != lastPortValue) {
+                LOG_DEBUG("Button state change detected. Port: 0x%02X -> 0x%02X", 
+                         lastPortValue, currentPortValue);
+                
+                // Check each button for press events (transition from HIGH to LOW)
+                for (int i = 0; i < NUM_BUTTONS; i++) {
+                    int buttonPin;
+                    if (i < NUM_BUTTONS - 1) {
+                        buttonPin = BUTTON_INDICES[i]; // Function buttons 1-5
+                    } else {
+                        buttonPin = STOP_BUTTON_PIN;   // Stop button (BUTTON6)
+                    }
+                    
+                    bool currentButtonPressed = !(currentPortValue & (1 << buttonPin));
+                    bool lastButtonPressed = !(lastPortValue & (1 << buttonPin));
+                    
+                    // Detect button press (transition from released to pressed)
+                    if (currentButtonPressed && !lastButtonPressed) {
+                        LOG_INFO("Button %d pressed detected in task", i + 1);
+                        ioExpander.setButtonFlag(i, true);
+                    }
+                }
+                
+                lastPortValue = currentPortValue;
+            }
+        }
+        
+        vTaskDelay(xDelay); // Wait 20ms before next check
+    }
+}
 
 void mqtt_callback(char *topic, byte *payload, unsigned int len) {
     LOG_INFO("Message arrived from topic: %s", topic);
@@ -135,6 +243,32 @@ void mqtt_callback(char *topic, byte *payload, unsigned int len) {
                 extern IoExpander ioExpander;
                 ioExpander.printDebugInfo();
             }
+            // Add debug command to print RTC state
+            else if (command == "debug_rtc") {
+                LOG_INFO("Printing RTC debug info");
+                extern RTCManager* rtcManager;
+                if (rtcManager && rtcManager->isInitialized()) {
+                    rtcManager->printDebugInfo();
+                } else {
+                    LOG_WARNING("RTC is not initialized");
+                }
+            }
+            // Add command to manually set RTC time from server
+            else if (command == "sync_rtc" && doc.containsKey("timestamp")) {
+                String timestamp = doc["timestamp"].as<String>();
+                LOG_INFO("Manual RTC sync requested with timestamp: %s", timestamp.c_str());
+                extern RTCManager* rtcManager;
+                if (rtcManager && rtcManager->isInitialized()) {
+                    if (rtcManager->setDateTimeFromISO(timestamp)) {
+                        LOG_INFO("RTC synchronized successfully!");
+                        rtcManager->printDebugInfo();
+                    } else {
+                        LOG_ERROR("Failed to sync RTC");
+                    }
+                } else {
+                    LOG_WARNING("RTC is not initialized");
+                }
+            }
         }
     } else if (controller) {
         LOG_DEBUG("Handling MQTT message...");
@@ -183,16 +317,59 @@ void setup() {
     LOG_DEBUG("Setting all relays to OFF...");
     ioExpander.writeRegister(OUTPUT_PORT1, 0x00);
     
-    // Enable interrupt for coin acceptor pins (COIN_SIG and COIN_CNT)
-    LOG_INFO("Enabling interrupt for coin acceptor pins...");
-    ioExpander.enableInterrupt(0, (1 << COIN_SIG) | (1 << COIN_CNT));
+    // Enable interrupt for all input pins (buttons + coin acceptor)
+    LOG_INFO("Enabling interrupt for all input pins (buttons + coin acceptor)...");
+    // Enable interrupt for all pins on port 0: buttons (0-5) + coin acceptor (6-7)
+    ioExpander.enableInterrupt(0, 0xFF); // All 8 pins
     
     LOG_INFO("TCA9535 fully initialized. Ready to control relays and read buttons.");
+    
+    // Configure INT_PIN with internal pull-up for reliable detection
+    pinMode(INT_PIN, INPUT_PULLUP);
+    
+    // Create FreeRTOS tasks for dedicated interrupt handling
+    LOG_INFO("Creating FreeRTOS tasks for coin and button detection...");
+    
+    xTaskCreate(
+        TaskCoinDetector,           // Task function
+        "CoinDetector",             // Task name (for debugging)
+        2048,                       // Stack size (bytes)
+        NULL,                       // Task parameters
+        1,                          // Priority (1 = low priority)
+        &TaskCoinDetectorHandle     // Task handle
+    );
+    
+    xTaskCreate(
+        TaskButtonDetector,         // Task function
+        "ButtonDetector",           // Task name (for debugging)
+        2048,                       // Stack size (bytes)
+        NULL,                       // Task parameters
+        2,                          // Priority (2 = higher than coin task for responsiveness)
+        &TaskButtonDetectorHandle   // Task handle
+    );
+    
+    LOG_INFO("FreeRTOS tasks created successfully (CoinDetector: priority 1, ButtonDetector: priority 2)");
   }
-  controller = new CarWashController(mqttClient);
-  
-  // Initialize Wire1 for the LCD display
+  // Initialize Wire1 for the LCD display and RTC (shared I2C bus)
+  LOG_INFO("Initializing Wire1 (I2C) for LCD and RTC...");
   Wire1.begin(LCD_SDA_PIN, LCD_SCL_PIN);
+  Wire1.setClock(100000); // Set I2C clock to 100kHz (standard mode)
+  
+  // Initialize the RTC manager
+  LOG_INFO("Initializing RTC Manager...");
+  rtcManager = new RTCManager(RTC_DS1340_ADDR, &Wire1);
+  
+  if (rtcManager->begin()) {
+    LOG_INFO("RTC initialization successful!");
+    rtcManager->printDebugInfo();
+  } else {
+    LOG_ERROR("Failed to initialize RTC!");
+    LOG_WARNING("System will continue without RTC. Timestamps may be inaccurate.");
+  }
+  
+  // Initialize the controller with RTC
+  controller = new CarWashController(mqttClient);
+  controller->setRTCManager(rtcManager);
   
   // Initialize the display with correct LCD pins
   display = new DisplayManager(LCD_ADDR, LCD_COLS, LCD_ROWS, LCD_SDA_PIN, LCD_SCL_PIN);
@@ -254,10 +431,6 @@ void loop() {
   static unsigned long lastConnectionAttempt = 0;
   static unsigned long lastButtonCheck = 0;
   static unsigned long lastMqttReconnectAttempt = 0;
-  
-  // Button state tracking
-  static bool buttonState = false;
-  static bool lastButtonState = false;
   
   // Current time
   unsigned long currentTime = millis();
@@ -340,10 +513,11 @@ void loop() {
              controller->getTimestamp().c_str());  
   }
 
-  // Check for interrupts from the IO expander
-  ioExpander.handleInterrupt();
+  // NOTE: Interrupt handling is now done by FreeRTOS tasks (TaskCoinDetector and TaskButtonDetector)
+  // The old ioExpander.handleInterrupt() call is no longer needed
+  // ioExpander.handleInterrupt();
   
-  // Run controller update if available - this will handle all buttons through the controller
+  // Run controller update - now processes flags set by FreeRTOS tasks
   if (currentTime - lastButtonCheck > 50) {
     lastButtonCheck = currentTime;
     

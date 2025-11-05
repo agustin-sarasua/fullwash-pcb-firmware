@@ -48,18 +48,38 @@ public:
     // Check if a coin signal has been detected
     bool isCoinSignalDetected();
     
+    // Set coin signal flag (called from FreeRTOS task)
+    void setCoinSignal(uint8_t sig);
+    
     // Clear the coin signal flag
     void clearCoinSignalFlag();
+    
+    // Button detection methods
+    bool isButtonDetected();
+    uint8_t getDetectedButtonId();
+    void setButtonFlag(uint8_t buttonId, bool state);
+    void clearButtonFlag();
+    
+    // Public interrupt counter for debugging
+    unsigned int _intCnt;
+    uint8_t _portVal;
 
 private:
     uint8_t _address;
     int _sdaPin;
     int _sclPin;
     int _intPin;
+    
     bool _initialized;
     std::function<void(uint8_t)> _interruptCallback;
     unsigned long _lastInterruptTime;
     volatile bool _coinSignalDetected;
+    
+    // Button detection variables
+    volatile bool _buttonDetected;
+    volatile uint8_t _detectedButtonId;
+    unsigned long _lastButtonTime[6]; // 6 buttons max
+    
     static const unsigned long DEBOUNCE_INTERVAL = 50; // 50ms debounce
 };
 

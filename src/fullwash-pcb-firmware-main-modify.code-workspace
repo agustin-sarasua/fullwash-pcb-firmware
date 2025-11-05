@@ -1,0 +1,39 @@
+{
+	"folders": [
+		{
+			"path": "../../../../../Downloads/extract/fullwash-pcb-firmware-main-modify"
+		},
+		{
+			"name": "fullwash-pcb-firmware",
+			"path": ".."
+		},
+		{
+			"path": "../../../../../workspace/fullwash-backend"
+		},
+		{
+			"path": "../../../../../workspace/fullwash-infra"
+		},
+		{
+			"path": "../../../../../workspace/fullwash-web"
+		},
+		{
+			"path": "../../../../../workspace/fullwash-app"
+		},
+		{
+			"path": "../../../../../avocabo_workspace/avocabo-backend"
+		},
+		{
+			"path": "../../../../../workspace/avocabo-infra"
+		},
+		{
+			"path": "../../../../../avocabo_workspace/avocabo_mono"
+		}
+	],
+	"settings": {
+		"files.associations": {
+			"*.tpp": "cpp",
+			"cstddef": "cpp",
+			"string": "cpp"
+		}
+	}
+}
