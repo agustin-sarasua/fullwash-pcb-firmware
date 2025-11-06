@@ -624,6 +624,18 @@ void CarWashController::activateButton(int buttonIndex, TriggerType triggerType)
         Serial.println(activeButton);
     }
     
+    // CRITICAL FIX: Ensure we're in IDLE state before activating
+    // This prevents issues where activateButton might be called from wrong state
+    if (currentState != STATE_IDLE) {
+        LOG_ERROR("activateButton() called from wrong state: %d (expected STATE_IDLE). Resetting to IDLE first.", currentState);
+        currentState = STATE_IDLE;
+        activeButton = -1;
+        tokenStartTime = 0;
+        tokenTimeElapsed = 0;
+        pauseStartTime = 0;
+        lastPauseResumeTime = 0;
+    }
+    
     if (config.tokens <= 0) {
         LOG_WARNING("Cannot activate button %d - no tokens left (tokens=%d)", buttonIndex+1, config.tokens);
         if (ENABLE_BUTTON_DIAGNOSTICS) {
@@ -761,9 +773,12 @@ void CarWashController::tokenExpired() {
         Serial.print(" (IDLE), activeButton=");
         Serial.println(activeButton);
     }
-    // CRITICAL FIX: Do NOT reset lastActionTime here - inactivity timeout should continue
-    // from the last actual user action, not reset when token expires
-    // This ensures the inactivity timeout works correctly on subsequent timeouts
+    // CRITICAL FIX: Reset inactivity timeout when token expires and machine goes to IDLE
+    // This gives the user a fresh timeout period to start a new token after the previous one finished
+    lastActionTime = millis();
+    // CRITICAL FIX: Reset pause/resume tracking when token expires to ensure clean state
+    // This prevents stale pause/resume state from affecting the next button press
+    lastPauseResumeTime = 0;
     tokenStartTime = 0;
     tokenTimeElapsed = 0;
     pauseStartTime = 0;
