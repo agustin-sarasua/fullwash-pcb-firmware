@@ -684,20 +684,40 @@ void MqttLteClient::loop() {
     
     // CRITICAL FIX: Periodic GPRS keep-alive to prevent connection timeout
     // Many cellular modems timeout GPRS connections after 30-60 seconds of inactivity
-    // Check IP address every 30 seconds to keep the connection alive
-    // Do this WITHOUT mutex to avoid blocking
-    if (_networkConnected && _modem && millis() - lastGprsKeepAlive > 30000) {
+    // Check IP address every 60 seconds to keep the connection alive (reduced frequency to avoid interference)
+    // MUST use mutex to prevent UART interference with ongoing SSL/MQTT operations
+    if (_networkConnected && _modem && millis() - lastGprsKeepAlive > 60000) {
         lastGprsKeepAlive = millis();
         
-        // Lightweight keep-alive: just check if we still have a valid IP
-        // This is less intrusive than isGprsConnected() but still keeps the connection active
-        String ip = _modem->localIP().toString();
-        if (!isValidIP(ip)) {
-            // IP is invalid, connection may have dropped
-            Serial.println("[NETWORK] Keep-alive check: IP address invalid, connection may be lost");
-            _networkConnected = false;
+        // CRITICAL: Protect modem UART access with mutex to prevent interference
+        // If mutex is busy (loop() or publish() active), skip this check to avoid UART conflict
+        if (_mutex) {
+            TickType_t timeoutTicks = pdMS_TO_TICKS(50); // 50ms timeout - quick check
+            if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) == pdTRUE) {
+                // Lightweight keep-alive: just check if we still have a valid IP
+                // This is less intrusive than isGprsConnected() but still keeps the connection active
+                String ip = _modem->localIP().toString();
+                xSemaphoreGiveRecursive(_mutex);
+                
+                if (!isValidIP(ip)) {
+                    // IP is invalid, connection may have dropped
+                    Serial.println("[NETWORK] Keep-alive check: IP address invalid, connection may be lost");
+                    _networkConnected = false;
+                }
+                // If IP is valid, the connection is still alive (no need to log every time)
+            } else {
+                // Mutex busy - skip this keep-alive check to avoid UART interference
+                // This prevents conflicts when loop() is doing SSL operations
+                // The connection should still be alive if loop() is working
+            }
+        } else {
+            // No mutex - check directly (shouldn't happen in normal operation)
+            String ip = _modem->localIP().toString();
+            if (!isValidIP(ip)) {
+                Serial.println("[NETWORK] Keep-alive check: IP address invalid, connection may be lost");
+                _networkConnected = false;
+            }
         }
-        // If IP is valid, the connection is still alive (no need to log every time)
     }
     
     // REMOVED: Signal quality check from loop() - causes UART interference
@@ -719,7 +739,7 @@ void MqttLteClient::loop() {
             if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) == pdTRUE) {
                 // CRITICAL FIX: Limit how long loop() can run to prevent blocking
                 // If loop() takes too long, it means SSL/network operations are blocking
-                // Set a maximum execution time of 500ms for loop() call
+                // The SSL client timeout is 4 seconds, so if loop() takes >5 seconds, something is wrong
                 unsigned long loopCallStart = millis();
                 _mqttClient->loop();  // Process incoming MQTT messages
                 unsigned long loopCallDuration = millis() - loopCallStart;
@@ -729,7 +749,15 @@ void MqttLteClient::loop() {
                 xSemaphoreGiveRecursive(_mutex);
                 
                 // Log warnings if loop() took too long
-                if (loopCallDuration > 1000) {
+                if (loopCallDuration > 5000) {
+                    // loop() took >5 seconds - this is abnormal and indicates network/SSL issues
+                    Serial.print("[MQTT LOOP] CRITICAL: loop() took ");
+                    Serial.print(loopCallDuration);
+                    Serial.println("ms - network connection may be lost or SSL operations failed");
+                    Serial.println("[MQTT LOOP] This may cause GPRS connection timeout - consider reconnecting");
+                    // Mark network as potentially disconnected if loop() took too long
+                    // The next keep-alive check will verify the connection
+                } else if (loopCallDuration > 1000) {
                     Serial.print("[MQTT LOOP] WARNING: loop() took ");
                     Serial.print(loopCallDuration);
                     Serial.println("ms - network may be slow or SSL operations blocking");
