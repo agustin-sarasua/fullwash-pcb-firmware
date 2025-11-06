@@ -75,31 +75,35 @@ void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payl
         config.userId = doc["user_id"].as<String>();
         config.userName = doc["user_name"].as<String>();
         config.tokens = doc["tokens"].as<int>();
-        config.physicalTokens = 0;  // No physical tokens when session is initialized remotely
-        config.timestamp = doc["timestamp"].as<String>();
+        config.physicalTokens = 0;
         
-        // Only store timestampMillis if RTC not available (for fallback timestamp calculation)
-        // If RTC is available, we don't need millis() offset since RTC is the primary time source
-        if (rtcManager && rtcManager->isInitialized()) {
-            config.timestampMillis = 0;  // Not needed, RTC handles timestamps
-        } else {
-            config.timestampMillis = millis();  // Store for fallback timestamp calculation
-        }
-        
-        // Sync RTC with server timestamp if RTC is available
-        if (rtcManager && rtcManager->isInitialized() && config.timestamp.length() > 0) {
-            LOG_INFO("Syncing RTC with server timestamp: %s", config.timestamp.c_str());
-            if (rtcManager->setDateTimeFromISO(config.timestamp)) {
-                LOG_INFO("RTC synchronized successfully!");
-                rtcManager->printDebugInfo();
+        // Extract timestamp from INIT_TOPIC message if present
+        // If not present, try to get it from RTC if available
+        if (doc.containsKey("timestamp") && doc["timestamp"].as<String>().length() > 0) {
+            config.timestamp = doc["timestamp"].as<String>();
+            LOG_INFO("Timestamp from INIT_TOPIC: %s", config.timestamp.c_str());
+        } else if (rtcManager && rtcManager->isInitialized()) {
+            // Fallback to RTC timestamp if INIT_TOPIC doesn't have one
+            config.timestamp = rtcManager->getTimestampWithMillis();
+            if (config.timestamp != "RTC Error" && config.timestamp.length() > 0) {
+                LOG_INFO("Using RTC timestamp: %s", config.timestamp.c_str());
             } else {
-                LOG_WARNING("Failed to sync RTC with server timestamp");
+                config.timestamp = ""; // RTC not available or invalid
+                LOG_WARNING("RTC timestamp not available, leaving timestamp empty");
             }
+        } else {
+            config.timestamp = ""; // No timestamp available
+            LOG_WARNING("No timestamp available in INIT_TOPIC and RTC not initialized");
         }
         
         config.isLoaded = true;
         currentState = STATE_IDLE;
         lastActionTime = millis();
+        // Reset token timing variables to ensure clean state
+        tokenStartTime = 0;
+        tokenTimeElapsed = 0;
+        pauseStartTime = 0;
+        activeButton = -1;
         LOG_INFO("Switching on LED");
         digitalWrite(LED_PIN_INIT, HIGH);
         LOG_INFO("Machine loaded with new configuration");
@@ -107,14 +111,7 @@ void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payl
         LOG_INFO("Received config message from server");
         config.timestamp = doc["timestamp"].as<String>();
         
-        // Only store timestampMillis if RTC not available (for fallback timestamp calculation)
-        // If RTC is available, we don't need millis() offset since RTC is the primary time source
-        if (rtcManager && rtcManager->isInitialized()) {
-            config.timestampMillis = 0;  // Not needed, RTC handles timestamps
-        } else {
-            config.timestampMillis = millis();  // Store for fallback timestamp calculation
-        }
-        
+
         // Sync RTC with server timestamp if RTC is available
         // This is now only sent when RTC time is invalid, so always sync when received
         if (rtcManager && rtcManager->isInitialized() && config.timestamp.length() > 0) {
@@ -146,41 +143,63 @@ void CarWashController::handleButtons() {
         uint8_t detectedId = ioExpander.getDetectedButtonId();
         bool buttonProcessed = false;
 
+        LOG_INFO("Button flag detected: button %d, currentState=%d, activeButton=%d, isLoaded=%d, timestamp='%s'", 
+                detectedId + 1, currentState, activeButton, config.isLoaded, 
+                config.timestamp.length() > 0 ? config.timestamp.c_str() : "(empty)");
+
+        // CRITICAL FIX: Always clear the flag immediately to prevent delayed processing
+        // The old logic kept flags when state was wrong, causing 20-second delays
+        ioExpander.clearButtonFlag();
+
         // Explicit check: Buttons should not work when machine is FREE
         // This ensures buttons are ignored even if config.isLoaded is somehow true
         if (currentState == STATE_FREE) {
             LOG_WARNING("Button %d press ignored - machine is FREE (config.isLoaded=%d)", 
                        detectedId + 1, config.isLoaded);
-            ioExpander.clearButtonFlag();
             return; // Skip processing and raw polling
         }
 
         // Function buttons (0..NUM_BUTTONS-2)
+        // Button 5 = index 4, NUM_BUTTONS = 6, so NUM_BUTTONS - 1 = 5
+        // So detectedId < 5 means buttons 0-4 (buttons 1-5)
         if (detectedId < NUM_BUTTONS - 1) {
+            LOG_INFO("Processing function button %d (detectedId=%d, NUM_BUTTONS-1=%d)", 
+                    detectedId + 1, detectedId, NUM_BUTTONS - 1);
             if (config.isLoaded) {
                 if (currentState == STATE_IDLE) {
+                    LOG_INFO("Activating button %d from IDLE state", detectedId + 1);
                     activateButton(detectedId, MANUAL);
                     buttonProcessed = true;
-                } else if (currentState == STATE_RUNNING && (int)detectedId == activeButton) {
-                    pauseMachine();
-                    buttonProcessed = true;
+                } else if (currentState == STATE_RUNNING) {
+                    // CRITICAL FIX: Allow pause on button press when RUNNING
+                    // If activeButton is -1 (shouldn't happen, but handle gracefully), allow any button to pause
+                    // Otherwise, only allow the active button to pause
+                    LOG_INFO("Button %d pressed while RUNNING (activeButton=%d)", 
+                            detectedId + 1, activeButton + 1);
+                    if (activeButton == -1 || (int)detectedId == activeButton) {
+                        if (activeButton == -1) {
+                            LOG_WARNING("activeButton is -1 in RUNNING state - allowing pause anyway (button %d)", detectedId + 1);
+                            // Set activeButton to the pressed button to fix the tracking
+                            activeButton = detectedId;
+                        }
+                        LOG_INFO("Pausing machine - button matches active button");
+                        pauseMachine();
+                        buttonProcessed = true;
+                    } else {
+                        LOG_WARNING("Button %d pressed while RUNNING (activeButton=%d) - ignoring", 
+                                   detectedId + 1, activeButton + 1);
+                    }
                 } else if (currentState == STATE_PAUSED) {
                     resumeMachine(detectedId);
                     buttonProcessed = true;
-                } else if (currentState == STATE_FREE) {
-                    // This should never happen due to early return above, but keep for safety
-                    LOG_WARNING("Flag press on button %d ignored - machine is FREE", detectedId + 1);
-                    buttonProcessed = true; // Clear flag
                 } else {
                     LOG_WARNING("Flag press on button %d ignored. State=%d, activeButton=%d",
                                 detectedId + 1, currentState, activeButton);
-                    // Config is loaded but state is wrong - clear flag to prevent infinite retries
-                    buttonProcessed = true; // Mark as "processed" (even though ignored) to clear flag
+                    // Flag already cleared above - no need to process
                 }
             } else {
-                LOG_WARNING("Button flag ignored - config not loaded, will retry on next update");
-                // Don't clear flag - keep it so we can process it when config is loaded
-                return; // Skip raw polling and return early
+                LOG_WARNING("Button %d press ignored - config not loaded", detectedId + 1);
+                // Flag already cleared above - no delayed processing
             }
         } else if (detectedId == NUM_BUTTONS - 1) {
             // Stop button
@@ -188,16 +207,9 @@ void CarWashController::handleButtons() {
                 stopMachine(MANUAL);
                 buttonProcessed = true;
             } else {
-                LOG_WARNING("STOP button flag ignored - config not loaded, will retry on next update");
-                // Don't clear flag - keep it so we can process it when config is loaded
-                return; // Skip raw polling and return early
+                LOG_WARNING("STOP button press ignored - config not loaded");
+                // Flag already cleared above - no delayed processing
             }
-        }
-
-        // Only clear the flag if we successfully processed the button
-        // This prevents losing button presses when machine is in wrong state
-        if (buttonProcessed) {
-            ioExpander.clearButtonFlag();
         }
 
         // We've handled a flagged press; skip raw polling this cycle
@@ -227,31 +239,62 @@ void CarWashController::handleButtons() {
         // Handle button press with debouncing
         if (buttonPressed) {
             // If button wasn't pressed before or enough time has passed since last action
-            if (lastButtonState[i] == HIGH || 
-                (millis() - lastDebounceTime[i]) > DEBOUNCE_DELAY * 5) {
+            unsigned long timeSinceLastDebounce = millis() - lastDebounceTime[i];
+            bool wasReleased = (lastButtonState[i] == HIGH);
+            if (wasReleased || timeSinceLastDebounce > DEBOUNCE_DELAY * 5) {
                 
                 // Record time of this press
                 lastDebounceTime[i] = millis();
                 lastButtonState[i] = LOW;  // Now pressed (active LOW)
                 
+                LOG_INFO("Button %d raw polling: pressed (state transition: %s, time since last: %lu ms)", 
+                        i + 1, wasReleased ? "HIGH->LOW" : "repeat press", timeSinceLastDebounce);
+                
                 // Explicit check: Buttons should not work when machine is FREE
                 if (currentState == STATE_FREE) {
+                    LOG_DEBUG("Button %d ignored - machine is FREE", i + 1);
                     continue; // Skip this button, check others
                 }
                 
                 // Process button action
                 if (config.isLoaded) {
                     if (currentState == STATE_IDLE) {
+                        LOG_INFO("Button %d: Activating from IDLE state", i + 1);
                         activateButton(i, MANUAL);
-                    } else if (currentState == STATE_RUNNING && i == activeButton) {
-                        pauseMachine();
+                    } else if (currentState == STATE_RUNNING) {
+                        // CRITICAL FIX: Allow pause on button press when RUNNING
+                        // If activeButton is -1 (shouldn't happen, but handle gracefully), allow any button to pause
+                        // Otherwise, only allow the active button to pause
+                        LOG_INFO("Button %d pressed while RUNNING (activeButton=%d) - raw polling", 
+                                i + 1, activeButton + 1);
+                        if (activeButton == -1 || i == activeButton) {
+                            if (activeButton == -1) {
+                                LOG_WARNING("activeButton is -1 in RUNNING state - allowing pause anyway (button %d) - raw polling", i + 1);
+                                // Set activeButton to the pressed button to fix the tracking
+                                activeButton = i;
+                            }
+                            LOG_INFO("Pausing machine - button matches active button (raw polling)");
+                            pauseMachine();
+                        } else {
+                            LOG_WARNING("Button %d pressed while RUNNING (activeButton=%d) - ignoring (raw polling)", 
+                                       i + 1, activeButton + 1);
+                        }
                     } else if (currentState == STATE_PAUSED) {
+                        LOG_INFO("Button %d: Resuming from PAUSED state", i + 1);
                         resumeMachine(i);
                     }
+                } else {
+                    LOG_WARNING("Button %d ignored - config not loaded", i + 1);
                 }
+            } else {
+                LOG_DEBUG("Button %d raw polling: pressed but debounced (time since last: %lu ms, need %lu ms)", 
+                         i + 1, timeSinceLastDebounce, DEBOUNCE_DELAY * 5);
             }
         } else {
             // Button is released
+            if (lastButtonState[i] == LOW) {
+                LOG_DEBUG("Button %d raw polling: released (LOW->HIGH)", i + 1);
+            }
             lastButtonState[i] = HIGH;  // Not pressed (idle HIGH)
         }
     }
@@ -309,7 +352,22 @@ void CarWashController::pauseMachine() {
     currentState = STATE_PAUSED;
     lastActionTime = millis();
     pauseStartTime = millis();
-    tokenTimeElapsed += (pauseStartTime - tokenStartTime);
+    
+    // CRITICAL FIX: Only accumulate elapsed time if tokenStartTime is valid (not 0)
+    // Also handle millis() overflow correctly
+    if (tokenStartTime != 0) {
+        unsigned long elapsedSinceStart;
+        if (pauseStartTime >= tokenStartTime) {
+            elapsedSinceStart = pauseStartTime - tokenStartTime;
+        } else {
+            // Overflow occurred - calculate correctly
+            elapsedSinceStart = (0xFFFFFFFFUL - tokenStartTime) + pauseStartTime + 1;
+        }
+        tokenTimeElapsed += elapsedSinceStart;
+    } else {
+        // If tokenStartTime is 0, something went wrong - log warning but don't corrupt tokenTimeElapsed
+        LOG_WARNING("pauseMachine() called with tokenStartTime=0, skipping time accumulation");
+    }
    
     // Publish pause event
     publishActionEvent(activeButton, ACTION_PAUSE, MANUAL);
@@ -444,7 +502,12 @@ void CarWashController::tokenExpired() {
     }
     activeButton = -1;
     currentState = STATE_IDLE;
-    lastActionTime = millis();
+    // CRITICAL FIX: Do NOT reset lastActionTime here - inactivity timeout should continue
+    // from the last actual user action, not reset when token expires
+    // This ensures the inactivity timeout works correctly on subsequent timeouts
+    tokenStartTime = 0;
+    tokenTimeElapsed = 0;
+    pauseStartTime = 0;
     // publishTokenExpiredEvent();
 }
 
@@ -619,16 +682,78 @@ void CarWashController::processCoinInsertion(unsigned long currentTime) {
 }
 
 void CarWashController::update() {
-    // Serial.println("CarWashController::update");
-    
     unsigned long currentTime = millis();
+    
+    // Periodic timeout debugging logs (every 5 seconds)
+    static unsigned long lastTimeoutLogTime = 0;
+    unsigned long logElapsed;
+    if (lastTimeoutLogTime == 0 || currentTime >= lastTimeoutLogTime) {
+        logElapsed = currentTime - lastTimeoutLogTime;
+    } else {
+        logElapsed = (0xFFFFFFFFUL - lastTimeoutLogTime) + currentTime + 1;
+    }
+    
+    if (logElapsed >= 5000) { // Log every 5 seconds
+        // Log token timeout variables
+        if ((currentState == STATE_RUNNING || currentState == STATE_PAUSED) && tokenStartTime != 0) {
+            unsigned long totalElapsedTime;
+            unsigned long runningTime;
+            if (currentState == STATE_RUNNING) {
+                if (currentTime >= tokenStartTime) {
+                    runningTime = currentTime - tokenStartTime;
+                } else {
+                    runningTime = (0xFFFFFFFFUL - tokenStartTime) + currentTime + 1;
+                }
+                totalElapsedTime = tokenTimeElapsed + runningTime;
+            } else { // STATE_PAUSED
+                totalElapsedTime = tokenTimeElapsed;
+            }
+            
+            bool tokenExpired = (totalElapsedTime >= TOKEN_TIME);
+            LOG_INFO("[TOKEN_TIMEOUT] state=%d, tokenStartTime=%lu, tokenTimeElapsed=%lu, currentTime=%lu, runningTime=%lu, totalElapsedTime=%lu, TOKEN_TIME=%lu, expired=%d",
+                    currentState, tokenStartTime, tokenTimeElapsed, currentTime, 
+                    (currentState == STATE_RUNNING) ? runningTime : 0UL, 
+                    totalElapsedTime, TOKEN_TIME, tokenExpired ? 1 : 0);
+        } else {
+            LOG_INFO("[TOKEN_TIMEOUT] state=%d, tokenStartTime=%lu (not active)", currentState, tokenStartTime);
+        }
+        
+        // Log user inactivity timeout variables
+        if (currentState != STATE_FREE && config.isLoaded) {
+            unsigned long elapsedTime;
+            if (currentTime >= lastActionTime) {
+                elapsedTime = currentTime - lastActionTime;
+            } else {
+                elapsedTime = (0xFFFFFFFFUL - lastActionTime) + currentTime + 1;
+            }
+            
+            bool inactivityExpired = (elapsedTime >= USER_INACTIVE_TIMEOUT);
+            LOG_INFO("[INACTIVITY_TIMEOUT] state=%d, isLoaded=%d, lastActionTime=%lu, currentTime=%lu, elapsedTime=%lu, USER_INACTIVE_TIMEOUT=%lu, expired=%d",
+                    currentState, config.isLoaded ? 1 : 0, lastActionTime, currentTime, 
+                    elapsedTime, USER_INACTIVE_TIMEOUT, inactivityExpired ? 1 : 0);
+        } else {
+            LOG_INFO("[INACTIVITY_TIMEOUT] state=%d, isLoaded=%d (not active)", currentState, config.isLoaded ? 1 : 0);
+        }
+        
+        lastTimeoutLogTime = currentTime;
+    }
     
     // PRIORITY 0: Check inactivity timeout FIRST (highest priority - must happen immediately)
     // This ensures logout happens as soon as timeout is reached, before any other operations
     // CRITICAL: Check this before anything else to prevent delays from blocking operations
+    // CRITICAL: Use consistent currentTime to avoid timing discrepancies
     if (currentState != STATE_FREE && config.isLoaded) {
-        unsigned long elapsedTime = currentTime - lastActionTime;
+        // Handle potential millis() overflow (wraps every ~50 days)
+        unsigned long elapsedTime;
+        if (currentTime >= lastActionTime) {
+            elapsedTime = currentTime - lastActionTime;
+        } else {
+            // Overflow occurred - calculate correctly
+            elapsedTime = (0xFFFFFFFFUL - lastActionTime) + currentTime + 1;
+        }
+        
         if (elapsedTime >= USER_INACTIVE_TIMEOUT) {
+            LOG_INFO("Inactivity timeout reached (%lu ms >= %lu ms), logging out user", elapsedTime, USER_INACTIVE_TIMEOUT);
             stopMachine(AUTOMATIC);
             // Return immediately after logout to ensure state change is processed
             // This prevents any blocking operations (like network I/O) from delaying the logout
@@ -637,23 +762,92 @@ void CarWashController::update() {
     }
     
     // PRIORITY 1: Handle buttons and coin acceptor (time-critical, must be responsive)
-    // Skip session-related updates if not initialized
-    if (config.timestamp != "") {
-        handleButtons();
-        handleCoinAcceptor();
+    // CRITICAL: Handle buttons BEFORE any blocking operations to ensure immediate response
+    // CRITICAL FIX: Always handle buttons if machine is loaded, even if timestamp is empty
+    // This ensures buttons work immediately after machine is loaded
+    
+    // Throttle log message to avoid spam (update() runs very frequently)
+    static unsigned long lastButtonLogTime = 0;
+    bool shouldLog = false;
+     if (lastButtonLogTime == 0) {
+        shouldLog = true;
+        lastButtonLogTime = currentTime;
+    } else {
+        // Handle potential millis() overflow
+        unsigned long elapsed;
+        if (currentTime >= lastButtonLogTime) {
+            elapsed = currentTime - lastButtonLogTime;
+        } else {
+            elapsed = (0xFFFFFFFFUL - lastButtonLogTime) + currentTime + 1;
+        }
+        if (elapsed > 5000) { // Log every 5 seconds max
+            shouldLog = true;
+            lastButtonLogTime = currentTime;
+        }
     }
     
-    // PRIORITY 2: Handle state machine timeouts (time-critical)
-    if (currentState == STATE_RUNNING) {
-        unsigned long totalElapsedTime = tokenTimeElapsed + (currentTime - tokenStartTime);
+    if (shouldLog) {
+        LOG_INFO("Handling buttons and coin acceptor - isLoaded=%d, timestamp='%s'", config.isLoaded, config.timestamp.c_str());
+    }
+    
+    if (config.isLoaded) {
+        handleButtons();
+        handleCoinAcceptor();
+    } else {
+        // Log when buttons are skipped (only in debug mode to avoid spam)
+        static unsigned long lastSkipLog = 0;
+        if (currentTime - lastSkipLog > 5000) { // Log every 5 seconds max
+            LOG_INFO("Skipping button handling - machine not loaded (isLoaded=%d, timestamp empty=%d)", 
+                     config.isLoaded, config.timestamp.length() == 0);
+            lastSkipLog = currentTime;
+        }
+    }
+    
+    if ((currentState == STATE_RUNNING || currentState == STATE_PAUSED) && tokenStartTime != 0) {
+        unsigned long totalElapsedTime;
+        if (currentState == STATE_RUNNING) {
+            // Handle potential millis() overflow
+            unsigned long runningTime;
+            if (currentTime >= tokenStartTime) {
+                runningTime = currentTime - tokenStartTime;
+            } else {
+                // Overflow occurred - calculate correctly
+                runningTime = (0xFFFFFFFFUL - tokenStartTime) + currentTime + 1;
+            }
+            totalElapsedTime = tokenTimeElapsed + runningTime;
+        } else { // STATE_PAUSED
+            // When paused, elapsed time is frozen at tokenTimeElapsed
+            totalElapsedTime = tokenTimeElapsed;
+        }
+        
         if (totalElapsedTime >= TOKEN_TIME) {
+            LOG_INFO("Token time expired (%lu ms >= %lu ms), calling tokenExpired()", totalElapsedTime, TOKEN_TIME);
             tokenExpired();
-            // Don't return here - still publish state after token expires
+            // Re-check inactivity timeout after token expires (user might be logged out)
+            // CRITICAL: Re-capture currentTime after tokenExpired() as it may have taken time
+            currentTime = millis();
+            if (currentState != STATE_FREE && config.isLoaded) {
+                // Handle potential millis() overflow
+                unsigned long elapsedTime;
+                if (currentTime >= lastActionTime) {
+                    elapsedTime = currentTime - lastActionTime;
+                } else {
+                    // Overflow occurred - calculate correctly
+                    elapsedTime = (0xFFFFFFFFUL - lastActionTime) + currentTime + 1;
+                }
+                if (elapsedTime >= USER_INACTIVE_TIMEOUT) {
+                    LOG_INFO("Inactivity timeout also reached after token expiry, logging out");
+                    stopMachine(AUTOMATIC);
+                    return;
+                }
+            }
         }
     }
     
     // PRIORITY 3: Publish periodic state LAST (non-critical, can wait, may block for network I/O)
     // This allows monitoring of machine status even before initialization
+    // CRITICAL: This may block, so it's done last to not delay button/timeout handling
+    // CRITICAL: Re-check timeout before potentially blocking MQTT operation
     publishPeriodicState();
 }
 
@@ -687,140 +881,51 @@ unsigned long CarWashController::getSecondsLeft() {
         return 0;
     }
 
+    // CRITICAL FIX: Return 0 if tokenStartTime is not valid (not initialized)
+    if (tokenStartTime == 0) {
+        return 0;
+    }
+
     unsigned long currentTime = millis();
     unsigned long totalElapsedTime;
 
     if (currentState == STATE_RUNNING) {
-        totalElapsedTime = tokenTimeElapsed + (currentTime - tokenStartTime);
+        // Handle potential millis() overflow
+        unsigned long runningTime;
+        if (currentTime >= tokenStartTime) {
+            runningTime = currentTime - tokenStartTime;
+        } else {
+            // Overflow occurred - calculate correctly
+            runningTime = (0xFFFFFFFFUL - tokenStartTime) + currentTime + 1;
+        }
+        totalElapsedTime = tokenTimeElapsed + runningTime;
     } else { // PAUSED
+        // When paused, elapsed time is frozen at tokenTimeElapsed
         totalElapsedTime = tokenTimeElapsed;
     }
 
+    // Return 0 when elapsed >= timeout (matches the >= check in update())
     if (totalElapsedTime >= TOKEN_TIME) {
         return 0;
     }
 
-    return (TOKEN_TIME - totalElapsedTime) / 1000;
+    // Return remaining seconds (rounded down)
+    unsigned long remainingMs = TOKEN_TIME - totalElapsedTime;
+    return remainingMs / 1000;
 }
 
 String CarWashController::getTimestamp() {
-    // PRIORITY 1: Use RTC if available and initialized (even if time validation fails)
-    // This ensures we always have a current timestamp for state updates
+    // Use RTC if available and initialized
     if (rtcManager && rtcManager->isInitialized()) {
         String rtcTimestamp = rtcManager->getTimestampWithMillis();
-        // Only use RTC if it returns a valid timestamp (not "RTC Error")
+        // Return RTC timestamp if valid, otherwise fall through to default
         if (rtcTimestamp != "RTC Error" && rtcTimestamp.length() > 0) {
-            // Log warning if time is invalid but still use it (better than placeholder)
-            if (!rtcManager->isTimeValid()) {
-                static bool rtcWarningLogged = false;
-                if (!rtcWarningLogged) {
-                    rtcWarningLogged = true;
-                    LOG_WARNING("RTC time is invalid but using it anyway (better than placeholder)");
-                }
-            }
             return rtcTimestamp;
         }
     }
     
-    // FALLBACK: Use millis()-based calculation if RTC is not available
-    // If timestamp is empty, we can't calculate relative time, so use RTC even if invalid
-    if (config.timestamp.length() == 0) {
-        // Try RTC one more time even if not validated - better than 2000 placeholder
-        if (rtcManager && rtcManager->isInitialized()) {
-            String rtcTimestamp = rtcManager->getTimestampWithMillis();
-            if (rtcTimestamp != "RTC Error" && rtcTimestamp.length() > 0) {
-                LOG_WARNING("Using RTC timestamp without server sync (config.timestamp empty)");
-                return rtcTimestamp;
-            }
-        }
-        // Last resort: return placeholder but log error
-        LOG_ERROR("Cannot generate timestamp: RTC not available and config.timestamp is empty");
-        return "2000-01-01T00:00:00.000Z";  // Invalid timestamp placeholder
-    }
-    
-    // Manual string parsing for reliability
-    String ts = config.timestamp;
-    int tPos = ts.indexOf('T');
-    int dotPos = ts.indexOf('.');
-    int plusPos = ts.indexOf('+');
-    
-    // Verify we have the expected format
-    if (tPos <= 0 || dotPos <= 0 || plusPos <= 0) {
-        LOG_ERROR("Timestamp format invalid");
-        return "Invalid format";
-    }
-    
-    // Extract date components
-    int year = ts.substring(0, 4).toInt();
-    int month = ts.substring(5, 7).toInt();
-    int day = ts.substring(8, 10).toInt();
-    
-    // Extract time components
-    int hour = ts.substring(tPos+1, tPos+3).toInt();
-    int minute = ts.substring(tPos+4, tPos+6).toInt();
-    int second = ts.substring(tPos+7, tPos+9).toInt();
-    
-    // Extract microseconds
-    long microseconds = 0;
-    if (dotPos > 0 && plusPos > dotPos) {
-        microseconds = ts.substring(dotPos+1, plusPos).toInt();
-    }
-    
-    // Set up the time structure
-    tmElements_t tm;
-    tm.Year = year - 1970;
-    tm.Month = month;
-    tm.Day = day;
-    tm.Hour = hour;
-    tm.Minute = minute;
-    tm.Second = second;
-    
-    // Convert to epoch time
-    time_t serverEpoch = makeTime(tm);
-    
-    // Calculate time elapsed since timestamp was set
-    // Handle millis() overflow safely (overflow occurs every ~50 days on ESP32)
-    unsigned long millisOffset = 0;
-    if (config.timestampMillis > 0) {
-        unsigned long currentMillis = millis();
-        // Check for overflow: if currentMillis < config.timestampMillis, overflow occurred
-        if (currentMillis >= config.timestampMillis) {
-            // Normal case: no overflow
-            millisOffset = currentMillis - config.timestampMillis;
-        } else {
-            // Overflow occurred - calculate correctly accounting for wraparound
-            // On ESP32, unsigned long is 32-bit, so max value is 4,294,967,295
-            // Formula: (max_value - old_value) + new_value + 1
-            const unsigned long MAX_ULONG = 0xFFFFFFFFUL;  // 4,294,967,295
-            millisOffset = (MAX_ULONG - config.timestampMillis) + currentMillis + 1;
-            
-            // Safety check: if more than 2 days have passed, timestamp is probably stale
-            // This could indicate a serious problem (power loss, system restart, etc.)
-            if (millisOffset > 86400000UL * 2) {  // 2 days in milliseconds
-                LOG_ERROR("Timestamp calculation error: millis() overflow detected and timestamp appears stale (>2 days)");
-            }
-        }
-    }
-    
-    // Adjust the time with the elapsed milliseconds
-    time_t adjustedTime = serverEpoch + (millisOffset / 1000);
-    int milliseconds = (microseconds / 1000) + (millisOffset % 1000);
-    while (milliseconds >= 1000) {
-        adjustedTime += 1;
-        milliseconds -= 1000;
-    }
-    
-    // Convert back to time components
-    tmElements_t adjustedTm;
-    breakTime(adjustedTime, adjustedTm);
-    
-    // Format the result
-    char isoTimestamp[40];
-    sprintf(isoTimestamp, "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
-            adjustedTm.Year + 1970, adjustedTm.Month, adjustedTm.Day,
-            adjustedTm.Hour, adjustedTm.Minute, adjustedTm.Second, milliseconds);
-    
-    return String(isoTimestamp);
+    // Return default timestamp if RTC is not available or invalid
+    return "2000-01-01T00:00:00.000Z";
 }
 
 void CarWashController::publishCoinInsertedEvent() {
@@ -878,7 +983,36 @@ void CarWashController::publishActionEvent(int buttonIndex, MachineAction machin
 }
 
 void CarWashController::publishPeriodicState(bool force) {
-    if (force || millis() - lastStatePublishTime >= STATE_PUBLISH_INTERVAL) {
+    unsigned long currentPublishTime = millis();
+    // Handle potential millis() overflow for publish interval check
+    unsigned long publishElapsed;
+    if (currentPublishTime >= lastStatePublishTime) {
+        publishElapsed = currentPublishTime - lastStatePublishTime;
+    } else {
+        publishElapsed = (0xFFFFFFFFUL - lastStatePublishTime) + currentPublishTime + 1;
+    }
+    
+    if (force || publishElapsed >= STATE_PUBLISH_INTERVAL) {
+        // CRITICAL: Re-check timeout before potentially blocking MQTT operation
+        // This ensures timeout is not delayed by network I/O
+        unsigned long currentTime = millis();
+        if (currentState != STATE_FREE && config.isLoaded) {
+            // Handle potential millis() overflow
+            unsigned long elapsedTime;
+            if (currentTime >= lastActionTime) {
+                elapsedTime = currentTime - lastActionTime;
+            } else {
+                // Overflow occurred - calculate correctly
+                elapsedTime = (0xFFFFFFFFUL - lastActionTime) + currentTime + 1;
+            }
+            if (elapsedTime >= USER_INACTIVE_TIMEOUT) {
+                // Timeout reached - stop immediately and skip MQTT publish
+                LOG_INFO("Inactivity timeout reached in publishPeriodicState (%lu ms >= %lu ms)", elapsedTime, USER_INACTIVE_TIMEOUT);
+                stopMachine(AUTOMATIC);
+                return;
+            }
+        }
+        
         StaticJsonDocument<512> doc;
         doc["machine_id"] = MACHINE_ID;
         String timestamp = getTimestamp();
@@ -904,15 +1038,38 @@ void CarWashController::publishPeriodicState(bool force) {
         serializeJson(doc, jsonString);
         
         // Log state publish attempt for debugging
-        LOG_DEBUG("Publishing state: status=%s, timestamp=%s", 
+        LOG_INFO("Publishing state: status=%s, timestamp=%s", 
                   getMachineStateString(currentState).c_str(), timestamp.c_str());
         
-        bool published = mqttClient.publish(STATE_TOPIC.c_str(), jsonString.c_str(), QOS0_AT_MOST_ONCE);
+        // CRITICAL: Use non-blocking publish to prevent blocking button handling
+        // If mutex is held by another task or network is slow, skip publish and continue
+        // This ensures update() runs continuously for responsive button handling
+        bool published = mqttClient.publishNonBlocking(STATE_TOPIC.c_str(), jsonString.c_str(), QOS0_AT_MOST_ONCE, 100);
         if (!published) {
-            LOG_WARNING("Failed to publish state update to MQTT");
+            // Don't log warning - this is expected when mutex is busy or network is slow
+            // State will be published on next interval
         }
 
         lastStatePublishTime = millis();
+        
+        // CRITICAL: Re-check timeout after potentially blocking MQTT operation
+        // This ensures timeout is not missed even if MQTT publish blocked
+        currentTime = millis();
+        if (currentState != STATE_FREE && config.isLoaded) {
+            // Handle potential millis() overflow
+            unsigned long elapsedTime;
+            if (currentTime >= lastActionTime) {
+                elapsedTime = currentTime - lastActionTime;
+            } else {
+                // Overflow occurred - calculate correctly
+                elapsedTime = (0xFFFFFFFFUL - lastActionTime) + currentTime + 1;
+            }
+            if (elapsedTime >= USER_INACTIVE_TIMEOUT) {
+                LOG_INFO("Inactivity timeout reached after MQTT publish (%lu ms >= %lu ms)", elapsedTime, USER_INACTIVE_TIMEOUT);
+                stopMachine(AUTOMATIC);
+                return;
+            }
+        }
     }
 }
 
@@ -945,10 +1102,14 @@ unsigned long CarWashController::getTimeToInactivityTimeout() const {
     }
     
     unsigned long currentTime = millis();
-    unsigned long elapsedTime = currentTime - lastActionTime;
-    unsigned long remaining = (elapsedTime >= USER_INACTIVE_TIMEOUT) ? 0 : (USER_INACTIVE_TIMEOUT - elapsedTime);
-    
-    // No logging to reduce overhead
+    // Handle potential millis() overflow (wraps every ~50 days)
+    unsigned long elapsedTime;
+    if (currentTime >= lastActionTime) {
+        elapsedTime = currentTime - lastActionTime;
+    } else {
+        // Overflow occurred - calculate correctly
+        elapsedTime = (0xFFFFFFFFUL - lastActionTime) + currentTime + 1;
+    }
     
     // Return 0 when elapsed >= timeout (matches the >= check in update())
     // This ensures display shows 00:00 exactly when logout happens
@@ -957,6 +1118,7 @@ unsigned long CarWashController::getTimeToInactivityTimeout() const {
     }
     
     // Return remaining time in milliseconds
+    unsigned long remaining = USER_INACTIVE_TIMEOUT - elapsedTime;
     return remaining;
 }
 

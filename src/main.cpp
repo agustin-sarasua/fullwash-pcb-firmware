@@ -131,7 +131,7 @@ void TaskCoinDetector(void *pvParameters) {
  * - Uses mutex protection when accessing ioExpander
  */
 void TaskButtonDetector(void *pvParameters) {
-    const TickType_t xDelay = 20 / portTICK_PERIOD_MS; // 20ms for responsive button detection
+    const TickType_t xDelay = 10 / portTICK_PERIOD_MS; // 10ms for very responsive button detection
     uint8_t lastPortValue = 0xFF; // All buttons released initially (active LOW)
     
     // Wait for IO expander to be initialized
@@ -140,45 +140,48 @@ void TaskButtonDetector(void *pvParameters) {
     LOG_INFO("Button detector task started");
     
     for(;;) {
-        // Check if interrupt pin is LOW (button state change detected)
-        if (digitalRead(INT_PIN) == LOW) {
-            uint8_t currentPortValue = 0;
+        // CRITICAL FIX: Poll continuously, not just when INT_PIN is LOW
+        // The interrupt pin may not fire reliably, so we poll every cycle
+        // This ensures button presses are detected immediately
+        uint8_t currentPortValue = 0;
+        
+        // Protect IO expander access with mutex
+        // Reduced timeout to 20ms for faster failure and better responsiveness
+        if (xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+            currentPortValue = ioExpander.readRegister(INPUT_PORT0);
             
-            // Protect IO expander access with mutex
-            // Reduced from 100ms to 50ms for faster failure and better responsiveness
-            if (xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                currentPortValue = ioExpander.readRegister(INPUT_PORT0);
-                
-                // Check if any button state changed
-                if (currentPortValue != lastPortValue) {
-                    // Check each button for press events (transition from HIGH to LOW)
-                    for (int i = 0; i < NUM_BUTTONS; i++) {
-                        int buttonPin;
-                        if (i < NUM_BUTTONS - 1) {
-                            buttonPin = BUTTON_INDICES[i]; // Function buttons 1-5
-                        } else {
-                            buttonPin = STOP_BUTTON_PIN;   // Stop button (BUTTON6)
-                        }
-                        
-                        bool currentButtonPressed = !(currentPortValue & (1 << buttonPin));
-                        bool lastButtonPressed = !(lastPortValue & (1 << buttonPin));
-                        
-                        // Detect button press (transition from released to pressed)
-                        if (currentButtonPressed && !lastButtonPressed) {
-                            ioExpander.setButtonFlag(i, true);
-                        }
+            // Check if any button state changed
+            if (currentPortValue != lastPortValue) {
+                // Check each button for press events (transition from HIGH to LOW)
+                for (int i = 0; i < NUM_BUTTONS; i++) {
+                    int buttonPin;
+                    if (i < NUM_BUTTONS - 1) {
+                        buttonPin = BUTTON_INDICES[i]; // Function buttons 1-5
+                    } else {
+                        buttonPin = STOP_BUTTON_PIN;   // Stop button (BUTTON6)
                     }
                     
-                    lastPortValue = currentPortValue;
+                    bool currentButtonPressed = !(currentPortValue & (1 << buttonPin));
+                    bool lastButtonPressed = !(lastPortValue & (1 << buttonPin));
+                    
+                    // Detect button press (transition from released to pressed)
+                    if (currentButtonPressed && !lastButtonPressed) {
+                        LOG_INFO("Button %d transition detected: HIGH->LOW (pressed)", i + 1);
+                        ioExpander.setButtonFlag(i, true);
+                    } else if (!currentButtonPressed && lastButtonPressed) {
+                        // Button released - log for debugging
+                        LOG_DEBUG("Button %d transition detected: LOW->HIGH (released)", i + 1);
+                    }
                 }
                 
-                xSemaphoreGive(xIoExpanderMutex);
-            } else {
-                LOG_WARNING("Failed to acquire IO expander mutex in button detector task");
+                lastPortValue = currentPortValue;
             }
+            
+            xSemaphoreGive(xIoExpanderMutex);
         }
+        // Removed warning log to reduce overhead - mutex contention is normal
         
-        vTaskDelay(xDelay); // Wait 20ms before next check
+        vTaskDelay(xDelay); // Wait 10ms before next check
     }
 }
 
@@ -763,7 +766,7 @@ void setup() {
         "CoinDetector",             // Task name (for debugging)
         4096,                       // Stack size (bytes)
         NULL,                       // Task parameters
-        3,                          // Priority (3 = medium-high priority for hardware)
+        1,                          // Priority (3 = medium-high priority for hardware)
         &TaskCoinDetectorHandle     // Task handle
     );
     
@@ -772,11 +775,11 @@ void setup() {
         "ButtonDetector",           // Task name (for debugging)
         4096,                       // Stack size (bytes)
         NULL,                       // Task parameters
-        4,                          // Priority (4 = higher than coin task for responsiveness)
+        1,                          // Priority (5 = highest priority for immediate button response)
         &TaskButtonDetectorHandle   // Task handle
     );
     
-    LOG_INFO("FreeRTOS tasks created successfully (CoinDetector: priority 3, ButtonDetector: priority 4)");
+    LOG_INFO("FreeRTOS tasks created successfully (CoinDetector: priority 3, ButtonDetector: priority 5)");
   }
   // Initialize Wire1 for the LCD display and RTC (shared I2C bus)
   LOG_INFO("Initializing Wire1 (I2C) for LCD and RTC...");
@@ -903,7 +906,6 @@ void setup() {
 
 void loop() {
   // Timing variables for various operations
-  static unsigned long lastButtonCheck = 0;
   static unsigned long lastIoDebugCheck = 0;
   static unsigned long lastLedToggle = 0;
   static unsigned long lastBleUpdate = 0;
@@ -930,14 +932,13 @@ void loop() {
   // The old ioExpander.handleInterrupt() call is no longer needed
   
   // Run controller update - now processes flags set by FreeRTOS tasks
-  // Reduced from 50ms to 20ms for faster button response (matches ButtonDetector rate)
-  if (currentTime - lastButtonCheck > 20) {
-    lastButtonCheck = currentTime;
-    
-    if (controller) {
+  // CRITICAL: Call update() continuously for responsive button handling
+  // Removed timing check to ensure update() runs as frequently as possible
+  // This ensures button flags are processed immediately when set
+if (controller) {
       controller->update();
-    }
   }
+  
   
   // NOTE: Display updates are now handled by TaskDisplayUpdate FreeRTOS task
   // Removed from main loop to ensure consistent refresh rate
@@ -965,7 +966,8 @@ void loop() {
     }
   }
   
-  // Small delay to prevent loop from consuming too much CPU
-  // FreeRTOS will schedule other tasks during this delay
-  delay(10);
+  // Use FreeRTOS delay to yield to other tasks without blocking
+  // This allows FreeRTOS to schedule button/coin detector tasks and network tasks
+  // 1 tick = typically 10ms, but we use 1ms to ensure frequent updates
+  vTaskDelay(pdMS_TO_TICKS(1));
 }

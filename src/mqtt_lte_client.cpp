@@ -444,6 +444,32 @@ bool MqttLteClient::publish(const char* topic, const char* payload, const uint8_
     return ok;
 }
 
+bool MqttLteClient::publishNonBlocking(const char* topic, const char* payload, const uint8_t qos, TickType_t timeoutMs) {
+    // Try to acquire mutex with timeout - if we can't get it immediately, skip publish
+    // This prevents blocking critical operations like button handling
+    if (_mutex) {
+        TickType_t timeoutTicks = pdMS_TO_TICKS(timeoutMs);
+        if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) != pdTRUE) {
+            // Mutex not available - skip publish to avoid blocking
+            return false;
+        }
+    }
+    
+    // Don't attempt reconnect in non-blocking mode - it's too slow
+    // Just try to publish if already connected
+    bool ok = false;
+    if (_mqttClient->connected()) {
+        ok = _mqttClient->publish(topic, payload);
+        if (!ok) {
+            Serial.print("[MQTT] Non-blocking publish failed to ");
+            Serial.println(topic);
+        }
+    }
+    
+    if (_mutex) xSemaphoreGiveRecursive(_mutex);
+    return ok;
+}
+
 bool MqttLteClient::subscribe(const char* topic) {
     if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
     if (!_mqttClient->connected()) {
@@ -509,8 +535,17 @@ void MqttLteClient::loop() {
 }
 
 bool MqttLteClient::isConnected() {
-    if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
+    // Use short timeout to prevent blocking main loop
+    // If mutex is busy, return last known state to avoid blocking
+    if (_mutex) {
+        TickType_t timeoutTicks = pdMS_TO_TICKS(10); // 10ms timeout
+        if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) != pdTRUE) {
+            // Mutex not available - return cached state to avoid blocking
+            return _mqttConnected;
+        }
+    }
     bool c = _mqttClient->connected();
+    _mqttConnected = c; // Update cached state
     if (_mutex) xSemaphoreGiveRecursive(_mutex);
     return c;
 }

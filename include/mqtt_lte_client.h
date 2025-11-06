@@ -27,6 +27,7 @@ public:
     void setCallback(void (*callback)(char*, byte*, unsigned int));
     bool connect(const char* broker, uint16_t port, const char* clientId);
     bool publish(const char* topic, const char* payload, const uint8_t qos);
+    bool publishNonBlocking(const char* topic, const char* payload, const uint8_t qos, TickType_t timeoutMs = 100);
     bool subscribe(const char* topic);
     void loop();
     

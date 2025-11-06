@@ -346,12 +346,25 @@ uint8_t IoExpander::getDetectedButtonId() {
 void IoExpander::setButtonFlag(uint8_t buttonId, bool state) {
     if (buttonId < 6) {
         unsigned long currentTime = millis();
+        unsigned long timeSinceLastPress = currentTime - _lastButtonTime[buttonId];
         // Simple debouncing - only set if enough time has passed
-        if (state && (currentTime - _lastButtonTime[buttonId] > DEBOUNCE_INTERVAL)) {
-            _buttonDetected = true;
-            _detectedButtonId = buttonId;
-            _lastButtonTime[buttonId] = currentTime;
-            LOG_DEBUG("Button %d flag set (debounced)", buttonId + 1);
+        if (state && (timeSinceLastPress > DEBOUNCE_INTERVAL)) {
+            // CRITICAL FIX: Allow setting flag for the same button even if flag is already set
+            // This enables pause/resume functionality - same button can be pressed multiple times
+            // Also allow setting flag if no flag is currently set (for different buttons)
+            if (!_buttonDetected || _detectedButtonId == buttonId) {
+                _buttonDetected = true;
+                _detectedButtonId = buttonId;
+                _lastButtonTime[buttonId] = currentTime;
+                LOG_INFO("Button %d flag set (debounced, time since last: %lu ms)", 
+                        buttonId + 1, timeSinceLastPress);
+            } else {
+                LOG_DEBUG("Button %d flag already set (previous button %d), not overwriting", 
+                         buttonId + 1, _detectedButtonId + 1);
+            }
+        } else if (state) {
+            LOG_DEBUG("Button %d press ignored - too soon (debounce: %lu ms since last, need %lu ms)", 
+                     buttonId + 1, timeSinceLastPress, DEBOUNCE_INTERVAL);
         }
     }
 }
