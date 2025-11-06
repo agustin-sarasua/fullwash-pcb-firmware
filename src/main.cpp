@@ -143,6 +143,10 @@ void TaskButtonDetector(void *pvParameters) {
     
     LOG_INFO("Button detector task started");
     
+    if (ENABLE_BUTTON_DIAGNOSTICS) {
+        LOG_INFO("[BUTTON DIAG] Button detector task initialized");
+    }
+    
     for(;;) {
         // CRITICAL FIX: Poll continuously, not just when INT_PIN is LOW
         // The interrupt pin may not fire reliably, so we poll every cycle
@@ -156,6 +160,13 @@ void TaskButtonDetector(void *pvParameters) {
             
             // Check if any button state changed
             if (currentPortValue != lastPortValue) {
+                if (ENABLE_BUTTON_DIAGNOSTICS) {
+                    Serial.print("[BUTTON DIAG] Port value changed: 0x");
+                    Serial.print(lastPortValue, HEX);
+                    Serial.print(" -> 0x");
+                    Serial.println(currentPortValue, HEX);
+                }
+                
                 // Check each button for press events (transition from HIGH to LOW)
                 for (int i = 0; i < NUM_BUTTONS; i++) {
                     int buttonPin;
@@ -171,9 +182,21 @@ void TaskButtonDetector(void *pvParameters) {
                     // Detect button press (transition from released to pressed)
                     if (currentButtonPressed && !lastButtonPressed) {
                         LOG_INFO("Button %d transition detected: HIGH->LOW (pressed)", i + 1);
+                        if (ENABLE_BUTTON_DIAGNOSTICS) {
+                            Serial.print("[BUTTON DIAG] Button ");
+                            Serial.print(i + 1);
+                            Serial.print(" PRESSED - setting flag (pin=");
+                            Serial.print(buttonPin);
+                            Serial.println(")");
+                        }
                         ioExpander.setButtonFlag(i, true);
                     } else if (!currentButtonPressed && lastButtonPressed) {
                         // Button released - log for debugging
+                        if (ENABLE_BUTTON_DIAGNOSTICS) {
+                            Serial.print("[BUTTON DIAG] Button ");
+                            Serial.print(i + 1);
+                            Serial.println(" RELEASED");
+                        }
                         LOG_DEBUG("Button %d transition detected: LOW->HIGH (released)", i + 1);
                     }
                 }
@@ -182,6 +205,15 @@ void TaskButtonDetector(void *pvParameters) {
             }
             
             xSemaphoreGive(xIoExpanderMutex);
+        } else {
+            if (ENABLE_BUTTON_DIAGNOSTICS) {
+                static unsigned long lastMutexWarning = 0;
+                unsigned long now = millis();
+                if (now - lastMutexWarning > 5000) { // Throttle warnings
+                    Serial.println("[BUTTON DIAG] Failed to acquire IO expander mutex");
+                    lastMutexWarning = now;
+                }
+            }
         }
         // Removed warning log to reduce overhead - mutex contention is normal
         
@@ -211,7 +243,9 @@ void TaskNetworkManager(void *pvParameters) {
     unsigned long lastMqttReconnectAttempt = 0;
     unsigned long lastStatusCheck = 0;
     
-    LOG_INFO("Network manager task started");
+    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+        LOG_INFO("Network manager task started");
+    }
     
     // Wait a bit for system to initialize
     vTaskDelay(2000 / portTICK_PERIOD_MS);
@@ -228,27 +262,35 @@ void TaskNetworkManager(void *pvParameters) {
             vTaskDelay(pdMS_TO_TICKS(50));
             
             if (!mqttClient.isNetworkConnected()) {
-                LOG_WARNING("Lost cellular network connection");
+                if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                    LOG_WARNING("Lost cellular network connection");
+                }
                 
                 // Only attempt reconnection every 60 seconds
                 if (currentTime - lastConnectionAttempt > 60000) {
                     lastConnectionAttempt = currentTime;
                     
-                    LOG_INFO("Attempting to reconnect to cellular network...");
+                    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                        LOG_INFO("Attempting to reconnect to cellular network...");
+                    }
                     
                     // Yield before network operation to let IDLE task run
                     vTaskDelay(pdMS_TO_TICKS(100));
                     
                     // Try to recover the modem connection
                     if (mqttClient.begin(apn, gprsUser, gprsPass, pin)) {
-                        LOG_INFO("Successfully reconnected to cellular network!");
+                        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                            LOG_INFO("Successfully reconnected to cellular network!");
+                        }
                         
                         // Validate IP address
                         String ip = mqttClient.getLocalIP();
                         if (mqttClient.isValidIP(ip)) {
                             // IP is valid, continue
                         } else {
-                            LOG_ERROR("Invalid IP address: %s - skipping MQTT connection attempt", ip.c_str());
+                            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                                LOG_ERROR("Invalid IP address: %s - skipping MQTT connection attempt", ip.c_str());
+                            }
                             vTaskDelay(10000 / portTICK_PERIOD_MS); // Wait 10s before retry
                             continue; // Skip to next iteration
                         }
@@ -267,7 +309,9 @@ void TaskNetworkManager(void *pvParameters) {
                         
                         // Connect to MQTT broker with improved error handling
                         if (mqttClient.connect(AWS_BROKER, AWS_BROKER_PORT, AWS_CLIENT_ID.c_str())) {
-                            LOG_INFO("MQTT broker connection restored!");
+                            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                                LOG_INFO("MQTT broker connection restored!");
+                            }
                             
                             mqttClient.subscribe(INIT_TOPIC.c_str());
                             mqttClient.subscribe(CONFIG_TOPIC.c_str());
@@ -279,11 +323,15 @@ void TaskNetworkManager(void *pvParameters) {
                                 controller->publishMachineSetupActionEvent();
                             }
                         } else {
-                            LOG_ERROR("Failed to connect to MQTT broker after network recovery");
+                            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                                LOG_ERROR("Failed to connect to MQTT broker after network recovery");
+                            }
                             vTaskDelay(30000 / portTICK_PERIOD_MS); // Wait 30s after SSL failure
                         }
                     } else {
-                        LOG_ERROR("Failed to reconnect to cellular network");
+                        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                            LOG_ERROR("Failed to reconnect to cellular network");
+                        }
                         vTaskDelay(10000 / portTICK_PERIOD_MS); // Wait 10s before retry
                     }
                 }
@@ -293,7 +341,9 @@ void TaskNetworkManager(void *pvParameters) {
                     // Only attempt MQTT reconnection every 15 seconds
                     if (currentTime - lastMqttReconnectAttempt > 15000) {
                         lastMqttReconnectAttempt = currentTime;
-                        LOG_WARNING("Network connected but MQTT disconnected, attempting to reconnect...");
+                        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                            LOG_WARNING("Network connected but MQTT disconnected, attempting to reconnect...");
+                        }
                         
                         // Yield before reconnection attempt (SSL operations can block)
                         vTaskDelay(pdMS_TO_TICKS(50));

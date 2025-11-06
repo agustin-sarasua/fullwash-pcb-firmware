@@ -1,4 +1,5 @@
 #include "mqtt_lte_client.h"
+#include "constants.h"
 #include <freertos/semphr.h>
 
 MqttLteClient::MqttLteClient(HardwareSerial& modemSerial, int pwrKeyPin, int dtrPin, int flightPin, 
@@ -38,7 +39,9 @@ bool MqttLteClient::begin(const char* apn, const char* user, const char* pass, c
     bool modemInitialized = initModemAndConnectNetwork();
     
     if (!modemInitialized) {
-        Serial.println("Trying alternative baud rate (9600)...");
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.println("Trying alternative baud rate (9600)...");
+        }
         Serial.flush();
         _modemSerial.updateBaudRate(9600);
         delay(1000);
@@ -54,7 +57,9 @@ bool MqttLteClient::begin(const char* apn, const char* user, const char* pass, c
 }
 
 void MqttLteClient::powerOnModem() {
-    Serial.println("Powering on SIM7600G module...");
+    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+        Serial.println("Powering on SIM7600G module...");
+    }
     
     // Configure control pins
     pinMode(_pwrKeyPin, OUTPUT);
@@ -68,7 +73,9 @@ void MqttLteClient::powerOnModem() {
     digitalWrite(_flightPin, HIGH); // Disable flight mode
     delay(100); // Let pins stabilize
     
-    Serial.println("[MODEM] Control pins set: DTR=LOW (active), FLIGHT=HIGH (disabled)"); 
+    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+        Serial.println("[MODEM] Control pins set: DTR=LOW (active), FLIGHT=HIGH (disabled)");
+    }
     
     // SIM7600G power on sequence (based on datasheet)
     digitalWrite(_pwrKeyPin, LOW);  // Ensure PWRKEY starts LOW
@@ -79,7 +86,9 @@ void MqttLteClient::powerOnModem() {
     
     digitalWrite(_pwrKeyPin, LOW);  // Release PWRKEY
     
-    Serial.println("Waiting for modem to initialize...");
+    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+        Serial.println("Waiting for modem to initialize...");
+    }
     delay(10000);  // Wait longer for the modem to boot
     
     clearModemBuffer();
@@ -88,7 +97,9 @@ void MqttLteClient::powerOnModem() {
     bool atSuccess = testModemAT();
     
     if (!atSuccess) {
-        Serial.println("Trying alternative power on sequence...");
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.println("Trying alternative power on sequence...");
+        }
         
         // Alternative power on sequence sometimes needed for SIM7600
         digitalWrite(_pwrKeyPin, HIGH);
@@ -102,11 +113,14 @@ void MqttLteClient::powerOnModem() {
         atSuccess = testModemAT();
         
         if (!atSuccess) {
+            // Always show critical errors
             Serial.println("Still unable to communicate with modem!");
-            Serial.println("Possible issues:");
-            Serial.println("1. Check power supply to modem");
-            Serial.println("2. Check UART connections (TX/RX)");
-            Serial.println("3. Modem might not be powered properly");
+            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                Serial.println("Possible issues:");
+                Serial.println("1. Check power supply to modem");
+                Serial.println("2. Check UART connections (TX/RX)");
+                Serial.println("3. Modem might not be powered properly");
+            }
         }
     }
 }
@@ -119,7 +133,9 @@ void MqttLteClient::clearModemBuffer() {
 }
 
 bool MqttLteClient::testModemAT() {
-    Serial.println("Testing direct AT communication with modem...");
+    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+        Serial.println("Testing direct AT communication with modem...");
+    }
     
     clearModemBuffer();
     
@@ -129,7 +145,9 @@ bool MqttLteClient::testModemAT() {
     }
     
     // Send AT command
-    Serial.println("Sending: AT");
+    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+        Serial.println("Sending: AT");
+    }
     _modemSerial.println("AT");
     
     // Wait for response
@@ -143,19 +161,27 @@ bool MqttLteClient::testModemAT() {
         }
     }
     
-    Serial.println("Response: " + response);
+    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+        Serial.println("Response: " + response);
+    }
     
     if (response.indexOf("OK") != -1) {
-        Serial.println("Modem responded to AT command successfully!");
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.println("Modem responded to AT command successfully!");
+        }
         return true;
     } else {
-        Serial.println("Modem failed to respond to AT command properly.");
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.println("Modem failed to respond to AT command properly.");
+        }
         return false;
     }
 }
 
 bool MqttLteClient::initModemAndConnectNetwork() {
-    Serial.println("Initializing modem...");
+    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+        Serial.println("Initializing modem...");
+    }
     
     // CRITICAL FIX: Clear any pending data before init
     clearModemBuffer();
@@ -163,18 +189,23 @@ bool MqttLteClient::initModemAndConnectNetwork() {
     
     // Try to initialize the modem
     if (!_modem->init()) {
+        // Always show critical errors
         Serial.println("Failed to initialize modem!");
-        Serial.println("[MODEM] TinyGSM init failed - modem may be in bad state");
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.println("[MODEM] TinyGSM init failed - modem may be in bad state");
+        }
         
         // Check if we can talk to the modem directly
         bool basicComm = testModemAT();
         
         if (basicComm) {
-            Serial.println("Modem responds to AT commands but TinyGSM init failed.");
-            Serial.println("This could be a TinyGSM library compatibility issue with SIM7600G.");
-            
-            // Try an alternative approach - direct AT commands
-            Serial.println("Trying simplified initialization with direct AT commands...");
+            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                Serial.println("Modem responds to AT commands but TinyGSM init failed.");
+                Serial.println("This could be a TinyGSM library compatibility issue with SIM7600G.");
+                
+                // Try an alternative approach - direct AT commands
+                Serial.println("Trying simplified initialization with direct AT commands...");
+            }
             
             // Send some basic config AT commands
             _modemSerial.println("AT+CFUN=1");  // Set full functionality
@@ -184,9 +215,11 @@ bool MqttLteClient::initModemAndConnectNetwork() {
             delay(1000);
             
             // Try to connect to GPRS directly
-            Serial.print("Connecting to ");
-            Serial.print(_apn);
-            Serial.println(" using direct AT commands...");
+            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                Serial.print("Connecting to ");
+                Serial.print(_apn);
+                Serial.println(" using direct AT commands...");
+            }
             
             // Set the APN
             _modemSerial.print("AT+CGDCONT=1,\"IP\",\"");
@@ -196,58 +229,85 @@ bool MqttLteClient::initModemAndConnectNetwork() {
             
             return false;  // Still return false to indicate TinyGSM init failed
         } else {
+            // Always show critical errors
             Serial.println("Basic AT command communication failed.");
-            Serial.println("Possible hardware issue - check wiring and power.");
+            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                Serial.println("Possible hardware issue - check wiring and power.");
+            }
             return false;
         }
     }
     
     // Get modem info
     String modemInfo = _modem->getModemInfo();
-    Serial.print("Modem Info: ");
-    Serial.println(modemInfo);
+    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+        Serial.print("Modem Info: ");
+        Serial.println(modemInfo);
+    }
     
     // Set network mode to automatic (2G/3G/4G)
     String networkMode;
     networkMode = _modem->setNetworkMode(2);
-    Serial.print("Network mode set: ");
-    Serial.println(networkMode);
+    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+        Serial.print("Network mode set: ");
+        Serial.println(networkMode);
+    }
     
     if (_pin && _modem->getSimStatus() != 3) {
         _modem->simUnlock(_pin);
     }
     
     // Wait for network connection
-    Serial.print("Waiting for network...");
+    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+        Serial.print("Waiting for network...");
+    }
     if (!_modem->waitForNetwork(60000L)) {
-        Serial.println(" fail");
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.println(" fail");
+        }
         return false;
     }
-    Serial.println(" success");
+    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+        Serial.println(" success");
+    }
     
     if (_modem->isNetworkConnected()) {
-        Serial.println("Network connected");
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.println("Network connected");
+        }
     } else {
-        Serial.println("Network connection failed");
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.println("Network connection failed");
+        }
         return false;
     }
     
     // Connect to GPRS
-    Serial.print("Connecting to ");
-    Serial.print(_apn);
+    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+        Serial.print("Connecting to ");
+        Serial.print(_apn);
+    }
     if (!_modem->gprsConnect(_apn, _user, _pass)) {
-        Serial.println(" fail");
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.println(" fail");
+        }
         return false;
     }
-    Serial.println(" success");
+    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+        Serial.println(" success");
+    }
     
     if (_modem->isGprsConnected()) {
-        Serial.println("GPRS connected");
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.println("GPRS connected");
+        }
         
         // CRITICAL FIX: Configure modem to prevent GPRS connection timeout
         // Some modems timeout GPRS connections after 30-60 seconds of inactivity
         // Configure keep-alive and disable auto-disconnect
-        Serial.println("[MODEM] Configuring GPRS keep-alive settings...");
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.println("[MODEM] Configuring GPRS keep-alive settings...");
+        }
         clearModemBuffer();
         
         // Set TCP keep-alive (if supported) - sends keep-alive packets every 60 seconds
@@ -263,31 +323,40 @@ bool MqttLteClient::initModemAndConnectNetwork() {
         
         // Get and validate IP address
         String ip = _modem->localIP().toString();
-        Serial.print("IP address: ");
-        Serial.println(ip);
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.print("IP address: ");
+            Serial.println(ip);
+        }
         
         // Validate IP address before declaring success
         if (!isValidIP(ip)) {
+            // Always show critical errors
             Serial.print("Invalid IP address received: ");
             Serial.println(ip);
-            Serial.println("GPRS connection appears unstable, will retry");
+            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                Serial.println("GPRS connection appears unstable, will retry");
+            }
             return false;
         }
         
         // Get and log signal quality
         int signalQuality = _modem->getSignalQuality();
-        Serial.print("Signal quality: ");
-        Serial.print(signalQuality);
-        Serial.println("/31");
-        
-        if (signalQuality < 10) {
-            Serial.println("WARNING: Poor signal quality detected, connection may be unstable");
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.print("Signal quality: ");
+            Serial.print(signalQuality);
+            Serial.println("/31");
+            
+            if (signalQuality < 10) {
+                Serial.println("WARNING: Poor signal quality detected, connection may be unstable");
+            }
         }
         
         _networkConnected = true;
         return true;
     } else {
-        Serial.println("GPRS connection failed");
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.println("GPRS connection failed");
+        }
         return false;
     }
 }
@@ -297,7 +366,9 @@ void MqttLteClient::setCACert(const char* caCert) {
     if (_mutex) {
         TickType_t timeoutTicks = pdMS_TO_TICKS(1000); // 1 second timeout
         if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) != pdTRUE) {
-            Serial.println("[MQTT] Failed to acquire mutex for setCACert");
+            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                Serial.println("[MQTT] Failed to acquire mutex for setCACert");
+            }
             return;
         }
     }
@@ -310,7 +381,9 @@ void MqttLteClient::setCertificate(const char* clientCert) {
     if (_mutex) {
         TickType_t timeoutTicks = pdMS_TO_TICKS(1000); // 1 second timeout
         if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) != pdTRUE) {
-            Serial.println("[MQTT] Failed to acquire mutex for setCertificate");
+            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                Serial.println("[MQTT] Failed to acquire mutex for setCertificate");
+            }
             return;
         }
     }
@@ -323,7 +396,9 @@ void MqttLteClient::setPrivateKey(const char* privateKey) {
     if (_mutex) {
         TickType_t timeoutTicks = pdMS_TO_TICKS(1000); // 1 second timeout
         if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) != pdTRUE) {
-            Serial.println("[MQTT] Failed to acquire mutex for setPrivateKey");
+            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                Serial.println("[MQTT] Failed to acquire mutex for setPrivateKey");
+            }
             return;
         }
     }
@@ -336,7 +411,9 @@ void MqttLteClient::setCallback(void (*callback)(char*, byte*, unsigned int)) {
     if (_mutex) {
         TickType_t timeoutTicks = pdMS_TO_TICKS(1000); // 1 second timeout
         if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) != pdTRUE) {
-            Serial.println("[MQTT] Failed to acquire mutex for setCallback");
+            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                Serial.println("[MQTT] Failed to acquire mutex for setCallback");
+            }
             return;
         }
     }
@@ -351,7 +428,9 @@ bool MqttLteClient::connect(const char* broker, uint16_t port, const char* clien
     if (_mutex) {
         TickType_t timeoutTicks = pdMS_TO_TICKS(10000); // 10 second timeout for connection
         if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) != pdTRUE) {
-            Serial.println("[MQTT] Failed to acquire mutex for connect");
+            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                Serial.println("[MQTT] Failed to acquire mutex for connect");
+            }
             return false;
         }
     }
@@ -368,7 +447,7 @@ bool MqttLteClient::connect(const char* broker, uint16_t port, const char* clien
 
     // Check signal quality before attempting SSL connection
     int signalQuality = getSignalQuality();
-    if (signalQuality > 0 && signalQuality < 10) {
+    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS && signalQuality > 0 && signalQuality < 10) {
         Serial.print("WARNING: Poor signal quality (");
         Serial.print(signalQuality);
         Serial.println("/31) - SSL connection may fail");
@@ -376,23 +455,29 @@ bool MqttLteClient::connect(const char* broker, uint16_t port, const char* clien
 
     // Make a single connection attempt to prevent long blocking
     // Retries are handled by the calling code (NetworkManager task)
-    Serial.print("Attempting MQTT connection...");
+    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+        Serial.print("Attempting MQTT connection...");
+    }
     
     // Attempt to connect (this can block for up to 4 seconds during SSL handshake)
     if (_mqttClient->connect(_clientId)) {
-        Serial.println("connected");
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.println("connected");
+        }
         _mqttConnected = true;
         _consecutiveFailures = 0; // Reset failure counter on success
         if (_mutex) xSemaphoreGiveRecursive(_mutex);
         return true;
     } else {
-        Serial.print("failed, rc=");
-        Serial.println(_mqttClient->state());
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.print("failed, rc=");
+            Serial.println(_mqttClient->state());
+        }
         _consecutiveFailures++;
     }
     
     // If we've had multiple consecutive failures, log warning
-    if (_consecutiveFailures > 3) {
+    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS && _consecutiveFailures > 3) {
         Serial.print("WARNING: ");
         Serial.print(_consecutiveFailures);
         Serial.println(" consecutive SSL/MQTT connection failures");
@@ -408,12 +493,16 @@ void MqttLteClient::cleanupSSLClient() {
     if (_mutex) {
         TickType_t timeoutTicks = pdMS_TO_TICKS(2000); // 2 second timeout
         if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) != pdTRUE) {
-            Serial.println("[DEBUG] Failed to acquire mutex for SSL cleanup");
+            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                Serial.println("[DEBUG] Failed to acquire mutex for SSL cleanup");
+            }
             return;
         }
     }
     
-    Serial.println("[DEBUG] Cleaning up SSL client to clear corrupted state");
+    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+        Serial.println("[DEBUG] Cleaning up SSL client to clear corrupted state");
+    }
     
     // Disconnect MQTT client first
     if (_mqttClient && _mqttClient->connected()) {
@@ -425,7 +514,9 @@ void MqttLteClient::cleanupSSLClient() {
         _sslClient->stop();
     }
     
-    Serial.println("[DEBUG] SSL client cleanup complete");
+    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+        Serial.println("[DEBUG] SSL client cleanup complete");
+    }
     if (_mutex) xSemaphoreGiveRecursive(_mutex);
 }
 
@@ -451,9 +542,11 @@ void MqttLteClient::reconnect() {
     // After multiple consecutive failures, cleanup SSL state
     // This helps recover from corrupted SSL sessions
     if (_consecutiveFailures >= 3 && _consecutiveFailures % 3 == 0) {
-        Serial.print("[INFO] ");
-        Serial.print(_consecutiveFailures);
-        Serial.println(" consecutive failures - performing SSL cleanup");
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.print("[INFO] ");
+            Serial.print(_consecutiveFailures);
+            Serial.println(" consecutive failures - performing SSL cleanup");
+        }
         // We already hold the mutex, call internal cleanup directly
         if (_mqttClient && _mqttClient->connected()) {
             _mqttClient->disconnect();
@@ -466,24 +559,32 @@ void MqttLteClient::reconnect() {
 
     // Make ONE attempt per call instead of blocking in a loop
     // This prevents watchdog timeouts by allowing the FreeRTOS task to yield
-    Serial.print("Attempting MQTT connection...");
+    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+        Serial.print("Attempting MQTT connection...");
+    }
     
     // Attempt to connect (this is a non-blocking call with timeout)
     if (_mqttClient->connect(_clientId)) {
-        Serial.println("connected");
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.println("connected");
+        }
         _mqttConnected = true;
         _consecutiveFailures = 0; // Reset on success
         
         // Re-subscribe to all previously subscribed topics
         for (const String& topic : _subscribedTopics) {
-            Serial.print("Re-subscribing to topic: ");
-            Serial.println(topic);
+            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                Serial.print("Re-subscribing to topic: ");
+                Serial.println(topic);
+            }
             _mqttClient->subscribe(topic.c_str());
         }
         _reconnectInterval = 5000; // Reset interval on success
     } else {
-        Serial.print("failed, rc=");
-        Serial.println(_mqttClient->state());
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.print("failed, rc=");
+            Serial.println(_mqttClient->state());
+        }
         _consecutiveFailures++;
         
         // Exponential backoff - double the interval up to 2 minutes
@@ -498,8 +599,10 @@ bool MqttLteClient::publish(const char* topic, const char* payload, const uint8_
     if (_mutex) {
         TickType_t timeoutTicks = pdMS_TO_TICKS(2000); // 2 second timeout
         if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) != pdTRUE) {
-            Serial.print("[MQTT] Failed to acquire mutex for publish to ");
-            Serial.println(topic);
+            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                Serial.print("[MQTT] Failed to acquire mutex for publish to ");
+                Serial.println(topic);
+            }
             return false;
         }
     }
@@ -508,31 +611,39 @@ bool MqttLteClient::publish(const char* topic, const char* payload, const uint8_
     // Reconnection should be handled by NetworkManager task
     bool ok = false;
     if (_mqttClient->connected()) {
-        Serial.print("[MQTT TX] Topic: ");
-        Serial.print(topic);
-        Serial.print(" | Payload size: ");
-        Serial.print(strlen(payload));
-        Serial.print(" bytes | QoS: ");
-        Serial.println(qos);
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.print("[MQTT TX] Topic: ");
+            Serial.print(topic);
+            Serial.print(" | Payload size: ");
+            Serial.print(strlen(payload));
+            Serial.print(" bytes | QoS: ");
+            Serial.println(qos);
+        }
         
         ok = _mqttClient->publish(topic, payload);
         if (!ok) {
-            Serial.print("[MQTT ERROR] Failed to publish to ");
-            Serial.print(topic);
-            Serial.print(" (QoS: ");
-            Serial.print(qos);
-            Serial.print(", state: ");
-            Serial.print(_mqttClient->state());
-            Serial.println(")");
+            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                Serial.print("[MQTT ERROR] Failed to publish to ");
+                Serial.print(topic);
+                Serial.print(" (QoS: ");
+                Serial.print(qos);
+                Serial.print(", state: ");
+                Serial.print(_mqttClient->state());
+                Serial.println(")");
+            }
         } else {
-            Serial.println("[MQTT TX] ✓ Message sent successfully");
+            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                Serial.println("[MQTT TX] ✓ Message sent successfully");
+            }
         }
     } else {
-        Serial.print("[MQTT ERROR] Cannot publish to ");
-        Serial.print(topic);
-        Serial.print(" - MQTT not connected (state: ");
-        Serial.print(_mqttClient->state());
-        Serial.println(")");
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.print("[MQTT ERROR] Cannot publish to ");
+            Serial.print(topic);
+            Serial.print(" - MQTT not connected (state: ");
+            Serial.print(_mqttClient->state());
+            Serial.println(")");
+        }
     }
     if (_mutex) xSemaphoreGiveRecursive(_mutex);
     return ok;
@@ -547,13 +658,15 @@ bool MqttLteClient::publishNonBlocking(const char* topic, const char* payload, c
         if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) != pdTRUE) {
             // Mutex not available - skip publish to avoid blocking
             unsigned long waitTime = millis() - startWait;
-            Serial.print("[MQTT TX] Non-blocking publish skipped (mutex busy for ");
-            Serial.print(waitTime);
-            Serial.println("ms)");
+            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                Serial.print("[MQTT TX] Non-blocking publish skipped (mutex busy for ");
+                Serial.print(waitTime);
+                Serial.println("ms)");
+            }
             return false;
         }
         unsigned long actualWaitTime = millis() - startWait;
-        if (actualWaitTime > 100) {
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS && actualWaitTime > 100) {
             Serial.print("[MQTT TX] Mutex acquired after ");
             Serial.print(actualWaitTime);
             Serial.println("ms wait");
@@ -564,22 +677,30 @@ bool MqttLteClient::publishNonBlocking(const char* topic, const char* payload, c
     // Just try to publish if already connected
     bool ok = false;
     if (_mqttClient->connected()) {
-        Serial.print("[MQTT TX] (non-blocking) Topic: ");
-        Serial.print(topic);
-        Serial.print(" | Payload size: ");
-        Serial.print(strlen(payload));
-        Serial.print(" bytes | QoS: ");
-        Serial.println(qos);
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.print("[MQTT TX] (non-blocking) Topic: ");
+            Serial.print(topic);
+            Serial.print(" | Payload size: ");
+            Serial.print(strlen(payload));
+            Serial.print(" bytes | QoS: ");
+            Serial.println(qos);
+        }
         
         ok = _mqttClient->publish(topic, payload);
         if (!ok) {
-            Serial.print("[MQTT] Non-blocking publish failed to ");
-            Serial.println(topic);
+            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                Serial.print("[MQTT] Non-blocking publish failed to ");
+                Serial.println(topic);
+            }
         } else {
-            Serial.println("[MQTT TX] ✓ Non-blocking message sent successfully");
+            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                Serial.println("[MQTT TX] ✓ Non-blocking message sent successfully");
+            }
         }
     } else {
-        Serial.println("[MQTT TX] Non-blocking publish skipped (not connected)");
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.println("[MQTT TX] Non-blocking publish skipped (not connected)");
+        }
     }
     
     if (_mutex) xSemaphoreGiveRecursive(_mutex);
@@ -591,8 +712,10 @@ bool MqttLteClient::subscribe(const char* topic) {
     if (_mutex) {
         TickType_t timeoutTicks = pdMS_TO_TICKS(2000); // 2 second timeout
         if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) != pdTRUE) {
-            Serial.print("[MQTT] Failed to acquire mutex for subscribe to ");
-            Serial.println(topic);
+            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                Serial.print("[MQTT] Failed to acquire mutex for subscribe to ");
+                Serial.println(topic);
+            }
             return false;
         }
     }
@@ -601,16 +724,20 @@ bool MqttLteClient::subscribe(const char* topic) {
     // Reconnection should be handled by NetworkManager task
     bool result = false;
     if (_mqttClient->connected()) {
-        Serial.print("Subscribing to topic: ");
-        Serial.println(topic);
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.print("Subscribing to topic: ");
+            Serial.println(topic);
+        }
         result = _mqttClient->subscribe(topic);
         if (result) {
             _subscribedTopics.push_back(String(topic));
         }
     } else {
-        Serial.print("[MQTT] Cannot subscribe to ");
-        Serial.print(topic);
-        Serial.println(" - MQTT not connected");
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.print("[MQTT] Cannot subscribe to ");
+            Serial.print(topic);
+            Serial.println(" - MQTT not connected");
+        }
     }
     if (_mutex) xSemaphoreGiveRecursive(_mutex);
     return result;
@@ -646,10 +773,12 @@ void MqttLteClient::loop() {
         }
         
         // Detect connection state changes
-        if (wasConnected && !currentlyConnected) {
-            Serial.println("[MQTT] Connection LOST - was connected, now disconnected");
-        } else if (!wasConnected && currentlyConnected) {
-            Serial.println("[MQTT] Connection ESTABLISHED - was disconnected, now connected");
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            if (wasConnected && !currentlyConnected) {
+                Serial.println("[MQTT] Connection LOST - was connected, now disconnected");
+            } else if (!wasConnected && currentlyConnected) {
+                Serial.println("[MQTT] Connection ESTABLISHED - was disconnected, now connected");
+            }
         }
         wasConnected = currentlyConnected;
         
@@ -657,9 +786,11 @@ void MqttLteClient::loop() {
             // Get MQTT client state for diagnostics (only if we can get mutex)
             if (_mutex && xSemaphoreTakeRecursive(_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
                 int state = _mqttClient->state();
-                Serial.print("MQTT disconnected (state: ");
-                Serial.print(state);
-                Serial.println("), will reconnect on next call...");
+                if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                    Serial.print("MQTT disconnected (state: ");
+                    Serial.print(state);
+                    Serial.println("), will reconnect on next call...");
+                }
                 
                 // Track disconnections to trigger cleanup if needed
                 if (state < 0) {
@@ -701,7 +832,9 @@ void MqttLteClient::loop() {
                 
                 if (!isValidIP(ip)) {
                     // IP is invalid, connection may have dropped
-                    Serial.println("[NETWORK] Keep-alive check: IP address invalid, connection may be lost");
+                    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                        Serial.println("[NETWORK] Keep-alive check: IP address invalid, connection may be lost");
+                    }
                     _networkConnected = false;
                 }
                 // If IP is valid, the connection is still alive (no need to log every time)
@@ -714,7 +847,9 @@ void MqttLteClient::loop() {
             // No mutex - check directly (shouldn't happen in normal operation)
             String ip = _modem->localIP().toString();
             if (!isValidIP(ip)) {
-                Serial.println("[NETWORK] Keep-alive check: IP address invalid, connection may be lost");
+                if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                    Serial.println("[NETWORK] Keep-alive check: IP address invalid, connection may be lost");
+                }
                 _networkConnected = false;
             }
         }
@@ -724,7 +859,7 @@ void MqttLteClient::loop() {
     // Signal quality can be checked manually via debug_network command
     
     // Periodic health logging (every 60 seconds) - no mutex needed
-    if (currentlyConnected && millis() - lastHealthLog > 60000) {
+    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS && currentlyConnected && millis() - lastHealthLog > 60000) {
         lastHealthLog = millis();
         Serial.println("[MQTT HEALTH] Connection stable (keep-alive: 60s)");
     }
@@ -749,26 +884,30 @@ void MqttLteClient::loop() {
                 xSemaphoreGiveRecursive(_mutex);
                 
                 // Log warnings if loop() took too long
-                if (loopCallDuration > 5000) {
-                    // loop() took >5 seconds - this is abnormal and indicates network/SSL issues
-                    Serial.print("[MQTT LOOP] CRITICAL: loop() took ");
-                    Serial.print(loopCallDuration);
-                    Serial.println("ms - network connection may be lost or SSL operations failed");
-                    Serial.println("[MQTT LOOP] This may cause GPRS connection timeout - consider reconnecting");
-                    // Mark network as potentially disconnected if loop() took too long
-                    // The next keep-alive check will verify the connection
-                } else if (loopCallDuration > 1000) {
-                    Serial.print("[MQTT LOOP] WARNING: loop() took ");
-                    Serial.print(loopCallDuration);
-                    Serial.println("ms - network may be slow or SSL operations blocking");
-                } else if (totalDuration > 200) {
-                    Serial.print("[MQTT LOOP] Held mutex for ");
-                    Serial.print(totalDuration);
-                    Serial.println("ms");
+                if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                    if (loopCallDuration > 5000) {
+                        // loop() took >5 seconds - this is abnormal and indicates network/SSL issues
+                        Serial.print("[MQTT LOOP] CRITICAL: loop() took ");
+                        Serial.print(loopCallDuration);
+                        Serial.println("ms - network connection may be lost or SSL operations failed");
+                        Serial.println("[MQTT LOOP] This may cause GPRS connection timeout - consider reconnecting");
+                        // Mark network as potentially disconnected if loop() took too long
+                        // The next keep-alive check will verify the connection
+                    } else if (loopCallDuration > 1000) {
+                        Serial.print("[MQTT LOOP] WARNING: loop() took ");
+                        Serial.print(loopCallDuration);
+                        Serial.println("ms - network may be slow or SSL operations blocking");
+                    } else if (totalDuration > 200) {
+                        Serial.print("[MQTT LOOP] Held mutex for ");
+                        Serial.print(totalDuration);
+                        Serial.println("ms");
+                    }
                 }
             } else {
                 // Mutex not available - skip this iteration (publisher has priority)
-                Serial.println("[MQTT LOOP] Skipped - mutex busy (publisher active)");
+                if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                    Serial.println("[MQTT LOOP] Skipped - mutex busy (publisher active)");
+                }
             }
         } else {
             _mqttClient->loop();  // No mutex, call directly (shouldn't happen)
@@ -832,13 +971,15 @@ bool MqttLteClient::isNetworkConnected() {
         if (lastNetworkState != currentState) {
             unsigned long timeSinceLastChange = now - lastStateChange;
             
-            if (currentState) {
-                Serial.println("[NETWORK] ✓ GPRS connection ESTABLISHED");
-            } else {
-                Serial.print("[NETWORK] ✗ GPRS connection LOST after ");
-                Serial.print(timeSinceLastChange / 1000);
-                Serial.println(" seconds");
-                Serial.println("[NETWORK] POSSIBLE CAUSES: Power supply issue, modem crash, or UART interference");
+            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                if (currentState) {
+                    Serial.println("[NETWORK] ✓ GPRS connection ESTABLISHED");
+                } else {
+                    Serial.print("[NETWORK] ✗ GPRS connection LOST after ");
+                    Serial.print(timeSinceLastChange / 1000);
+                    Serial.println(" seconds");
+                    Serial.println("[NETWORK] POSSIBLE CAUSES: Power supply issue, modem crash, or UART interference");
+                }
             }
             
             lastNetworkState = currentState;
@@ -855,7 +996,9 @@ void MqttLteClient::setBufferSize(size_t size) {
     if (_mutex) {
         TickType_t timeoutTicks = pdMS_TO_TICKS(1000); // 1 second timeout
         if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) != pdTRUE) {
-            Serial.println("[MQTT] Failed to acquire mutex for setBufferSize");
+            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+                Serial.println("[MQTT] Failed to acquire mutex for setBufferSize");
+            }
             return;
         }
     }
@@ -876,8 +1019,10 @@ int MqttLteClient::getSignalQuality() {
     if (_modem) {
         int quality = _modem->getSignalQuality();
         // TinyGSM returns 99 as error code, treat as 0 (no signal)
-        if (quality == 99) {
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS && quality == 99) {
             Serial.println("[NETWORK WARNING] Signal quality read error (99) - modem may be unresponsive");
+        }
+        if (quality == 99) {
             return 0;
         }
         return quality;

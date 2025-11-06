@@ -62,8 +62,10 @@ private:
     int activeButton;
     unsigned long tokenTimeElapsed;
     unsigned long pauseStartTime;
+    unsigned long lastPauseResumeTime; // Track last pause/resume to prevent rapid toggling
 
     static const unsigned long DEBOUNCE_DELAY = 100;
+    static const unsigned long PAUSE_RESUME_COOLDOWN = 500; // Minimum time between pause/resume (500ms)
     static const unsigned long COIN_DEBOUNCE_DELAY = 50;
     static const unsigned long COIN_PROCESS_COOLDOWN = 2000; // 1000ms (1 second) between accepted coins
     static const unsigned long COIN_EDGE_WINDOW = 500;      // Maximum window for detecting multiple edges as one coin

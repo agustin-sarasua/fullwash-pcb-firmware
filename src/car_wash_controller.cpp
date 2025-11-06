@@ -19,7 +19,8 @@ CarWashController::CarWashController(MqttLteClient& client)
       pauseStartTime(0),
       lastCoinDebounceTime(0),
       lastCoinProcessedTime(0),
-      lastCoinState(HIGH) {
+      lastCoinState(HIGH),
+      lastPauseResumeTime(0) {
           
     // Force a read of the coin signal pin at startup to initialize correctly
     extern IoExpander ioExpander;
@@ -147,6 +148,24 @@ void CarWashController::handleButtons() {
                 detectedId + 1, currentState, activeButton, config.isLoaded, 
                 config.timestamp.length() > 0 ? config.timestamp.c_str() : "(empty)");
 
+        if (ENABLE_BUTTON_DIAGNOSTICS) {
+            Serial.print("[BUTTON DIAG] handleButtons() - Flag detected: button=");
+            Serial.print(detectedId + 1);
+            Serial.print(", state=");
+            Serial.print(currentState);
+            Serial.print(" (");
+            Serial.print(currentState == STATE_FREE ? "FREE" : 
+                        currentState == STATE_IDLE ? "IDLE" :
+                        currentState == STATE_RUNNING ? "RUNNING" :
+                        currentState == STATE_PAUSED ? "PAUSED" : "UNKNOWN");
+            Serial.print("), activeButton=");
+            Serial.print(activeButton);
+            Serial.print(", tokens=");
+            Serial.print(config.tokens);
+            Serial.print(", isLoaded=");
+            Serial.println(config.isLoaded ? "YES" : "NO");
+        }
+
         // CRITICAL FIX: Always clear the flag immediately to prevent delayed processing
         // The old logic kept flags when state was wrong, causing 20-second delays
         ioExpander.clearButtonFlag();
@@ -168,7 +187,25 @@ void CarWashController::handleButtons() {
             if (config.isLoaded) {
                 if (currentState == STATE_IDLE) {
                     LOG_INFO("Activating button %d from IDLE state", detectedId + 1);
+                    if (ENABLE_BUTTON_DIAGNOSTICS) {
+                        Serial.print("[BUTTON DIAG] Calling activateButton(");
+                        Serial.print(detectedId);
+                        Serial.print(") - BEFORE: state=");
+                        Serial.print(currentState);
+                        Serial.print(", tokens=");
+                        Serial.print(config.tokens);
+                        Serial.print(", activeButton=");
+                        Serial.println(activeButton);
+                    }
                     activateButton(detectedId, MANUAL);
+                    if (ENABLE_BUTTON_DIAGNOSTICS) {
+                        Serial.print("[BUTTON DIAG] activateButton() RETURNED - AFTER: state=");
+                        Serial.print(currentState);
+                        Serial.print(", tokens=");
+                        Serial.print(config.tokens);
+                        Serial.print(", activeButton=");
+                        Serial.println(activeButton);
+                    }
                     buttonProcessed = true;
                 } else if (currentState == STATE_RUNNING) {
                     // CRITICAL FIX: Allow pause on button press when RUNNING
@@ -177,21 +214,65 @@ void CarWashController::handleButtons() {
                     LOG_INFO("Button %d pressed while RUNNING (activeButton=%d)", 
                             detectedId + 1, activeButton + 1);
                     if (activeButton == -1 || (int)detectedId == activeButton) {
-                        if (activeButton == -1) {
-                            LOG_WARNING("activeButton is -1 in RUNNING state - allowing pause anyway (button %d)", detectedId + 1);
-                            // Set activeButton to the pressed button to fix the tracking
-                            activeButton = detectedId;
+                        // CRITICAL FIX: Prevent rapid pause/resume toggling
+                        unsigned long currentTime = millis();
+                        unsigned long timeSinceLastPauseResume;
+                        if (currentTime >= lastPauseResumeTime) {
+                            timeSinceLastPauseResume = currentTime - lastPauseResumeTime;
+                        } else {
+                            timeSinceLastPauseResume = (0xFFFFFFFFUL - lastPauseResumeTime) + currentTime + 1;
                         }
-                        LOG_INFO("Pausing machine - button matches active button");
-                        pauseMachine();
-                        buttonProcessed = true;
+                        
+                        if (timeSinceLastPauseResume < PAUSE_RESUME_COOLDOWN) {
+                            LOG_WARNING("Button %d pressed while RUNNING - ignoring (cooldown: %lu ms < %lu ms)", 
+                                       detectedId + 1, timeSinceLastPauseResume, PAUSE_RESUME_COOLDOWN);
+                        } else {
+                            if (activeButton == -1) {
+                                LOG_WARNING("activeButton is -1 in RUNNING state - allowing pause anyway (button %d)", detectedId + 1);
+                                // Set activeButton to the pressed button to fix the tracking
+                                activeButton = detectedId;
+                            }
+                            LOG_INFO("Pausing machine - button matches active button");
+                            pauseMachine();
+                            lastPauseResumeTime = currentTime;
+                            buttonProcessed = true;
+                        }
                     } else {
                         LOG_WARNING("Button %d pressed while RUNNING (activeButton=%d) - ignoring", 
                                    detectedId + 1, activeButton + 1);
                     }
                 } else if (currentState == STATE_PAUSED) {
-                    resumeMachine(detectedId);
-                    buttonProcessed = true;
+                    // CRITICAL FIX: Only resume if the button matches the active button
+                    // This prevents accidentally activating a different button when paused
+                    // If user wants a different button, they should stop first
+                    if (activeButton == -1 || (int)detectedId == activeButton) {
+                        // CRITICAL FIX: Prevent rapid pause/resume toggling
+                        unsigned long currentTime = millis();
+                        unsigned long timeSinceLastPauseResume;
+                        if (currentTime >= lastPauseResumeTime) {
+                            timeSinceLastPauseResume = currentTime - lastPauseResumeTime;
+                        } else {
+                            timeSinceLastPauseResume = (0xFFFFFFFFUL - lastPauseResumeTime) + currentTime + 1;
+                        }
+                        
+                        if (timeSinceLastPauseResume < PAUSE_RESUME_COOLDOWN) {
+                            LOG_WARNING("Button %d pressed while PAUSED - ignoring (cooldown: %lu ms < %lu ms)", 
+                                       detectedId + 1, timeSinceLastPauseResume, PAUSE_RESUME_COOLDOWN);
+                        } else {
+                            if (activeButton == -1) {
+                                LOG_WARNING("activeButton is -1 in PAUSED state - allowing resume anyway (button %d)", detectedId + 1);
+                                // Set activeButton to the pressed button to fix the tracking
+                                activeButton = detectedId;
+                            }
+                            LOG_INFO("Resuming machine - button matches active button");
+                            resumeMachine(detectedId);
+                            lastPauseResumeTime = currentTime;
+                            buttonProcessed = true;
+                        }
+                    } else {
+                        LOG_WARNING("Button %d pressed while PAUSED (activeButton=%d) - ignoring (must press same button to resume)", 
+                                   detectedId + 1, activeButton + 1);
+                    }
                 } else {
                     LOG_WARNING("Flag press on button %d ignored. State=%d, activeButton=%d",
                                 detectedId + 1, currentState, activeButton);
@@ -260,7 +341,25 @@ void CarWashController::handleButtons() {
                 if (config.isLoaded) {
                     if (currentState == STATE_IDLE) {
                         LOG_INFO("Button %d: Activating from IDLE state", i + 1);
+                        if (ENABLE_BUTTON_DIAGNOSTICS) {
+                            Serial.print("[BUTTON DIAG] Raw polling - Calling activateButton(");
+                            Serial.print(i);
+                            Serial.print(") - BEFORE: state=");
+                            Serial.print(currentState);
+                            Serial.print(", tokens=");
+                            Serial.print(config.tokens);
+                            Serial.print(", activeButton=");
+                            Serial.println(activeButton);
+                        }
                         activateButton(i, MANUAL);
+                        if (ENABLE_BUTTON_DIAGNOSTICS) {
+                            Serial.print("[BUTTON DIAG] Raw polling - activateButton() RETURNED - AFTER: state=");
+                            Serial.print(currentState);
+                            Serial.print(", tokens=");
+                            Serial.print(config.tokens);
+                            Serial.print(", activeButton=");
+                            Serial.println(activeButton);
+                        }
                     } else if (currentState == STATE_RUNNING) {
                         // CRITICAL FIX: Allow pause on button press when RUNNING
                         // If activeButton is -1 (shouldn't happen, but handle gracefully), allow any button to pause
@@ -268,20 +367,62 @@ void CarWashController::handleButtons() {
                         LOG_INFO("Button %d pressed while RUNNING (activeButton=%d) - raw polling", 
                                 i + 1, activeButton + 1);
                         if (activeButton == -1 || i == activeButton) {
-                            if (activeButton == -1) {
-                                LOG_WARNING("activeButton is -1 in RUNNING state - allowing pause anyway (button %d) - raw polling", i + 1);
-                                // Set activeButton to the pressed button to fix the tracking
-                                activeButton = i;
+                            // CRITICAL FIX: Prevent rapid pause/resume toggling
+                            unsigned long currentTime = millis();
+                            unsigned long timeSinceLastPauseResume;
+                            if (currentTime >= lastPauseResumeTime) {
+                                timeSinceLastPauseResume = currentTime - lastPauseResumeTime;
+                            } else {
+                                timeSinceLastPauseResume = (0xFFFFFFFFUL - lastPauseResumeTime) + currentTime + 1;
                             }
-                            LOG_INFO("Pausing machine - button matches active button (raw polling)");
-                            pauseMachine();
+                            
+                            if (timeSinceLastPauseResume < PAUSE_RESUME_COOLDOWN) {
+                                LOG_WARNING("Button %d pressed while RUNNING - ignoring (cooldown: %lu ms < %lu ms) - raw polling", 
+                                           i + 1, timeSinceLastPauseResume, PAUSE_RESUME_COOLDOWN);
+                            } else {
+                                if (activeButton == -1) {
+                                    LOG_WARNING("activeButton is -1 in RUNNING state - allowing pause anyway (button %d) - raw polling", i + 1);
+                                    // Set activeButton to the pressed button to fix the tracking
+                                    activeButton = i;
+                                }
+                                LOG_INFO("Pausing machine - button matches active button (raw polling)");
+                                pauseMachine();
+                                lastPauseResumeTime = currentTime;
+                            }
                         } else {
                             LOG_WARNING("Button %d pressed while RUNNING (activeButton=%d) - ignoring (raw polling)", 
                                        i + 1, activeButton + 1);
                         }
                     } else if (currentState == STATE_PAUSED) {
-                        LOG_INFO("Button %d: Resuming from PAUSED state", i + 1);
-                        resumeMachine(i);
+                        // CRITICAL FIX: Only resume if the button matches the active button
+                        // This prevents accidentally activating a different button when paused
+                        if (activeButton == -1 || i == activeButton) {
+                            // CRITICAL FIX: Prevent rapid pause/resume toggling
+                            unsigned long currentTime = millis();
+                            unsigned long timeSinceLastPauseResume;
+                            if (currentTime >= lastPauseResumeTime) {
+                                timeSinceLastPauseResume = currentTime - lastPauseResumeTime;
+                            } else {
+                                timeSinceLastPauseResume = (0xFFFFFFFFUL - lastPauseResumeTime) + currentTime + 1;
+                            }
+                            
+                            if (timeSinceLastPauseResume < PAUSE_RESUME_COOLDOWN) {
+                                LOG_WARNING("Button %d pressed while PAUSED - ignoring (cooldown: %lu ms < %lu ms) - raw polling", 
+                                           i + 1, timeSinceLastPauseResume, PAUSE_RESUME_COOLDOWN);
+                            } else {
+                                if (activeButton == -1) {
+                                    LOG_WARNING("activeButton is -1 in PAUSED state - allowing resume anyway (button %d) - raw polling", i + 1);
+                                    // Set activeButton to the pressed button to fix the tracking
+                                    activeButton = i;
+                                }
+                                LOG_INFO("Button %d: Resuming from PAUSED state", i + 1);
+                                resumeMachine(i);
+                                lastPauseResumeTime = currentTime;
+                            }
+                        } else {
+                            LOG_WARNING("Button %d pressed while PAUSED (activeButton=%d) - ignoring (must press same button to resume) - raw polling", 
+                                       i + 1, activeButton + 1);
+                        }
                     }
                 } else {
                     LOG_WARNING("Button %d ignored - config not loaded", i + 1);
@@ -443,8 +584,22 @@ void CarWashController::stopMachine(TriggerType triggerType) {
 }
 
 void CarWashController::activateButton(int buttonIndex, TriggerType triggerType) {
+    if (ENABLE_BUTTON_DIAGNOSTICS) {
+        Serial.print("[BUTTON DIAG] activateButton() ENTERED: buttonIndex=");
+        Serial.print(buttonIndex);
+        Serial.print(", tokens=");
+        Serial.print(config.tokens);
+        Serial.print(", state=");
+        Serial.print(currentState);
+        Serial.print(", activeButton=");
+        Serial.println(activeButton);
+    }
+    
     if (config.tokens <= 0) {
         LOG_WARNING("Cannot activate button %d - no tokens left (tokens=%d)", buttonIndex+1, config.tokens);
+        if (ENABLE_BUTTON_DIAGNOSTICS) {
+            Serial.println("[BUTTON DIAG] activateButton() EXIT - No tokens left");
+        }
         return;
     }
 
@@ -453,11 +608,31 @@ void CarWashController::activateButton(int buttonIndex, TriggerType triggerType)
     unsigned long currentTime = millis();
     lastActionTime = currentTime;
     
+    if (ENABLE_BUTTON_DIAGNOSTICS) {
+        Serial.print("[BUTTON DIAG] Setting state to RUNNING - BEFORE: state=");
+        Serial.print(currentState);
+        Serial.print(", activeButton=");
+        Serial.print(activeButton);
+        Serial.print(", tokenStartTime=");
+        Serial.println(tokenStartTime);
+    }
+    
     digitalWrite(RUNNING_LED_PIN, HIGH);
     currentState = STATE_RUNNING;
     activeButton = buttonIndex;
     tokenStartTime = currentTime;
     tokenTimeElapsed = 0;
+    
+    if (ENABLE_BUTTON_DIAGNOSTICS) {
+        Serial.print("[BUTTON DIAG] State set to RUNNING - AFTER: state=");
+        Serial.print(currentState);
+        Serial.print(", activeButton=");
+        Serial.print(activeButton);
+        Serial.print(", tokenStartTime=");
+        Serial.print(tokenStartTime);
+        Serial.print(", TOKEN_TIME=");
+        Serial.println(TOKEN_TIME);
+    }
     
     extern IoExpander ioExpander;
     
@@ -473,9 +648,27 @@ void CarWashController::activateButton(int buttonIndex, TriggerType triggerType)
         bool relayBitSet = (relayStateAfter & (1 << RELAY_INDICES[buttonIndex])) != 0;
         if (!relayBitSet) {
             LOG_ERROR("Failed to activate relay %d! Bit %d not set", buttonIndex+1, RELAY_INDICES[buttonIndex]);
+            if (ENABLE_BUTTON_DIAGNOSTICS) {
+                Serial.print("[BUTTON DIAG] ERROR: Relay activation failed! relay=");
+                Serial.print(buttonIndex + 1);
+                Serial.print(", bit=");
+                Serial.print(RELAY_INDICES[buttonIndex]);
+                Serial.print(", relayStateAfter=0x");
+                Serial.println(relayStateAfter, HEX);
+            }
+        } else {
+            if (ENABLE_BUTTON_DIAGNOSTICS) {
+                Serial.print("[BUTTON DIAG] Relay activated successfully: relay=");
+                Serial.print(buttonIndex + 1);
+                Serial.print(", relayStateAfter=0x");
+                Serial.println(relayStateAfter, HEX);
+            }
         }
     } else {
         LOG_WARNING("Failed to acquire IO expander mutex in activateButton()");
+        if (ENABLE_BUTTON_DIAGNOSTICS) {
+            Serial.println("[BUTTON DIAG] WARNING: Failed to acquire mutex for relay activation");
+        }
         // Even if mutex fails, we've already updated state and lastActionTime
         // The relay activation will be retried on next update cycle if needed
     }
@@ -486,10 +679,40 @@ void CarWashController::activateButton(int buttonIndex, TriggerType triggerType)
     }
     config.tokens--;
 
+    if (ENABLE_BUTTON_DIAGNOSTICS) {
+        Serial.print("[BUTTON DIAG] Tokens decremented - tokens=");
+        Serial.print(config.tokens);
+        Serial.print(", physicalTokens=");
+        Serial.print(config.physicalTokens);
+        Serial.print(", state=");
+        Serial.print(currentState);
+        Serial.println(" (should be RUNNING)");
+    }
+
     publishActionEvent(buttonIndex, ACTION_START, triggerType);
+    
+    if (ENABLE_BUTTON_DIAGNOSTICS) {
+        Serial.print("[BUTTON DIAG] activateButton() EXITING: state=");
+        Serial.print(currentState);
+        Serial.print(", activeButton=");
+        Serial.print(activeButton);
+        Serial.print(", tokens=");
+        Serial.println(config.tokens);
+    }
 }
 
 void CarWashController::tokenExpired() {
+    if (ENABLE_BUTTON_DIAGNOSTICS) {
+        Serial.print("[BUTTON DIAG] tokenExpired() CALLED - BEFORE: state=");
+        Serial.print(currentState);
+        Serial.print(", activeButton=");
+        Serial.print(activeButton);
+        Serial.print(", tokenStartTime=");
+        Serial.print(tokenStartTime);
+        Serial.print(", tokenTimeElapsed=");
+        Serial.println(tokenTimeElapsed);
+    }
+    
     if (activeButton >= 0) {
         // Turn off the active relay
         extern IoExpander ioExpander;
@@ -502,6 +725,13 @@ void CarWashController::tokenExpired() {
     }
     activeButton = -1;
     currentState = STATE_IDLE;
+    
+    if (ENABLE_BUTTON_DIAGNOSTICS) {
+        Serial.print("[BUTTON DIAG] tokenExpired() - AFTER: state=");
+        Serial.print(currentState);
+        Serial.print(" (IDLE), activeButton=");
+        Serial.println(activeButton);
+    }
     // CRITICAL FIX: Do NOT reset lastActionTime here - inactivity timeout should continue
     // from the last actual user action, not reset when token expires
     // This ensures the inactivity timeout works correctly on subsequent timeouts
@@ -803,6 +1033,12 @@ void CarWashController::update() {
         }
     }
     
+    // CRITICAL FIX: Re-capture currentTime after handling buttons
+    // This prevents timing bugs where tokenStartTime is set AFTER currentTime was captured
+    // If activateButton() was just called, tokenStartTime will be newer than the old currentTime
+    // Re-capturing ensures we use the correct time for token expiration checks
+    currentTime = millis();
+    
     if ((currentState == STATE_RUNNING || currentState == STATE_PAUSED) && tokenStartTime != 0) {
         unsigned long totalElapsedTime;
         if (currentState == STATE_RUNNING) {
@@ -815,6 +1051,27 @@ void CarWashController::update() {
                 runningTime = (0xFFFFFFFFUL - tokenStartTime) + currentTime + 1;
             }
             totalElapsedTime = tokenTimeElapsed + runningTime;
+            
+            if (ENABLE_BUTTON_DIAGNOSTICS) {
+                static unsigned long lastTokenCheckLog = 0;
+                if (currentTime - lastTokenCheckLog > 1000) { // Log every second when RUNNING
+                    Serial.print("[BUTTON DIAG] Token check (RUNNING): currentTime=");
+                    Serial.print(currentTime);
+                    Serial.print(", tokenStartTime=");
+                    Serial.print(tokenStartTime);
+                    Serial.print(", runningTime=");
+                    Serial.print(runningTime);
+                    Serial.print(", tokenTimeElapsed=");
+                    Serial.print(tokenTimeElapsed);
+                    Serial.print(", totalElapsedTime=");
+                    Serial.print(totalElapsedTime);
+                    Serial.print(", TOKEN_TIME=");
+                    Serial.print(TOKEN_TIME);
+                    Serial.print(", expired=");
+                    Serial.println(totalElapsedTime >= TOKEN_TIME ? "YES" : "NO");
+                    lastTokenCheckLog = currentTime;
+                }
+            }
         } else { // STATE_PAUSED
             // When paused, elapsed time is frozen at tokenTimeElapsed
             totalElapsedTime = tokenTimeElapsed;
@@ -822,6 +1079,16 @@ void CarWashController::update() {
         
         if (totalElapsedTime >= TOKEN_TIME) {
             LOG_INFO("Token time expired (%lu ms >= %lu ms), calling tokenExpired()", totalElapsedTime, TOKEN_TIME);
+            if (ENABLE_BUTTON_DIAGNOSTICS) {
+                Serial.print("[BUTTON DIAG] *** TOKEN EXPIRED *** - totalElapsedTime=");
+                Serial.print(totalElapsedTime);
+                Serial.print(" >= TOKEN_TIME=");
+                Serial.print(TOKEN_TIME);
+                Serial.print(", state=");
+                Serial.print(currentState);
+                Serial.print(", calling tokenExpired()");
+                Serial.println();
+            }
             tokenExpired();
             // Re-check inactivity timeout after token expires (user might be logged out)
             // CRITICAL: Re-capture currentTime after tokenExpired() as it may have taken time
@@ -1045,17 +1312,19 @@ void CarWashController::publishPeriodicState(bool force) {
         LOG_INFO("Publishing state: status=%s, timestamp=%s", 
                   getMachineStateString(currentState).c_str(), timestamp.c_str());
         
-        // Queue message for publishing (non-critical - periodic state updates)
-        // State updates are not critical and can be dropped if queue is full
-        bool queued = queueMqttMessage(STATE_TOPIC.c_str(), jsonString.c_str(), QOS0_AT_MOST_ONCE, false);
+        // CRITICAL: State messages must be sent immediately, NOT queued
+        // State messages represent the current machine state and should always reflect
+        // the most recent state. Queuing them would cause stale state information
+        // to be sent to the backend, which could lead to incorrect state tracking.
+        // Use non-blocking publish with timeout to avoid blocking the main loop
+        bool published = mqttClient.publishNonBlocking(STATE_TOPIC.c_str(), jsonString.c_str(), QOS0_AT_MOST_ONCE, 500);
         
-        // Only update lastStatePublishTime if message was successfully queued
-        // If queue is full and message was dropped, we'll try again on next update() call
-        // This prevents skipping state updates when queue is temporarily full
-        if (queued) {
-            lastStatePublishTime = millis();
-        } else {
-            LOG_WARNING("State publish queued failed (queue full), will retry on next update()");
+        // Update lastStatePublishTime regardless of publish result
+        // If publish failed, we'll try again on next update() call
+        lastStatePublishTime = millis();
+        
+        if (!published) {
+            LOG_WARNING("State publish failed (MQTT may be busy or disconnected), will retry on next update()");
         }
         
         // CRITICAL: Re-check timeout after potentially blocking MQTT operation

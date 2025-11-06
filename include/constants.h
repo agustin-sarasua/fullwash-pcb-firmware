@@ -56,4 +56,8 @@ struct MqttMessage {
     unsigned long timestamp;  // When message was created
 };
 
+// Diagnostic flags
+const bool ENABLE_NETWORK_MANAGER_DIAGNOSTICS = false; // Set to true to enable diagnostic messages in Network Manager task and MQTT client
+const bool ENABLE_BUTTON_DIAGNOSTICS = true; // Set to true to enable diagnostic messages for button detection and handling
+
 #endif // CONSTANTS_H
