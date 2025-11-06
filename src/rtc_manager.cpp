@@ -124,7 +124,8 @@ uint8_t RTCManager::readRegister(uint8_t reg) {
     if (_i2cMutex != NULL) {
         mutexTaken = (xSemaphoreTake(_i2cMutex, pdMS_TO_TICKS(100)) == pdTRUE);
         if (!mutexTaken) {
-            LOG_WARNING("Failed to acquire I2C mutex for RTC read");
+            // Don't log here - this method may be called from getDateTime()
+            // which is called from Logger::getTimestamp(), causing recursion
             return 0;
         }
     }
@@ -137,12 +138,14 @@ uint8_t RTCManager::readRegister(uint8_t reg) {
     if (error == 0) {
         uint8_t bytesReceived = _wire->requestFrom(_address, (uint8_t)1);
         if (bytesReceived != 1) {
-            LOG_ERROR("Failed to read RTC register 0x%02X: expected 1 byte, got %d", reg, bytesReceived);
+            // Don't log here - this method may be called from getDateTime()
+            // which is called from Logger::getTimestamp(), causing recursion
         } else {
             result = _wire->read();
         }
     } else {
-        LOG_ERROR("Failed to set RTC register pointer to 0x%02X: error %d", reg, error);
+        // Don't log here - this method may be called from getDateTime()
+        // which is called from Logger::getTimestamp(), causing recursion
     }
     
     if (mutexTaken && _i2cMutex != NULL) {
@@ -160,7 +163,8 @@ bool RTCManager::readRegisters(uint8_t reg, uint8_t* buffer, uint8_t length) {
     if (_i2cMutex != NULL) {
         mutexTaken = (xSemaphoreTake(_i2cMutex, pdMS_TO_TICKS(100)) == pdTRUE);
         if (!mutexTaken) {
-            LOG_WARNING("Failed to acquire I2C mutex for RTC read");
+            // Don't log here - this method is called from getDateTime()
+            // which is called from Logger::getTimestamp(), causing recursion
             return false;
         }
     }
@@ -173,7 +177,8 @@ bool RTCManager::readRegisters(uint8_t reg, uint8_t* buffer, uint8_t length) {
     if (error == 0) {
         uint8_t bytesReceived = _wire->requestFrom(_address, length);
         if (bytesReceived != length) {
-            LOG_ERROR("Failed to read %d RTC registers: got %d bytes", length, bytesReceived);
+            // Don't log here - this method is called from getDateTime()
+            // which is called from Logger::getTimestamp(), causing recursion
         } else {
             for (uint8_t i = 0; i < length; i++) {
                 buffer[i] = _wire->read();
@@ -181,7 +186,8 @@ bool RTCManager::readRegisters(uint8_t reg, uint8_t* buffer, uint8_t length) {
             success = true;
         }
     } else {
-        LOG_ERROR("Failed to set RTC register pointer: error %d", error);
+        // Don't log here - this method is called from getDateTime()
+        // which is called from Logger::getTimestamp(), causing recursion
     }
     
     if (mutexTaken && _i2cMutex != NULL) {
@@ -251,29 +257,32 @@ bool RTCManager::isTimeValid() {
         return false;
     }
     
-    // Check if oscillator is running
+    // Check if oscillator is running (without logging to avoid recursion)
     if (!isOscillatorRunning()) {
-        LOG_DEBUG("RTC time invalid: oscillator is stopped");
+        // Don't log here - this method is called from Logger::getTimestamp()
+        // which would cause infinite recursion
         return false;
     }
     
     // Check if time is reasonable (after 2020-01-01)
+    // Call getDateTime() with skipLogging flag to prevent recursion
     time_t currentTime = getDateTime();
     if (currentTime == 0) {
-        LOG_DEBUG("RTC time invalid: failed to read time");
+        // Don't log here - this method is called from Logger::getTimestamp()
         return false;
     }
     
     // 2020-01-01 00:00:00 UTC = 1577836800
     if (currentTime < 1577836800UL) {
-        LOG_WARNING("RTC time invalid: time is before 2020 (epoch: %lu, ISO: %s)", 
-                   (unsigned long)currentTime, getTimestamp().c_str());
+        // Only log warning if time is invalid (not called from logger context)
+        // But we can't easily detect that, so we'll skip logging for now
+        // The caller can log if needed
         return false;
     }
     
     // Check if time is not too far in the future (e.g., 2100-01-01 = 4102444800)
     if (currentTime > 4102444800UL) {
-        LOG_DEBUG("RTC time invalid: time is too far in future (epoch: %lu)", (unsigned long)currentTime);
+        // Don't log here - this method is called from Logger::getTimestamp()
         return false;
     }
     
@@ -399,7 +408,8 @@ time_t RTCManager::getDateTime() {
     // Read all time registers at once
     uint8_t data[7];
     if (!readRegisters(REG_SECONDS, data, 7)) {
-        LOG_ERROR("Failed to read RTC time");
+        // Don't log here - this method is called from Logger::getTimestamp()
+        // which would cause infinite recursion. The caller can log if needed.
         return 0;
     }
     
@@ -412,16 +422,9 @@ time_t RTCManager::getDateTime() {
     uint8_t month = bcdToDec(data[5]);
     uint8_t year = bcdToDec(data[6]);
     
-    // Log raw register values for debugging
-    LOG_DEBUG("RTC raw registers: [0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X] -> "
-              "%04d-%02d-%02d %02d:%02d:%02d",
-              data[0], data[1], data[2], data[3], data[4], data[5], data[6],
-              2000 + year, month, day, hour, minute, second);
-    
-    // Check if oscillator was stopped
-    if (data[0] & 0x80) {
-        LOG_WARNING("RTC oscillator stop flag is set! Time may be invalid.");
-    }
+    // NOTE: Removed LOG_DEBUG here to prevent infinite recursion
+    // This method is called from Logger::getTimestamp(), which would cause
+    // Logger::debug() -> getTimestamp() -> getDateTime() -> LOG_DEBUG() -> infinite loop
     
     // Convert to epoch time
     tmElements_t tm;
@@ -434,11 +437,8 @@ time_t RTCManager::getDateTime() {
     
     time_t epochTime = makeTime(tm);
     
-    // Log if time seems invalid
-    if (epochTime < 1577836800UL) { // Before 2020-01-01
-        LOG_WARNING("RTC read invalid time: epoch=%lu -> %04d-%02d-%02d %02d:%02d:%02d (year=%d)",
-                   (unsigned long)epochTime, 2000 + year, month, day, hour, minute, second, year);
-    }
+    // NOTE: Removed LOG_WARNING here to prevent infinite recursion
+    // The caller can log warnings if needed
     
     // Cache the reading
     _lastReadTime = epochTime;

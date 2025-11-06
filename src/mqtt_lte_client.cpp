@@ -417,11 +417,28 @@ bool MqttLteClient::publish(const char* topic, const char* payload, const uint8_
     if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
     if (!_mqttClient->connected()) {
         // Recursive lock safe
+        Serial.print("[MQTT] Not connected, attempting reconnect before publish to ");
+        Serial.println(topic);
         reconnect();
     }
     bool ok = false;
     if (_mqttClient->connected()) {
         ok = _mqttClient->publish(topic, payload);
+        if (!ok) {
+            Serial.print("[MQTT ERROR] Failed to publish to ");
+            Serial.print(topic);
+            Serial.print(" (QoS: ");
+            Serial.print(qos);
+            Serial.print(", state: ");
+            Serial.print(_mqttClient->state());
+            Serial.println(")");
+        }
+    } else {
+        Serial.print("[MQTT ERROR] Cannot publish to ");
+        Serial.print(topic);
+        Serial.print(" - MQTT not connected (state: ");
+        Serial.print(_mqttClient->state());
+        Serial.println(")");
     }
     if (_mutex) xSemaphoreGiveRecursive(_mutex);
     return ok;

@@ -180,9 +180,31 @@ void LcdI2cCustom::write4bits(uint8_t value) {
 }
 
 void LcdI2cCustom::expanderWrite(uint8_t data) {
+    // Protect I2C access with mutex (shared with RTC)
+    // Use 100ms timeout to match RTC timeout for consistency
+    bool mutexTaken = false;
+    if (_i2cMutex != NULL) {
+        mutexTaken = (xSemaphoreTake(_i2cMutex, pdMS_TO_TICKS(100)) == pdTRUE);
+        if (!mutexTaken) {
+            // Failed to acquire mutex - skip this write to avoid blocking
+            // This prevents I2C bus conflicts with RTC operations
+            // Note: During initialization, mutex may not be set yet, which is OK
+            return;
+        }
+    }
+    
+    // Perform I2C write operation (fast, non-blocking)
     _wire.beginTransmission(_addr);
     _wire.write(data | _backlightval);
-    _wire.endTransmission();
+    uint8_t error = _wire.endTransmission();
+    
+    // Release mutex immediately after I2C operation completes
+    if (mutexTaken && _i2cMutex != NULL) {
+        xSemaphoreGive(_i2cMutex);
+    }
+    
+    // Note: I2C errors are silently ignored here to avoid recursion
+    // (LCD operations should not fail under normal conditions)
 }
 
 void LcdI2cCustom::pulseEnable(uint8_t data) {

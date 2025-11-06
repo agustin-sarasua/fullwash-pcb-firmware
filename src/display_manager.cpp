@@ -37,22 +37,43 @@ void DisplayManager::update(CarWashController* controller) {
     MachineState previousState = lastState;
     bool stateChanged = (currentState != previousState);
     
-    // Update if state changed OR if at least 1 second has passed
-    // This ensures smooth countdowns while avoiding excessive I2C traffic
-    if (!stateChanged && (now - lastUpdateTime) < 1000) {
-        return;
-    }
-    lastUpdateTime = now;
-    
-    // Protect I2C access with mutex (shared with RTC)
-    bool mutexTaken = false;
-    if (_i2cMutex != NULL) {
-        mutexTaken = (xSemaphoreTake(_i2cMutex, pdMS_TO_TICKS(100)) == pdTRUE);
-        if (!mutexTaken) {
-            LOG_WARNING("Failed to acquire I2C mutex for display update");
-            return;
+    // CRITICAL: Always update immediately when state changes
+    // This ensures display updates to FREE state as soon as timeout happens
+    if (stateChanged) {
+        lastUpdateTime = now;
+        // Continue to update...
+    } else {
+        // Only throttle if state hasn't changed
+        // Check if we're near timeout - update more frequently for accurate countdown
+        unsigned long timeToTimeout = controller->getTimeToInactivityTimeout();
+        unsigned long timeToTimeoutSeconds = timeToTimeout / 1000;
+        bool nearTimeout = (timeToTimeoutSeconds > 0 && timeToTimeoutSeconds <= 5); // Update every 500ms when <= 5 seconds
+        bool timeoutReached = (timeToTimeout == 0 && currentState != STATE_FREE); // Timeout is 0 but state hasn't changed yet
+        
+        // CRITICAL: If timeout reached 0 but state is still IDLE/PAUSED, force immediate update
+        // This ensures display updates as soon as timeout expires, even if controller hasn't processed it yet
+        // With the fix in update(), state should change immediately, but this is a safety measure
+        if (timeoutReached) {
+            lastUpdateTime = now;
+            // Continue to update - this will show 00:00, but next update (within 500ms) should catch state change
+            // The controller update() now checks timeout first and returns immediately after logout
+        } else {
+            // Update more frequently (every 500ms) when near timeout to avoid showing stale 00:00
+            // When timeout is exactly 0, we want to update immediately to catch the state change
+            unsigned long updateInterval = nearTimeout ? 500 : 1000;
+            unsigned long timeSinceLastUpdate = now - lastUpdateTime;
+            
+            if (timeSinceLastUpdate < updateInterval) {
+                return; // Throttle updates (removed excessive logging)
+            }
+            
+            lastUpdateTime = now;
         }
     }
+    
+    // NOTE: I2C mutex is now handled internally by the LCD library
+    // The DisplayManager no longer needs to manage the mutex at this level
+    // This prevents double-locking and ensures all LCD operations are protected
     
     // Update display based on current state
     switch (currentState) {
@@ -70,13 +91,9 @@ void DisplayManager::update(CarWashController* controller) {
             break;
         default:
             // Fallback to free state for unknown states
+            LOG_WARNING("[DISPLAY] Unknown state %d, showing FREE", currentState);
             displayFreeState();
             break;
-    }
-    
-    // Release mutex
-    if (mutexTaken && _i2cMutex != NULL) {
-        xSemaphoreGive(_i2cMutex);
     }
     
     // Record last state after updating the display
@@ -130,7 +147,8 @@ void DisplayManager::displayIdleState(CarWashController* controller, bool stateC
     // Always refresh - get current values and display them
     int tokens = controller->getTokensLeft();
     String userName = controller->getUserName();
-    unsigned long userInactivityTime = controller->getTimeToInactivityTimeout() / 1000;
+    unsigned long userInactivityTimeMs = controller->getTimeToInactivityTimeout();
+    unsigned long userInactivityTime = userInactivityTimeMs / 1000;
     
     // Clear and redraw entire screen
     lcd.clear();
@@ -150,7 +168,10 @@ void DisplayManager::displayIdleState(CarWashController* controller, bool stateC
     
     lcd.setCursor(0, 2);
     lcd.print("Salida en: ");
-    lcd.print(formatTime(userInactivityTime));
+    String timeStr = formatTime(userInactivityTime);
+    lcd.print(timeStr);
+    
+    // No logging to reduce overhead
     
     lcd.setCursor(0, 3);
     lcd.print("Pulse boton");

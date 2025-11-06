@@ -89,7 +89,8 @@ void TaskCoinDetector(void *pvParameters) {
         // Check if interrupt pin is LOW (hardware detected a change)
         if (digitalRead(INT_PIN) == LOW) {
             // Protect IO expander access with mutex
-            if (xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            // Reduced from 100ms to 50ms for faster failure and better responsiveness
+            if (xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                 _portVal = ioExpander.readRegister(INPUT_PORT0);
                 
                 // Check if COIN_SIG state has changed
@@ -98,8 +99,6 @@ void TaskCoinDetector(void *pvParameters) {
                     if (coins_sig_state == (1 << COIN_SIG)) {
                         ioExpander.setCoinSignal(1);
                         ioExpander._intCnt++;
-                        LOG_DEBUG("Interrupt detected! Port 0 Value: 0x%02X, coins times: %d", 
-                                 _portVal, ioExpander._intCnt);
                     }
                     
                     // Update state for next comparison
@@ -146,14 +145,12 @@ void TaskButtonDetector(void *pvParameters) {
             uint8_t currentPortValue = 0;
             
             // Protect IO expander access with mutex
-            if (xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            // Reduced from 100ms to 50ms for faster failure and better responsiveness
+            if (xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                 currentPortValue = ioExpander.readRegister(INPUT_PORT0);
                 
                 // Check if any button state changed
                 if (currentPortValue != lastPortValue) {
-                    LOG_DEBUG("Button state change detected. Port: 0x%02X -> 0x%02X", 
-                             lastPortValue, currentPortValue);
-                    
                     // Check each button for press events (transition from HIGH to LOW)
                     for (int i = 0; i < NUM_BUTTONS; i++) {
                         int buttonPin;
@@ -168,7 +165,6 @@ void TaskButtonDetector(void *pvParameters) {
                         
                         // Detect button press (transition from released to pressed)
                         if (currentButtonPressed && !lastButtonPressed) {
-                            LOG_INFO("Button %d pressed detected in task", i + 1);
                             ioExpander.setButtonFlag(i, true);
                         }
                     }
@@ -213,10 +209,6 @@ void TaskNetworkManager(void *pvParameters) {
     // Wait a bit for system to initialize
     vTaskDelay(2000 / portTICK_PERIOD_MS);
     
-    // Log initial stack high water mark
-    UBaseType_t initialStackHighWater = uxTaskGetStackHighWaterMark(NULL);
-    LOG_INFO("Network task initial stack high water mark: %d bytes", initialStackHighWater);
-    
     for(;;) {
         unsigned long currentTime = millis();
         
@@ -239,33 +231,20 @@ void TaskNetworkManager(void *pvParameters) {
                     // Yield before network operation to let IDLE task run
                     vTaskDelay(pdMS_TO_TICKS(100));
                     
-                    // Monitor stack before network operation
-                    UBaseType_t stackBefore = uxTaskGetStackHighWaterMark(NULL);
-                    LOG_DEBUG("Stack before network init: %d bytes remaining", stackBefore);
-                    
                     if (mqttClient.begin(apn, gprsUser, gprsPass, pin)) {
                         LOG_INFO("Successfully reconnected to cellular network!");
                         
                         // Validate IP address
                         String ip = mqttClient.getLocalIP();
                         if (mqttClient.isValidIP(ip)) {
-                            LOG_INFO("Valid IP address obtained: %s", ip.c_str());
+                            // IP is valid, continue
                         } else {
                             LOG_ERROR("Invalid IP address: %s - skipping MQTT connection attempt", ip.c_str());
                             vTaskDelay(10000 / portTICK_PERIOD_MS); // Wait 10s before retry
                             continue; // Skip to next iteration
                         }
                         
-                        // Log signal quality
-                        int signalQuality = mqttClient.getSignalQuality();
-                        LOG_INFO("Signal quality: %d/31", signalQuality);
-                        
-                        // Monitor stack after network operation
-                        UBaseType_t stackAfter = uxTaskGetStackHighWaterMark(NULL);
-                        LOG_DEBUG("Stack after network init: %d bytes remaining", stackAfter);
-                        
                         // Cleanup SSL client since network was lost (old SSL session is invalid)
-                        LOG_INFO("Cleaning up SSL state after network loss");
                         mqttClient.cleanupSSLClient();
                         vTaskDelay(500 / portTICK_PERIOD_MS); // Reduced from 1000ms to prevent watchdog timeout
                         
@@ -274,10 +253,6 @@ void TaskNetworkManager(void *pvParameters) {
                         mqttClient.setCertificate(AWSClientCertificate);
                         mqttClient.setPrivateKey(AWSClientPrivateKey);
                         
-                        // Monitor stack before SSL connection (this is the critical part)
-                        UBaseType_t stackBeforeSSL = uxTaskGetStackHighWaterMark(NULL);
-                        LOG_DEBUG("Stack before MQTT SSL connect: %d bytes remaining", stackBeforeSSL);
-                        
                         // Yield before SSL connection (this can take several seconds)
                         vTaskDelay(pdMS_TO_TICKS(100));
                         
@@ -285,9 +260,6 @@ void TaskNetworkManager(void *pvParameters) {
                         if (mqttClient.connect(AWS_BROKER, AWS_BROKER_PORT, AWS_CLIENT_ID.c_str())) {
                             LOG_INFO("MQTT broker connection restored!");
                             
-                            // Monitor stack after SSL connection
-                            UBaseType_t stackAfterSSL = uxTaskGetStackHighWaterMark(NULL);
-                            LOG_DEBUG("Stack after MQTT SSL connect: %d bytes remaining", stackAfterSSL);
                             mqttClient.subscribe(INIT_TOPIC.c_str());
                             mqttClient.subscribe(CONFIG_TOPIC.c_str());
                             mqttClient.subscribe(COMMAND_TOPIC.c_str());
@@ -299,7 +271,6 @@ void TaskNetworkManager(void *pvParameters) {
                             }
                         } else {
                             LOG_ERROR("Failed to connect to MQTT broker after network recovery");
-                            LOG_INFO("Waiting 30 seconds before next attempt to allow SSL state to clear");
                             vTaskDelay(30000 / portTICK_PERIOD_MS); // Wait 30s after SSL failure
                         }
                     } else {
@@ -333,15 +304,9 @@ void TaskNetworkManager(void *pvParameters) {
             
             mqttClient.loop();
             
-            // Status message every 60 seconds if connected
+            // Status check (no logging to reduce overhead)
             if (currentTime - lastStatusCheck > 60000) {
                 lastStatusCheck = currentTime;
-                
-                // Monitor stack usage during normal operation
-                UBaseType_t stackHighWater = uxTaskGetStackHighWaterMark(NULL);
-                int signalQuality = mqttClient.getSignalQuality();
-                LOG_INFO("System running normally, network connected. Stack: %d bytes, Signal: %d/31", 
-                         stackHighWater, signalQuality);
             }
         }
         
@@ -415,7 +380,7 @@ void TaskWatchdog(void *pvParameters) {
                 // Task crashed - would need to restart, but for now just log
             } else {
                 UBaseType_t stackHighWater = uxTaskGetStackHighWaterMark(TaskCoinDetectorHandle);
-                if (stackHighWater < 256) { // Less than 256 bytes free
+                if (stackHighWater < 512) { // Less than 256 bytes free
                     LOG_WARNING("Coin detector task stack low: %d bytes remaining", stackHighWater);
                 }
             }
@@ -428,7 +393,7 @@ void TaskWatchdog(void *pvParameters) {
                 LOG_ERROR("Button detector task died! State: %d", buttonTaskState);
             } else {
                 UBaseType_t stackHighWater = uxTaskGetStackHighWaterMark(TaskButtonDetectorHandle);
-                if (stackHighWater < 256) {
+                if (stackHighWater < 512) {
                     LOG_WARNING("Button detector task stack low: %d bytes remaining", stackHighWater);
                 }
             }
@@ -457,13 +422,11 @@ void TaskWatchdog(void *pvParameters) {
                        freeHeap, minFreeHeap, totalHeap);
         }
         
-        // Periodic health status (every 5 checks = 50 seconds)
+        // Periodic health check (no logging to reduce overhead)
         static int checkCount = 0;
         checkCount++;
         if (checkCount >= 5) {
             checkCount = 0;
-            LOG_INFO("System health check - Free heap: %d bytes, Min free: %d bytes", 
-                    freeHeap, minFreeHeap);
         }
         
         vTaskDelay(xWatchdogDelay);
@@ -471,7 +434,6 @@ void TaskWatchdog(void *pvParameters) {
 }
 
 void mqtt_callback(char *topic, byte *payload, unsigned int len) {
-    LOG_INFO("Message arrived from topic: %s", topic);
     
     // Handle command topic specially for changing log level or debug commands
     if (String(topic) == COMMAND_TOPIC) {
@@ -667,7 +629,6 @@ void mqtt_callback(char *topic, byte *payload, unsigned int len) {
             }
         }
     } else if (controller) {
-        LOG_DEBUG("Handling MQTT message...");
         controller->handleMqttMessage(topic, payload, len);
     }
 }
@@ -690,50 +651,50 @@ void setup() {
   String environment = prefs.getString(PREFS_ENVIRONMENT, "prod");
   prefs.end();
   
-  bool needsConfiguration = (machineNum == "99"); // Default value means not configured
+//   bool needsConfiguration = (machineNum == "99"); // Default value means not configured
   
-  if (needsConfiguration) {
-    LOG_INFO("Machine NOT configured (machine number: %s)", machineNum.c_str());
-    LOG_INFO("=== INITIAL SETUP MODE ===");
-    LOG_INFO("Starting BLE for initial configuration...");
+//   if (needsConfiguration) {
+//     LOG_INFO("Machine NOT configured (machine number: %s)", machineNum.c_str());
+//     LOG_INFO("=== INITIAL SETUP MODE ===");
+//     LOG_INFO("Starting BLE for initial configuration...");
     
-    // Initialize BLE and wait for configuration
-    if (bleConfigManager->begin()) {
-      LOG_INFO("BLE is now advertising. Please connect to configure the machine.");
-      LOG_INFO("Device name: %s", BLE_DEVICE_NAME);
-      LOG_INFO("Use password: %s (default - should be changed)", DEFAULT_MASTER_PASSWORD);
-      LOG_INFO("Waiting for configuration... MQTT will connect after setup.");
+//     // Initialize BLE and wait for configuration
+//     if (bleConfigManager->begin()) {
+//       LOG_INFO("BLE is now advertising. Please connect to configure the machine.");
+//       LOG_INFO("Device name: %s", BLE_DEVICE_NAME);
+//       LOG_INFO("Use password: %s (default - should be changed)", DEFAULT_MASTER_PASSWORD);
+//       LOG_INFO("Waiting for configuration... MQTT will connect after setup.");
       
-      // Wait for machine number to be changed from default
-      LOG_INFO("Setup will continue once machine number is set via BLE.");
-      unsigned long bleStartTime = millis();
-      // const unsigned long BLE_SETUP_TIMEOUT = 150000; // 2.5 minutes timeout
-      const unsigned long BLE_SETUP_TIMEOUT = 10000; // 10 seconds timeout
+//       // Wait for machine number to be changed from default
+//       LOG_INFO("Setup will continue once machine number is set via BLE.");
+//       unsigned long bleStartTime = millis();
+//       // const unsigned long BLE_SETUP_TIMEOUT = 150000; // 2.5 minutes timeout
+//       const unsigned long BLE_SETUP_TIMEOUT = 10000; // 10 seconds timeout
       
-      while (bleConfigManager->getMachineNumber() == "99") {
-        bleConfigManager->update();
-        delay(1000);
+//       while (bleConfigManager->getMachineNumber() == "99") {
+//         bleConfigManager->update();
+//         delay(1000);
         
-        // Timeout check
-        if (millis() - bleStartTime > BLE_SETUP_TIMEOUT) {
-          LOG_WARNING("BLE setup timeout after 5 minutes. Using default configuration.");
-          break;
-        }
-      }
+//         // Timeout check
+//         if (millis() - bleStartTime > BLE_SETUP_TIMEOUT) {
+//           LOG_WARNING("BLE setup timeout after 5 minutes. Using default configuration.");
+//           break;
+//         }
+//       }
       
-      // Configuration complete
-      machineNum = bleConfigManager->getMachineNumber();
-      environment = bleConfigManager->getEnvironment();
-      LOG_INFO("Configuration received! Machine: %s, Environment: %s", 
-               machineNum.c_str(), environment.c_str());
-    } else {
-      LOG_ERROR("Failed to initialize BLE - using defaults");
-    }
-  } else {
-    LOG_INFO("Machine already configured: %s (environment: %s)", 
-             machineNum.c_str(), environment.c_str());
-    LOG_INFO("Skipping BLE initialization to save memory for MQTT.");
-  }
+//       // Configuration complete
+//       machineNum = bleConfigManager->getMachineNumber();
+//       environment = bleConfigManager->getEnvironment();
+//       LOG_INFO("Configuration received! Machine: %s, Environment: %s", 
+//                machineNum.c_str(), environment.c_str());
+//     } else {
+//       LOG_ERROR("Failed to initialize BLE - using defaults");
+//     }
+//   } else {
+//     LOG_INFO("Machine already configured: %s (environment: %s)", 
+//              machineNum.c_str(), environment.c_str());
+//     LOG_INFO("Skipping BLE initialization to save memory for MQTT.");
+//   }
   
   // Update MQTT topics with the configuration
   updateMQTTTopics(machineNum, environment);
@@ -764,15 +725,12 @@ void setup() {
     LOG_INFO("TCA9535 initialization successful!");
     
     // Configure Port 0 (buttons) as inputs (1 = input, 0 = output)
-    LOG_DEBUG("Configuring Port 0 as inputs...");
     ioExpander.configurePortAsInput(0, 0xFF);
     
     // Configure Port 1 (relays) as outputs (1 = input, 0 = output)
-    LOG_DEBUG("Configuring Port 1 as outputs...");
     ioExpander.configurePortAsOutput(1, 0xFF);
     
     // Initialize all relays to OFF state
-    LOG_DEBUG("Setting all relays to OFF...");
     ioExpander.writeRegister(OUTPUT_PORT1, 0x00);
     
     // Enable interrupt for all input pins (buttons + coin acceptor)
@@ -803,7 +761,7 @@ void setup() {
     xTaskCreate(
         TaskCoinDetector,           // Task function
         "CoinDetector",             // Task name (for debugging)
-        2048,                       // Stack size (bytes)
+        4096,                       // Stack size (bytes)
         NULL,                       // Task parameters
         3,                          // Priority (3 = medium-high priority for hardware)
         &TaskCoinDetectorHandle     // Task handle
@@ -812,7 +770,7 @@ void setup() {
     xTaskCreate(
         TaskButtonDetector,         // Task function
         "ButtonDetector",           // Task name (for debugging)
-        2048,                       // Stack size (bytes)
+        4096,                       // Stack size (bytes)
         NULL,                       // Task parameters
         4,                          // Priority (4 = higher than coin task for responsiveness)
         &TaskButtonDetectorHandle   // Task handle
@@ -857,17 +815,17 @@ void setup() {
   mqttClient.setCallback(mqtt_callback);
   mqttClient.setBufferSize(512);
 
-  // Deinitialize BLE if it was initialized (to free memory for MQTT/SSL)
-  // BLE consumes ~30-40KB of heap which is needed for SSL/TLS handshake
-  if (bleConfigManager && bleConfigManager->isInitialized()) {
-    LOG_INFO("=== Freeing BLE Memory for MQTT ===");
-    LOG_INFO("Current free heap: %d bytes", ESP.getFreeHeap());
-    bleConfigManager->deinit();
-    delay(1000); // Give system time to clean up
-    LOG_INFO("After BLE deinit, free heap: %d bytes", ESP.getFreeHeap());
-    LOG_INFO("BLE deinitialized - memory freed for MQTT/SSL");
-    LOG_INFO("===================================");
-  }
+//   // Deinitialize BLE if it was initialized (to free memory for MQTT/SSL)
+//   // BLE consumes ~30-40KB of heap which is needed for SSL/TLS handshake
+//   if (bleConfigManager && bleConfigManager->isInitialized()) {
+//     LOG_INFO("=== Freeing BLE Memory for MQTT ===");
+//     LOG_INFO("Current free heap: %d bytes", ESP.getFreeHeap());
+//     bleConfigManager->deinit();
+//     delay(1000); // Give system time to clean up
+//     LOG_INFO("After BLE deinit, free heap: %d bytes", ESP.getFreeHeap());
+//     LOG_INFO("BLE deinitialized - memory freed for MQTT/SSL");
+//     LOG_INFO("===================================");
+//   }
 
   // Initialize modem and connect to network (in setup, network task will handle reconnections)
   LOG_INFO("Initializing modem and connecting to network...");
@@ -882,15 +840,9 @@ void setup() {
     if (mqttClient.connect(AWS_BROKER, AWS_BROKER_PORT, AWS_CLIENT_ID.c_str())) {
       LOG_INFO("Connected to MQTT broker!");
       
-      LOG_DEBUG("Subscribing to topic: %s", INIT_TOPIC.c_str());
-      bool result = mqttClient.subscribe(INIT_TOPIC.c_str());
-      LOG_DEBUG("Subscription result: %s", result ? "true" : "false");
-      
-      result = mqttClient.subscribe(CONFIG_TOPIC.c_str());
-      LOG_DEBUG("Subscription result: %s", result ? "true" : "false");
-      
-      result = mqttClient.subscribe(COMMAND_TOPIC.c_str());
-      LOG_DEBUG("Subscription to command topic: %s", result ? "true" : "false");
+      mqttClient.subscribe(INIT_TOPIC.c_str());
+      mqttClient.subscribe(CONFIG_TOPIC.c_str());
+      mqttClient.subscribe(COMMAND_TOPIC.c_str());
       
       delay(4000);
       LOG_INFO("Publishing Setup Action Event...");
@@ -960,29 +912,26 @@ void loop() {
   // Current time
   unsigned long currentTime = millis();
   
-  // Update BLE config manager (check auth timeout, etc.) - only if BLE is still initialized
-  if (bleConfigManager && bleConfigManager->isInitialized() && currentTime - lastBleUpdate > 1000) {
-    lastBleUpdate = currentTime;
-    bleConfigManager->update();
-  }
+//   // Update BLE config manager (check auth timeout, etc.) - only if BLE is still initialized
+//   if (bleConfigManager && bleConfigManager->isInitialized() && currentTime - lastBleUpdate > 1000) {
+//     lastBleUpdate = currentTime;
+//     bleConfigManager->update();
+//   }
   
   // NOTE: Network operations are now handled by TaskNetworkManager
   // No need to check network status or process MQTT messages here
   
-  // Periodically check I/O expander raw values for debugging
-  if (currentTime - lastIoDebugCheck > 4000) {  // Every 4 seconds
-    lastIoDebugCheck = currentTime;
-    LOG_DEBUG("Machine state: %s, Machine loaded: %d, Formatted: %s", 
-             getMachineStateString(controller->getCurrentState()),
-             controller->isMachineLoaded(),
-             controller->getTimestamp().c_str());  
-  }
+    // Periodic check (no logging to reduce overhead)
+    if (currentTime - lastIoDebugCheck > 4000) {  // Every 4 seconds
+        lastIoDebugCheck = currentTime;
+    }
 
   // NOTE: Interrupt handling is now done by FreeRTOS tasks (TaskCoinDetector and TaskButtonDetector)
   // The old ioExpander.handleInterrupt() call is no longer needed
   
   // Run controller update - now processes flags set by FreeRTOS tasks
-  if (currentTime - lastButtonCheck > 50) {
+  // Reduced from 50ms to 20ms for faster button response (matches ButtonDetector rate)
+  if (currentTime - lastButtonCheck > 20) {
     lastButtonCheck = currentTime;
     
     if (controller) {

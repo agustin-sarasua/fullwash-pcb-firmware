@@ -32,9 +32,12 @@ void Logger::setRTCManager(RTCManager* rtc) {
 
 void Logger::getTimestamp(char* buffer, size_t bufferSize) {
     // Try to use RTC if available
-    if (rtcManager && rtcManager->isInitialized() && rtcManager->isTimeValid()) {
+    // NOTE: We don't call isTimeValid() here to avoid recursion - 
+    // that method logs, which would call getTimestamp() again
+    if (rtcManager && rtcManager->isInitialized()) {
         time_t now = rtcManager->getDateTime();
-        if (now > 0) {
+        // Only use RTC time if it's reasonable (after 2020-01-01)
+        if (now > 0 && now >= 1577836800UL) {
             // Format as HH:MM:SS using TimeLib
             int h = hour(now);
             int m = minute(now);

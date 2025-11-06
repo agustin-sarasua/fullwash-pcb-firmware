@@ -29,21 +29,11 @@ CarWashController::CarWashController(MqttLteClient& client)
         xSemaphoreGive(xIoExpanderMutex);
     }
     
-    // EXTENSIVE DEBUG: Log the raw values in different formats
-    LOG_INFO("STARTUP DEBUG - Raw port value: 0x%02X | Binary: %d%d%d%d%d%d%d%d", 
-           rawPortValue0,
-           (rawPortValue0 & 0x80) ? 1 : 0, (rawPortValue0 & 0x40) ? 1 : 0,
-           (rawPortValue0 & 0x20) ? 1 : 0, (rawPortValue0 & 0x10) ? 1 : 0,
-           (rawPortValue0 & 0x08) ? 1 : 0, (rawPortValue0 & 0x04) ? 1 : 0,
-           (rawPortValue0 & 0x02) ? 1 : 0, (rawPortValue0 & 0x01) ? 1 : 0);
-    LOG_INFO("STARTUP DEBUG - COIN_SIG (bit %d) = %d", COIN_SIG, (rawPortValue0 & (1 << COIN_SIG)) ? 1 : 0);
-    
     // Initialize coin signal state correctly
     // When coin is present: Pin is LOW (bit=0) = ACTIVE
     // When no coin: Pin is HIGH (bit=1) = INACTIVE
     bool initialCoinSignal = ((rawPortValue0 & (1 << COIN_SIG)) == 0); // LOW = coin present = ACTIVE
     lastCoinState = initialCoinSignal ? LOW : HIGH; // Store as HIGH/LOW for edge detection
-    LOG_INFO("Coin detector initialized with state: %s", initialCoinSignal ? "ACTIVE (LOW)" : "INACTIVE (HIGH)");
     
     // IMPORTANT: Initialize these static variables to prevent false triggers at startup
     // We'll skip any coin signals that happen in the first 2 seconds after boot
@@ -154,35 +144,60 @@ void CarWashController::handleButtons() {
     // This ensures short presses (that may be missed by raw polling) are handled
     if (ioExpander.isButtonDetected()) {
         uint8_t detectedId = ioExpander.getDetectedButtonId();
-        ioExpander.clearButtonFlag();
+        bool buttonProcessed = false;
+
+        // Explicit check: Buttons should not work when machine is FREE
+        // This ensures buttons are ignored even if config.isLoaded is somehow true
+        if (currentState == STATE_FREE) {
+            LOG_WARNING("Button %d press ignored - machine is FREE (config.isLoaded=%d)", 
+                       detectedId + 1, config.isLoaded);
+            ioExpander.clearButtonFlag();
+            return; // Skip processing and raw polling
+        }
 
         // Function buttons (0..NUM_BUTTONS-2)
         if (detectedId < NUM_BUTTONS - 1) {
-            LOG_INFO("Button %d detected via flag", detectedId + 1);
             if (config.isLoaded) {
-                LOG_INFO("Flag press: state=%d, activeButton=%d, tokens=%d",
-                         currentState, activeButton, config.tokens);
                 if (currentState == STATE_IDLE) {
                     activateButton(detectedId, MANUAL);
+                    buttonProcessed = true;
                 } else if (currentState == STATE_RUNNING && (int)detectedId == activeButton) {
                     pauseMachine();
+                    buttonProcessed = true;
                 } else if (currentState == STATE_PAUSED) {
                     resumeMachine(detectedId);
+                    buttonProcessed = true;
+                } else if (currentState == STATE_FREE) {
+                    // This should never happen due to early return above, but keep for safety
+                    LOG_WARNING("Flag press on button %d ignored - machine is FREE", detectedId + 1);
+                    buttonProcessed = true; // Clear flag
                 } else {
                     LOG_WARNING("Flag press on button %d ignored. State=%d, activeButton=%d",
                                 detectedId + 1, currentState, activeButton);
+                    // Config is loaded but state is wrong - clear flag to prevent infinite retries
+                    buttonProcessed = true; // Mark as "processed" (even though ignored) to clear flag
                 }
             } else {
-                LOG_WARNING("Button flag ignored - config not loaded");
+                LOG_WARNING("Button flag ignored - config not loaded, will retry on next update");
+                // Don't clear flag - keep it so we can process it when config is loaded
+                return; // Skip raw polling and return early
             }
         } else if (detectedId == NUM_BUTTONS - 1) {
             // Stop button
-            LOG_INFO("STOP button detected via flag");
             if (config.isLoaded) {
                 stopMachine(MANUAL);
+                buttonProcessed = true;
             } else {
-                LOG_WARNING("STOP button flag ignored - config not loaded");
+                LOG_WARNING("STOP button flag ignored - config not loaded, will retry on next update");
+                // Don't clear flag - keep it so we can process it when config is loaded
+                return; // Skip raw polling and return early
             }
+        }
+
+        // Only clear the flag if we successfully processed the button
+        // This prevents losing button presses when machine is in wrong state
+        if (buttonProcessed) {
+            ioExpander.clearButtonFlag();
         }
 
         // We've handled a flagged press; skip raw polling this cycle
@@ -219,34 +234,24 @@ void CarWashController::handleButtons() {
                 lastDebounceTime[i] = millis();
                 lastButtonState[i] = LOW;  // Now pressed (active LOW)
                 
-                LOG_INFO("Button %d pressed and debounced!", i+1);
+                // Explicit check: Buttons should not work when machine is FREE
+                if (currentState == STATE_FREE) {
+                    continue; // Skip this button, check others
+                }
                 
                 // Process button action
                 if (config.isLoaded) {
-                    LOG_INFO("Button %d: config.isLoaded=true, currentState=%d, tokens=%d", 
-                            i+1, currentState, config.tokens);
                     if (currentState == STATE_IDLE) {
-                        LOG_INFO("Activating button %d in IDLE state", i+1);
                         activateButton(i, MANUAL);
                     } else if (currentState == STATE_RUNNING && i == activeButton) {
-                        LOG_INFO("Pausing machine - same button pressed while running");
                         pauseMachine();
                     } else if (currentState == STATE_PAUSED) {
-                        LOG_INFO("Resuming machine with button %d", i+1);
                         resumeMachine(i);
-                    } else {
-                        LOG_WARNING("Button %d pressed but no action taken. State=%d, activeButton=%d", 
-                                   i+1, currentState, activeButton);
                     }
-                } else {
-                    LOG_WARNING("Button press ignored - config not loaded! (config.isLoaded=false)");
                 }
             }
         } else {
             // Button is released
-            if (lastButtonState[i] == LOW) {
-                Serial.printf("Button %d RELEASED\n", i+1);
-            }
             lastButtonState[i] = HIGH;  // Not pressed (idle HIGH)
         }
     }
@@ -268,57 +273,37 @@ void CarWashController::handleButtons() {
             lastDebounceTime[NUM_BUTTONS-1] = millis();
             lastButtonState[NUM_BUTTONS-1] = LOW;  // Now pressed (active LOW)
             
-            // Print debug info
-            Serial.printf("** STOP BUTTON PRESSED AND DEBOUNCED **\n");
-            LOG_INFO("STOP button pressed and debounced!");
-            
             // Process button action - stop button should log out user whenever machine is loaded
             if (config.isLoaded) {
-                LOG_INFO("Logging out user via STOP button (currentState=%d)", currentState);
                 stopMachine(MANUAL);
-            } else {
-                LOG_WARNING("STOP button pressed but ignored - machine not loaded (config.isLoaded=false)");
             }
         }
     } else {
         // Button is released
-        if (lastButtonState[NUM_BUTTONS-1] == LOW) {
-            Serial.printf("STOP Button RELEASED\n");
-        }
         lastButtonState[NUM_BUTTONS-1] = HIGH;  // Not pressed (idle HIGH)
     }
 }
 
 void CarWashController::pauseMachine() {
-    LOG_INFO("Pausing machine");
     if (activeButton >= 0) {
-        // Read relay state before deactivation
         extern IoExpander ioExpander;
-        uint8_t relayStateBefore = 0;
-        uint8_t relayStateAfter = 0;
         
         if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            relayStateBefore = ioExpander.readRegister(OUTPUT_PORT1);
-            LOG_DEBUG("Pausing - Relay port state before: 0x%02X", relayStateBefore);
-            
             // Turn off the active relay
             ioExpander.setRelay(RELAY_INDICES[activeButton], false);
             
             // Verify relay state after deactivation
-            relayStateAfter = ioExpander.readRegister(OUTPUT_PORT1);
+            uint8_t relayStateAfter = ioExpander.readRegister(OUTPUT_PORT1);
             xSemaphoreGive(xIoExpanderMutex);
+            
+            // Check relay bit is actually cleared
+            bool relayBitCleared = (relayStateAfter & (1 << RELAY_INDICES[activeButton])) == 0;
+            if (!relayBitCleared) {
+                LOG_ERROR("Failed to deactivate relay %d for pause!", activeButton+1);
+            }
         } else {
             LOG_WARNING("Failed to acquire IO expander mutex in pauseMachine()");
             return;
-        }
-        LOG_DEBUG("Pausing - Relay port state after: 0x%02X", relayStateAfter);
-        
-        // Check relay bit is actually cleared
-        bool relayBitCleared = (relayStateAfter & (1 << RELAY_INDICES[activeButton])) == 0;
-        if (relayBitCleared) {
-            LOG_DEBUG("Relay %d successfully deactivated for pause", activeButton+1);
-        } else {
-            LOG_ERROR("Failed to deactivate relay %d for pause!", activeButton+1);
         }
     }
     currentState = STATE_PAUSED;
@@ -331,36 +316,26 @@ void CarWashController::pauseMachine() {
 }
 
 void CarWashController::resumeMachine(int buttonIndex) {
-    LOG_INFO("Resuming machine with button %d", buttonIndex+1);
     activeButton = buttonIndex;
     
-    // Turn on the corresponding relay when resuming
     extern IoExpander ioExpander;
-    uint8_t relayStateBefore = 0;
-    uint8_t relayStateAfter = 0;
     
     if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        relayStateBefore = ioExpander.readRegister(OUTPUT_PORT1);
-        LOG_DEBUG("Resuming - Relay port state before: 0x%02X", relayStateBefore);
-       
         // Turn on the relay for the active button
         ioExpander.setRelay(RELAY_INDICES[buttonIndex], true);
         
         // Verify relay state after activation
-        relayStateAfter = ioExpander.readRegister(OUTPUT_PORT1);
+        uint8_t relayStateAfter = ioExpander.readRegister(OUTPUT_PORT1);
         xSemaphoreGive(xIoExpanderMutex);
+        
+        // Check if relay bit was actually set
+        bool relayBitSet = (relayStateAfter & (1 << RELAY_INDICES[buttonIndex])) != 0;
+        if (!relayBitSet) {
+            LOG_ERROR("Failed to activate relay %d for resume!", buttonIndex+1);
+        }
     } else {
         LOG_WARNING("Failed to acquire IO expander mutex in resumeMachine()");
         return;
-    }
-    LOG_DEBUG("Resuming - Relay port state after: 0x%02X", relayStateAfter);
-    
-    // Check if relay bit was actually set
-    bool relayBitSet = (relayStateAfter & (1 << RELAY_INDICES[buttonIndex])) != 0;
-    if (relayBitSet) {
-        LOG_DEBUG("Relay %d successfully activated for resume", buttonIndex+1);
-    } else {
-        LOG_ERROR("Failed to activate relay %d for resume!", buttonIndex+1);
     }
     
     currentState = STATE_RUNNING;
@@ -376,32 +351,23 @@ void CarWashController::stopMachine(TriggerType triggerType) {
     int buttonToStop = activeButton;
     
     if (activeButton >= 0) {
-        // Add relay state debugging
         extern IoExpander ioExpander;
-        uint8_t relayStateBefore = 0;
-        uint8_t relayStateAfter = 0;
         
         if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            relayStateBefore = ioExpander.readRegister(OUTPUT_PORT1);
-            LOG_DEBUG("Stopping - Relay port state before: 0x%02X", relayStateBefore);
-            
             // Turn off the active relay
             ioExpander.setRelay(RELAY_INDICES[activeButton], false);
             
             // Verify relay state after deactivation
-            relayStateAfter = ioExpander.readRegister(OUTPUT_PORT1);
+            uint8_t relayStateAfter = ioExpander.readRegister(OUTPUT_PORT1);
             xSemaphoreGive(xIoExpanderMutex);
+            
+            // Check relay bit is actually cleared
+            bool relayBitCleared = (relayStateAfter & (1 << RELAY_INDICES[activeButton])) == 0;
+            if (!relayBitCleared) {
+                LOG_ERROR("Failed to deactivate relay %d for stop!", activeButton+1);
+            }
         } else {
             LOG_WARNING("Failed to acquire IO expander mutex in stopMachine()");
-        }
-        LOG_DEBUG("Stopping - Relay port state after: 0x%02X", relayStateAfter);
-        
-        // Check relay bit is actually cleared
-        bool relayBitCleared = (relayStateAfter & (1 << RELAY_INDICES[activeButton])) == 0;
-        if (relayBitCleared) {
-            LOG_DEBUG("Relay %d successfully deactivated for stop", activeButton+1);
-        } else {
-            LOG_ERROR("Failed to deactivate relay %d for stop!", activeButton+1);
         }
     }
     
@@ -419,54 +385,42 @@ void CarWashController::stopMachine(TriggerType triggerType) {
 }
 
 void CarWashController::activateButton(int buttonIndex, TriggerType triggerType) {
-    LOG_INFO("Activating button: %d (triggerType=%s)", buttonIndex+1, triggerType == MANUAL ? "MANUAL" : "AUTOMATIC");
-
     if (config.tokens <= 0) {
         LOG_WARNING("Cannot activate button %d - no tokens left (tokens=%d)", buttonIndex+1, config.tokens);
         return;
     }
-    
-    LOG_INFO("Activating button %d: tokens=%d, state=%d -> STATE_RUNNING", buttonIndex+1, config.tokens, currentState);
 
+    // CRITICAL: Update lastActionTime IMMEDIATELY when button is pressed
+    // This resets the inactivity timeout right away, ensuring the display updates correctly
+    unsigned long currentTime = millis();
+    lastActionTime = currentTime;
+    
     digitalWrite(RUNNING_LED_PIN, HIGH);
     currentState = STATE_RUNNING;
     activeButton = buttonIndex;
+    tokenStartTime = currentTime;
+    tokenTimeElapsed = 0;
     
-    // Debug before turning on relay
-    LOG_DEBUG("Attempting to activate relay %d (relay index: %d)", buttonIndex+1, RELAY_INDICES[buttonIndex]);
-    
-    // Read current relay state before activation
     extern IoExpander ioExpander;
-    uint8_t relayStateBefore = 0;
-    uint8_t relayStateAfter = 0;
     
     if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        relayStateBefore = ioExpander.readRegister(OUTPUT_PORT1);
-        LOG_DEBUG("Relay port state before activation: 0x%02X", relayStateBefore);
-        
         // Turn on the corresponding relay
         ioExpander.setRelay(RELAY_INDICES[buttonIndex], true);
         
         // Verify relay state after activation
-        relayStateAfter = ioExpander.readRegister(OUTPUT_PORT1);
+        uint8_t relayStateAfter = ioExpander.readRegister(OUTPUT_PORT1);
         xSemaphoreGive(xIoExpanderMutex);
+        
+        // Check if relay bit was actually set
+        bool relayBitSet = (relayStateAfter & (1 << RELAY_INDICES[buttonIndex])) != 0;
+        if (!relayBitSet) {
+            LOG_ERROR("Failed to activate relay %d! Bit %d not set", buttonIndex+1, RELAY_INDICES[buttonIndex]);
+        }
     } else {
         LOG_WARNING("Failed to acquire IO expander mutex in activateButton()");
-        return;
+        // Even if mutex fails, we've already updated state and lastActionTime
+        // The relay activation will be retried on next update cycle if needed
     }
-    LOG_DEBUG("Relay port state after activation: 0x%02X", relayStateAfter);
-    
-    // Check if relay bit was actually set
-    bool relayBitSet = (relayStateAfter & (1 << RELAY_INDICES[buttonIndex])) != 0;
-    if (relayBitSet) {
-        LOG_DEBUG("Relay %d successfully activated (bit %d set)", buttonIndex+1, RELAY_INDICES[buttonIndex]);
-    } else {
-        LOG_ERROR("Failed to activate relay %d! Bit %d not set", buttonIndex+1, RELAY_INDICES[buttonIndex]);
-    }
-    
-    lastActionTime = millis();
-    tokenStartTime = millis();
-    tokenTimeElapsed = 0;
     
     // Prioritize using physical tokens first
     if (config.physicalTokens > 0) {
@@ -519,8 +473,6 @@ void CarWashController::handleCoinAcceptor() {
         lastCoinProcessedTime = currentTime; // Reset cooldown timer
         startupEndTime = currentTime;
         startupPeriod = false;
-        LOG_INFO("Coin detector startup period over, now actively monitoring");
-        LOG_INFO("Coin signal state re-initialized: %s", initialCoinSignal ? "ACTIVE (LOW)" : "INACTIVE (HIGH)");
         return; // Skip this cycle to avoid immediate false detection
     }
     
@@ -540,9 +492,6 @@ void CarWashController::handleCoinAcceptor() {
     
     // FIXED: Check if the interrupt handler detected a coin signal
     if (ioExpander.isCoinSignalDetected()) {
-        LOG_INFO("Interrupt-based coin signal detected!");
-        
-        // Read the current state to get more details
         uint8_t rawPortValue0 = 0;
         if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
             rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
@@ -553,21 +502,9 @@ void CarWashController::handleCoinAcceptor() {
             return;
         }
         
-        // For your hardware configuration, 3.3V = active coin, 0.05V = no coin
-        // When a coin passes (3.3V), the TCA9535 reads LOW (bit=0)
-        // When no coin is present (0.05V), the TCA9535 reads HIGH (bit=1)
-        bool coinSignalActive = ((rawPortValue0 & (1 << COIN_SIG)) == 0);
-        
-        LOG_DEBUG("Coin signal state: %s", 
-                coinSignalActive ? "ACTIVE (LOW/0 - coin present)" : "INACTIVE (HIGH/1 - no coin)");
-        
         // Only process the coin if it's been long enough since the last coin
         if (currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
-            LOG_INFO("Processing coin from interrupt detection");
             processCoinInsertion(currentTime);
-        } else {
-            LOG_INFO("Ignoring coin signal - too soon after last coin (%lu ms)",
-                    currentTime - lastCoinProcessedTime);
         }
         
         return;
@@ -601,10 +538,6 @@ void CarWashController::handleCoinAcceptor() {
     bool lastCoinStateBool = (lastCoinState == LOW);
     
     if (coinSignalActive != lastCoinStateBool) {
-        LOG_INFO("Coin signal edge: %s -> %s", 
-                lastCoinStateBool ? "ACTIVE (coin present, LOW/0)" : "INACTIVE (no coin, HIGH/1)", 
-                coinSignalActive ? "ACTIVE (coin present, LOW/0)" : "INACTIVE (no coin, HIGH/1)");
-        
         unsigned long timeSinceLastEdge = currentTime - lastEdgeTime;
         lastEdgeTime = currentTime;
         
@@ -620,9 +553,6 @@ void CarWashController::handleCoinAcceptor() {
             
             if (edgeCount >= COIN_MIN_EDGES && windowDuration < COIN_EDGE_WINDOW && 
                 currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
-                
-                LOG_INFO("Detected coin pattern: %d edges in %lu ms window", 
-                        edgeCount, windowDuration);
                 
                 processCoinInsertion(currentTime);
                 edgeCount = 0;
@@ -641,16 +571,10 @@ void CarWashController::handleCoinAcceptor() {
         // We detect when the pin goes from INACTIVE (HIGH) to ACTIVE (LOW)
         // This is the primary detection method - single falling edge
         if (coinSignalActive && !lastCoinStateBool) {
-            LOG_INFO("COIN INSERTED - Pin went from INACTIVE (HIGH/1) to ACTIVE (LOW/0)");
-            
             if (currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
-                LOG_INFO("Processing coin insertion");
                 processCoinInsertion(currentTime);
                 edgeCount = 0; // Reset edge count after valid coin
                 edgeWindowStart = 0; // Reset window
-            } else {
-                LOG_DEBUG("Ignoring coin signal - too soon after last coin (%lu ms ago)",
-                        currentTime - lastCoinProcessedTime);
             }
         }
         
@@ -660,37 +584,22 @@ void CarWashController::handleCoinAcceptor() {
     
     // Reset edge detection if it's been too long
     if (edgeCount > 0 && currentTime - edgeWindowStart > 1000) {
-        LOG_DEBUG("Resetting incomplete edge pattern after timeout");
         edgeCount = 0;
         edgeWindowStart = 0;
-    }
-    
-    // Periodic debug logging
-    static unsigned long lastDebugTime = 0;
-    if (currentTime - lastDebugTime > 5000) {
-        lastDebugTime = currentTime;
-        LOG_DEBUG("Coin acceptor: Signal=%s, EdgeCount=%d, LastProcess=%lums ago", 
-                coinSignalActive ? "ACTIVE (LOW/0)" : "INACTIVE (HIGH/1)",
-                edgeCount,
-                currentTime - lastCoinProcessedTime);
     }
 }
 
 // Helper method to handle the business logic of a coin insertion
 void CarWashController::processCoinInsertion(unsigned long currentTime) {
-    LOG_INFO("Coin detected!");
-    
     // Update activity tracking - crucial for debouncing and cooldown periods
     lastActionTime = currentTime;
     lastCoinProcessedTime = currentTime; // This is critical for the cooldown between coins
     
     // Update or create session
     if (config.isLoaded) {
-        LOG_INFO("Adding physical token to existing session");
         config.physicalTokens++;
         config.tokens++;
     } else {
-        LOG_INFO("Creating new manual session from coin insertion");
         
         char sessionIdBuffer[30];
         sprintf(sessionIdBuffer, "manual_%lu", currentTime);
@@ -712,37 +621,43 @@ void CarWashController::processCoinInsertion(unsigned long currentTime) {
 void CarWashController::update() {
     // Serial.println("CarWashController::update");
     
-    // Always publish periodic state even if not configured
-    // This allows monitoring of machine status before initialization
     unsigned long currentTime = millis();
-    publishPeriodicState();
     
-    // Skip session-related updates if not initialized
-    if (config.timestamp == "") {
-        return;
-    }
-    
-    // Handle buttons and coin acceptor
-    handleButtons();
-    handleCoinAcceptor();
-    
-    if (currentState == STATE_RUNNING) {
-        unsigned long totalElapsedTime = tokenTimeElapsed + (currentTime - tokenStartTime);
-        if (totalElapsedTime >= TOKEN_TIME) {
-            LOG_INFO("Token expired");
-            tokenExpired();
+    // PRIORITY 0: Check inactivity timeout FIRST (highest priority - must happen immediately)
+    // This ensures logout happens as soon as timeout is reached, before any other operations
+    // CRITICAL: Check this before anything else to prevent delays from blocking operations
+    if (currentState != STATE_FREE && config.isLoaded) {
+        unsigned long elapsedTime = currentTime - lastActionTime;
+        if (elapsedTime >= USER_INACTIVE_TIMEOUT) {
+            stopMachine(AUTOMATIC);
+            // Return immediately after logout to ensure state change is processed
+            // This prevents any blocking operations (like network I/O) from delaying the logout
             return;
         }
     }
     
-    if (currentTime - lastActionTime > USER_INACTIVE_TIMEOUT && currentState != STATE_FREE) {
-        LOG_INFO("Stopping machine due to user inactivity");
-        stopMachine(AUTOMATIC);
+    // PRIORITY 1: Handle buttons and coin acceptor (time-critical, must be responsive)
+    // Skip session-related updates if not initialized
+    if (config.timestamp != "") {
+        handleButtons();
+        handleCoinAcceptor();
     }
+    
+    // PRIORITY 2: Handle state machine timeouts (time-critical)
+    if (currentState == STATE_RUNNING) {
+        unsigned long totalElapsedTime = tokenTimeElapsed + (currentTime - tokenStartTime);
+        if (totalElapsedTime >= TOKEN_TIME) {
+            tokenExpired();
+            // Don't return here - still publish state after token expires
+        }
+    }
+    
+    // PRIORITY 3: Publish periodic state LAST (non-critical, can wait, may block for network I/O)
+    // This allows monitoring of machine status even before initialization
+    publishPeriodicState();
 }
 
 void CarWashController::publishMachineSetupActionEvent() {
-    LOG_INFO("Publishing Machine Setup Action Event");
 
     StaticJsonDocument<512> doc;
     doc["machine_id"] = MACHINE_ID;
@@ -789,33 +704,37 @@ unsigned long CarWashController::getSecondsLeft() {
 }
 
 String CarWashController::getTimestamp() {
-    // PRIORITY 1: Use RTC if available, initialized, AND time is valid
-    if (rtcManager && rtcManager->isInitialized() && rtcManager->isTimeValid()) {
+    // PRIORITY 1: Use RTC if available and initialized (even if time validation fails)
+    // This ensures we always have a current timestamp for state updates
+    if (rtcManager && rtcManager->isInitialized()) {
         String rtcTimestamp = rtcManager->getTimestampWithMillis();
-        LOG_DEBUG("Using RTC timestamp: %s", rtcTimestamp.c_str());
-        return rtcTimestamp;
+        // Only use RTC if it returns a valid timestamp (not "RTC Error")
+        if (rtcTimestamp != "RTC Error" && rtcTimestamp.length() > 0) {
+            // Log warning if time is invalid but still use it (better than placeholder)
+            if (!rtcManager->isTimeValid()) {
+                static bool rtcWarningLogged = false;
+                if (!rtcWarningLogged) {
+                    rtcWarningLogged = true;
+                    LOG_WARNING("RTC time is invalid but using it anyway (better than placeholder)");
+                }
+            }
+            return rtcTimestamp;
+        }
     }
     
-    // Log why RTC is not being used
-    if (rtcManager && rtcManager->isInitialized() && !rtcManager->isTimeValid()) {
-        time_t rtcTime = rtcManager->getDateTime();
-        LOG_WARNING("RTC is initialized but time is invalid (epoch: %lu). Falling back to millis() based timestamp", 
-                   (unsigned long)rtcTime);
-        LOG_WARNING("RTC timestamp would be: %s", rtcManager->getTimestampWithMillis().c_str());
-    } else if (!rtcManager || !rtcManager->isInitialized()) {
-        LOG_DEBUG("RTC not available or not initialized, using millis() based timestamp");
-    }
-    
-    // FALLBACK: Use millis()-based calculation if RTC is not available or invalid
-    LOG_DEBUG("Raw timestamp: %s", config.timestamp.c_str());
-    LOG_DEBUG("Timestamp millis: %lu", config.timestampMillis);
-    LOG_DEBUG("Current millis: %lu", millis());
-    
-    // If timestamp is empty, return early
+    // FALLBACK: Use millis()-based calculation if RTC is not available
+    // If timestamp is empty, we can't calculate relative time, so use RTC even if invalid
     if (config.timestamp.length() == 0) {
-        LOG_WARNING("Cannot generate timestamp: RTC time invalid and config.timestamp is empty. "
-                   "Machine needs to receive INIT or CONFIG message to set timestamp.");
-        // Return a placeholder that indicates the issue
+        // Try RTC one more time even if not validated - better than 2000 placeholder
+        if (rtcManager && rtcManager->isInitialized()) {
+            String rtcTimestamp = rtcManager->getTimestampWithMillis();
+            if (rtcTimestamp != "RTC Error" && rtcTimestamp.length() > 0) {
+                LOG_WARNING("Using RTC timestamp without server sync (config.timestamp empty)");
+                return rtcTimestamp;
+            }
+        }
+        // Last resort: return placeholder but log error
+        LOG_ERROR("Cannot generate timestamp: RTC not available and config.timestamp is empty");
         return "2000-01-01T00:00:00.000Z";  // Invalid timestamp placeholder
     }
     
@@ -847,10 +766,6 @@ String CarWashController::getTimestamp() {
         microseconds = ts.substring(dotPos+1, plusPos).toInt();
     }
     
-    // Debug the parsed components
-    LOG_DEBUG("Parsed: %d-%02d-%02d %02d:%02d:%02d.%06ld", 
-              year, month, day, hour, minute, second, microseconds);
-    
     // Set up the time structure
     tmElements_t tm;
     tm.Year = year - 1970;
@@ -862,7 +777,6 @@ String CarWashController::getTimestamp() {
     
     // Convert to epoch time
     time_t serverEpoch = makeTime(tm);
-    LOG_DEBUG("Server epoch: %lu", (unsigned long)serverEpoch);
     
     // Calculate time elapsed since timestamp was set
     // Handle millis() overflow safely (overflow occurs every ~50 days on ESP32)
@@ -884,13 +798,9 @@ String CarWashController::getTimestamp() {
             // This could indicate a serious problem (power loss, system restart, etc.)
             if (millisOffset > 86400000UL * 2) {  // 2 days in milliseconds
                 LOG_ERROR("Timestamp calculation error: millis() overflow detected and timestamp appears stale (>2 days)");
-                // Still return the calculation, but log the warning
-            } else {
-                LOG_DEBUG("Millis overflow detected, calculated offset: %lu ms", millisOffset);
             }
         }
     }
-    LOG_DEBUG("Millis offset: %lu", millisOffset);
     
     // Adjust the time with the elapsed milliseconds
     time_t adjustedTime = serverEpoch + (millisOffset / 1000);
@@ -909,8 +819,6 @@ String CarWashController::getTimestamp() {
     sprintf(isoTimestamp, "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
             adjustedTm.Year + 1970, adjustedTm.Month, adjustedTm.Day,
             adjustedTm.Hour, adjustedTm.Minute, adjustedTm.Second, milliseconds);
-    
-    LOG_DEBUG("Formatted timestamp (millis-based): %s", isoTimestamp);
     
     return String(isoTimestamp);
 }
@@ -938,7 +846,6 @@ void CarWashController::publishCoinInsertedEvent() {
 
 // Debug method to directly simulate a coin insertion
 void CarWashController::simulateCoinInsertion() {
-    LOG_INFO("Simulating coin insertion (DEBUG METHOD)");
     processCoinInsertion(millis());
 }
 
@@ -972,12 +879,11 @@ void CarWashController::publishActionEvent(int buttonIndex, MachineAction machin
 
 void CarWashController::publishPeriodicState(bool force) {
     if (force || millis() - lastStatePublishTime >= STATE_PUBLISH_INTERVAL) {
-        LOG_INFO("Publishing Periodic State");
         StaticJsonDocument<512> doc;
         doc["machine_id"] = MACHINE_ID;
-        doc["timestamp"] = getTimestamp();
+        String timestamp = getTimestamp();
+        doc["timestamp"] = timestamp;
         doc["status"] = getMachineStateString(currentState);
-        LOG_DEBUG("Status: %s", doc["status"].as<String>().c_str());
 
         if (config.isLoaded) {
             JsonObject sessionMetadata = doc.createNestedObject("session_metadata");
@@ -996,7 +902,15 @@ void CarWashController::publishPeriodicState(bool force) {
 
         String jsonString;
         serializeJson(doc, jsonString);
-        mqttClient.publish(STATE_TOPIC.c_str(), jsonString.c_str(), QOS0_AT_MOST_ONCE);
+        
+        // Log state publish attempt for debugging
+        LOG_DEBUG("Publishing state: status=%s, timestamp=%s", 
+                  getMachineStateString(currentState).c_str(), timestamp.c_str());
+        
+        bool published = mqttClient.publish(STATE_TOPIC.c_str(), jsonString.c_str(), QOS0_AT_MOST_ONCE);
+        if (!published) {
+            LOG_WARNING("Failed to publish state update to MQTT");
+        }
 
         lastStatePublishTime = millis();
     }
@@ -1030,12 +944,20 @@ unsigned long CarWashController::getTimeToInactivityTimeout() const {
         return 0;
     }
     
-    unsigned long elapsedTime = millis() - lastActionTime;
+    unsigned long currentTime = millis();
+    unsigned long elapsedTime = currentTime - lastActionTime;
+    unsigned long remaining = (elapsedTime >= USER_INACTIVE_TIMEOUT) ? 0 : (USER_INACTIVE_TIMEOUT - elapsedTime);
+    
+    // No logging to reduce overhead
+    
+    // Return 0 when elapsed >= timeout (matches the >= check in update())
+    // This ensures display shows 00:00 exactly when logout happens
     if (elapsedTime >= USER_INACTIVE_TIMEOUT) {
         return 0;
     }
     
-    return USER_INACTIVE_TIMEOUT - elapsedTime;
+    // Return remaining time in milliseconds
+    return remaining;
 }
 
 // getTokensLeft and getUserName are implemented as inline methods in the header
