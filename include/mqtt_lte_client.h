@@ -37,6 +37,10 @@ public:
     void setBufferSize(size_t size);
     void reconnect();
     
+    // Connectivity management
+    void notifyPublishFailure();  // Call this when publish fails to trigger connectivity check
+    void forceConnectivityCheck();  // Force an immediate connectivity check
+    
     // Network diagnostics
     String getLocalIP();
     int getSignalQuality();
@@ -64,6 +68,11 @@ private:
     unsigned long _lastReconnectAttempt = 0;
     int _reconnectInterval = 5000; // Start with 5 seconds
     int _consecutiveFailures = 0; // Track consecutive SSL failures
+    
+    // Publish failure tracking for smart connectivity checking
+    int _consecutivePublishFailures = 0;  // Track consecutive publish failures
+    unsigned long _lastPublishFailureTime = 0;  // When last publish failure occurred
+    unsigned long _lastForcedConnectivityCheck = 0;  // When we last forced a connectivity check
     
     // Network configuration
     const char* _apn;

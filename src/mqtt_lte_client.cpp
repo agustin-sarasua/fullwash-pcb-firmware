@@ -465,7 +465,8 @@ bool MqttLteClient::connect(const char* broker, uint16_t port, const char* clien
             Serial.println("connected");
         }
         _mqttConnected = true;
-        _consecutiveFailures = 0; // Reset failure counter on success
+        _consecutiveFailures = 0; // Reset SSL failure counter on success
+        _consecutivePublishFailures = 0; // Reset publish failure counter on success
         if (_mutex) xSemaphoreGiveRecursive(_mutex);
         return true;
     } else {
@@ -569,7 +570,8 @@ void MqttLteClient::reconnect() {
             Serial.println("connected");
         }
         _mqttConnected = true;
-        _consecutiveFailures = 0; // Reset on success
+        _consecutiveFailures = 0; // Reset SSL failure counter on success
+        _consecutivePublishFailures = 0; // Reset publish failure counter on success
         
         // Re-subscribe to all previously subscribed topics
         for (const String& topic : _subscribedTopics) {
@@ -622,6 +624,7 @@ bool MqttLteClient::publish(const char* topic, const char* payload, const uint8_
         
         ok = _mqttClient->publish(topic, payload);
         if (!ok) {
+            notifyPublishFailure();  // Track failure for smart connectivity checking
             if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
                 Serial.print("[MQTT ERROR] Failed to publish to ");
                 Serial.print(topic);
@@ -632,11 +635,14 @@ bool MqttLteClient::publish(const char* topic, const char* payload, const uint8_
                 Serial.println(")");
             }
         } else {
+            // Reset failure counter on success
+            _consecutivePublishFailures = 0;
             if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
                 Serial.println("[MQTT TX] ✓ Message sent successfully");
             }
         }
     } else {
+        notifyPublishFailure();  // Track failure even when not connected
         if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
             Serial.print("[MQTT ERROR] Cannot publish to ");
             Serial.print(topic);
@@ -688,16 +694,20 @@ bool MqttLteClient::publishNonBlocking(const char* topic, const char* payload, c
         
         ok = _mqttClient->publish(topic, payload);
         if (!ok) {
+            notifyPublishFailure();  // Track failure for smart connectivity checking
             if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
                 Serial.print("[MQTT] Non-blocking publish failed to ");
                 Serial.println(topic);
             }
         } else {
+            // Reset failure counter on success
+            _consecutivePublishFailures = 0;
             if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
                 Serial.println("[MQTT TX] ✓ Non-blocking message sent successfully");
             }
         }
     } else {
+        notifyPublishFailure();  // Track failure even when not connected
         if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
             Serial.println("[MQTT TX] Non-blocking publish skipped (not connected)");
         }
@@ -751,10 +761,19 @@ void MqttLteClient::loop() {
     static unsigned long lastGprsKeepAlive = 0;
     static bool wasConnected = false;
     
-    // Check connection status more frequently to detect issues early
+    // SMART CONNECTIVITY CHECKING: Check less frequently when things are working
+    // - When connected and no failures: check every 30 seconds (reduced from 5s)
+    // - When failures occur: check more frequently (handled by forceConnectivityCheck)
+    unsigned long checkInterval = 30000;  // Default: 30 seconds when things are working
+    if (_consecutivePublishFailures > 0) {
+        // If there are failures, check more frequently
+        checkInterval = 5000;  // 5 seconds when failures detected
+    }
+    
+    // Check connection status - reduced frequency to avoid mutex contention
     // Do this WITHOUT mutex to avoid blocking publisher
     bool currentlyConnected = false;
-    if (millis() - lastConnectionCheck > 5000) {  // Check every 5 seconds
+    if (millis() - lastConnectionCheck > checkInterval) {
         lastConnectionCheck = millis();
         
         // Quick check without mutex - use cached state if mutex is busy
@@ -803,9 +822,12 @@ void MqttLteClient::loop() {
             // Don't call reconnect() here - let it be called from NetworkManager
             // This prevents potential blocking in the loop() function
         } else if (currentlyConnected) {
-            // Reset failure counter when connected
+            // Reset failure counters when connected
             if (_consecutiveFailures > 0) {
                 _consecutiveFailures = 0;
+            }
+            if (_consecutivePublishFailures > 0) {
+                _consecutivePublishFailures = 0;
             }
         }
     } else {
@@ -937,11 +959,18 @@ bool MqttLteClient::isNetworkConnected() {
     static unsigned long lastCheckTime = 0;
     
     if (_modem) {
-        // CRITICAL FIX: Don't check network status too frequently
-        // Checking GPRS status requires AT commands that can interfere with MQTT
-        // Only check every 10 seconds minimum (increased from 5s to reduce interference)
+        // SMART CONNECTIVITY CHECKING: Check less frequently when things are working
+        // - When connected and no failures: check every 60 seconds (increased from 10s)
+        // - When failures occur or forced check: check immediately
         unsigned long now = millis();
-        if (now - lastCheckTime < 10000 && lastCheckTime > 0) {
+        unsigned long minCheckInterval = 60000;  // Default: 60 seconds when things are working
+        
+        // If there are publish failures or a forced check was requested, check more frequently
+        if (_consecutivePublishFailures >= 3 || (now - _lastForcedConnectivityCheck < 10000)) {
+            minCheckInterval = 5000;  // 5 seconds when failures detected
+        }
+        
+        if (now - lastCheckTime < minCheckInterval && lastCheckTime > 0) {
             // Return cached state to avoid excessive modem queries
             return _networkConnected;
         }
@@ -1197,4 +1226,38 @@ void MqttLteClient::printNetworkDiagnostics() {
     Serial.println(_consecutiveFailures);
     
     Serial.println("=========================");
+}
+
+void MqttLteClient::notifyPublishFailure() {
+    // Track consecutive publish failures
+    unsigned long now = millis();
+    
+    // Reset counter if last failure was more than 30 seconds ago (likely transient issue)
+    if (now - _lastPublishFailureTime > 30000) {
+        _consecutivePublishFailures = 0;
+    }
+    
+    _consecutivePublishFailures++;
+    _lastPublishFailureTime = now;
+    
+    // If we've had 3 consecutive failures, trigger a connectivity check
+    if (_consecutivePublishFailures >= 3) {
+        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+            Serial.print("[NETWORK] ");
+            Serial.print(_consecutivePublishFailures);
+            Serial.println(" consecutive publish failures - triggering connectivity check");
+        }
+        forceConnectivityCheck();
+    }
+}
+
+void MqttLteClient::forceConnectivityCheck() {
+    // Mark that we need to check connectivity
+    _lastForcedConnectivityCheck = millis();
+    
+    // Reset the static lastCheckTime in isNetworkConnected() by forcing a check
+    // This will be handled on the next call to isNetworkConnected()
+    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
+        Serial.println("[NETWORK] Forced connectivity check requested");
+    }
 }

@@ -223,6 +223,9 @@ void CarWashController::handleButtons() {
                             timeSinceLastPauseResume = (0xFFFFFFFFUL - lastPauseResumeTime) + currentTime + 1;
                         }
                         
+                        // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
+                        lastActionTime = currentTime;
+                        
                         if (timeSinceLastPauseResume < PAUSE_RESUME_COOLDOWN) {
                             LOG_WARNING("Button %d pressed while RUNNING - ignoring (cooldown: %lu ms < %lu ms)", 
                                        detectedId + 1, timeSinceLastPauseResume, PAUSE_RESUME_COOLDOWN);
@@ -238,6 +241,8 @@ void CarWashController::handleButtons() {
                             buttonProcessed = true;
                         }
                     } else {
+                        // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
+                        lastActionTime = millis();
                         LOG_WARNING("Button %d pressed while RUNNING (activeButton=%d) - ignoring", 
                                    detectedId + 1, activeButton + 1);
                     }
@@ -255,6 +260,9 @@ void CarWashController::handleButtons() {
                             timeSinceLastPauseResume = (0xFFFFFFFFUL - lastPauseResumeTime) + currentTime + 1;
                         }
                         
+                        // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
+                        lastActionTime = currentTime;
+                        
                         if (timeSinceLastPauseResume < PAUSE_RESUME_COOLDOWN) {
                             LOG_WARNING("Button %d pressed while PAUSED - ignoring (cooldown: %lu ms < %lu ms)", 
                                        detectedId + 1, timeSinceLastPauseResume, PAUSE_RESUME_COOLDOWN);
@@ -270,10 +278,16 @@ void CarWashController::handleButtons() {
                             buttonProcessed = true;
                         }
                     } else {
+                        // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
+                        lastActionTime = millis();
                         LOG_WARNING("Button %d pressed while PAUSED (activeButton=%d) - ignoring (must press same button to resume)", 
                                    detectedId + 1, activeButton + 1);
                     }
                 } else {
+                    // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
+                    if (config.isLoaded && currentState != STATE_FREE) {
+                        lastActionTime = millis();
+                    }
                     LOG_WARNING("Flag press on button %d ignored. State=%d, activeButton=%d",
                                 detectedId + 1, currentState, activeButton);
                     // Flag already cleared above - no need to process
@@ -284,6 +298,8 @@ void CarWashController::handleButtons() {
             }
         } else if (detectedId == NUM_BUTTONS - 1) {
             // Stop button
+            // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
+            lastActionTime = millis();
             if (config.isLoaded) {
                 stopMachine(MANUAL);
                 buttonProcessed = true;
@@ -376,6 +392,9 @@ void CarWashController::handleButtons() {
                                 timeSinceLastPauseResume = (0xFFFFFFFFUL - lastPauseResumeTime) + currentTime + 1;
                             }
                             
+                            // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
+                            lastActionTime = currentTime;
+                            
                             if (timeSinceLastPauseResume < PAUSE_RESUME_COOLDOWN) {
                                 LOG_WARNING("Button %d pressed while RUNNING - ignoring (cooldown: %lu ms < %lu ms) - raw polling", 
                                            i + 1, timeSinceLastPauseResume, PAUSE_RESUME_COOLDOWN);
@@ -390,6 +409,8 @@ void CarWashController::handleButtons() {
                                 lastPauseResumeTime = currentTime;
                             }
                         } else {
+                            // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
+                            lastActionTime = millis();
                             LOG_WARNING("Button %d pressed while RUNNING (activeButton=%d) - ignoring (raw polling)", 
                                        i + 1, activeButton + 1);
                         }
@@ -406,6 +427,9 @@ void CarWashController::handleButtons() {
                                 timeSinceLastPauseResume = (0xFFFFFFFFUL - lastPauseResumeTime) + currentTime + 1;
                             }
                             
+                            // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
+                            lastActionTime = currentTime;
+                            
                             if (timeSinceLastPauseResume < PAUSE_RESUME_COOLDOWN) {
                                 LOG_WARNING("Button %d pressed while PAUSED - ignoring (cooldown: %lu ms < %lu ms) - raw polling", 
                                            i + 1, timeSinceLastPauseResume, PAUSE_RESUME_COOLDOWN);
@@ -420,6 +444,8 @@ void CarWashController::handleButtons() {
                                 lastPauseResumeTime = currentTime;
                             }
                         } else {
+                            // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
+                            lastActionTime = millis();
                             LOG_WARNING("Button %d pressed while PAUSED (activeButton=%d) - ignoring (must press same button to resume) - raw polling", 
                                        i + 1, activeButton + 1);
                         }
@@ -456,6 +482,9 @@ void CarWashController::handleButtons() {
             // Record time of this press
             lastDebounceTime[NUM_BUTTONS-1] = millis();
             lastButtonState[NUM_BUTTONS-1] = LOW;  // Now pressed (active LOW)
+            
+            // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
+            lastActionTime = millis();
             
             // Process button action - stop button should log out user whenever machine is loaded
             if (config.isLoaded) {

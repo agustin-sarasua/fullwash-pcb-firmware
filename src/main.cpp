@@ -234,14 +234,20 @@ void TaskButtonDetector(void *pvParameters) {
  * Priority: 2 (Medium priority - important but not critical like hardware tasks)
  */
 void TaskNetworkManager(void *pvParameters) {
-    const TickType_t xNetworkCheckDelay = pdMS_TO_TICKS(30000);  // Check network every 30 seconds
-    const TickType_t xMqttCheckDelay = pdMS_TO_TICKS(5000);      // Check MQTT every 5 seconds
+    // SMART CONNECTIVITY CHECKING: Check less frequently when things are working
+    // Network checks are now handled by smart checking in mqtt_lte_client
+    // - When connected: check every 120 seconds (reduced from 45s)
+    // - When disconnected: check every 30 seconds
+    const TickType_t xNetworkCheckDelayConnected = pdMS_TO_TICKS(120000);  // 2 minutes when connected
+    const TickType_t xNetworkCheckDelayDisconnected = pdMS_TO_TICKS(30000);  // 30 seconds when disconnected
+    const TickType_t xMqttCheckDelay = pdMS_TO_TICKS(15000);      // Check MQTT every 15 seconds (reduced frequency)
     const TickType_t xReconnectDelay = pdMS_TO_TICKS(60000);     // Reconnect attempt interval
     
     unsigned long lastNetworkCheck = 0;
     unsigned long lastConnectionAttempt = 0;
     unsigned long lastMqttReconnectAttempt = 0;
     unsigned long lastStatusCheck = 0;
+    bool wasNetworkConnected = false;  // Track previous state for adaptive checking
     
     if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
         LOG_INFO("Network manager task started");
@@ -253,15 +259,23 @@ void TaskNetworkManager(void *pvParameters) {
     for(;;) {
         unsigned long currentTime = millis();
         
-        // Check network status periodically (45 seconds to avoid interfering with MQTT)
-        // Increased from 30s since we now have keep-alive in loop() function
-        if (currentTime - lastNetworkCheck > 45000) {
+        // SMART CONNECTIVITY CHECKING: Adaptive check interval based on connection state
+        // Check less frequently when connected to reduce mutex contention
+        TickType_t networkCheckInterval = wasNetworkConnected ? 
+            xNetworkCheckDelayConnected : xNetworkCheckDelayDisconnected;
+        
+        // Check network status periodically - reduced frequency when connected
+        // The mqtt_lte_client now handles smart checking based on publish failures
+        if (currentTime - lastNetworkCheck > networkCheckInterval) {
             lastNetworkCheck = currentTime;
             
             // Yield before potentially long network operations
             vTaskDelay(pdMS_TO_TICKS(50));
             
-            if (!mqttClient.isNetworkConnected()) {
+            bool networkConnected = mqttClient.isNetworkConnected();
+            wasNetworkConnected = networkConnected;  // Update state tracking
+            
+            if (!networkConnected) {
                 if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
                     LOG_WARNING("Lost cellular network connection");
                 }
@@ -357,12 +371,12 @@ void TaskNetworkManager(void *pvParameters) {
         vTaskDelay(pdMS_TO_TICKS(100));
         
         // Process MQTT messages if connected
-        // CRITICAL: Reduced frequency to give publisher task more chances to acquire mutex
-        // Call loop() less frequently (every ~2 seconds) to reduce mutex contention
-        // If loop() is taking 8+ seconds, calling it less often helps prevent blocking
+        // SMART CONNECTIVITY CHECKING: Call loop() less frequently to reduce mutex contention
+        // - When connected: call every 5 seconds (reduced from 2s)
+        // - loop() handles its own smart checking internally
         static unsigned long lastLoopCall = 0;
         unsigned long now = millis();
-        if (mqttClient.isNetworkConnected() && (now - lastLoopCall > 2000)) {
+        if (wasNetworkConnected && (now - lastLoopCall > 5000)) {
             lastLoopCall = now;
             // Yield to higher priority tasks (publisher) before potentially blocking operation
             vTaskDelay(pdMS_TO_TICKS(50));
