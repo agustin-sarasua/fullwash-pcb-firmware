@@ -54,11 +54,15 @@ TaskHandle_t TaskButtonDetectorHandle = NULL;
 TaskHandle_t TaskNetworkManagerHandle = NULL;
 TaskHandle_t TaskWatchdogHandle = NULL;
 TaskHandle_t TaskDisplayUpdateHandle = NULL;
+TaskHandle_t TaskMqttPublisherHandle = NULL;
 
 // FreeRTOS mutexes for shared resources
 SemaphoreHandle_t xIoExpanderMutex = NULL;
 SemaphoreHandle_t xControllerMutex = NULL;
 SemaphoreHandle_t xI2CMutex = NULL;  // For Wire1 (LCD and RTC)
+
+// FreeRTOS queue for MQTT message publishing
+QueueHandle_t xMqttPublishQueue = NULL;
 
 /**
  * FreeRTOS Task: Coin Detector
@@ -215,8 +219,9 @@ void TaskNetworkManager(void *pvParameters) {
     for(;;) {
         unsigned long currentTime = millis();
         
-        // Check network status periodically
-        if (currentTime - lastNetworkCheck > 30000) {
+        // Check network status periodically (45 seconds to avoid interfering with MQTT)
+        // Increased from 30s since we now have keep-alive in loop() function
+        if (currentTime - lastNetworkCheck > 45000) {
             lastNetworkCheck = currentTime;
             
             // Yield before potentially long network operations
@@ -234,6 +239,7 @@ void TaskNetworkManager(void *pvParameters) {
                     // Yield before network operation to let IDLE task run
                     vTaskDelay(pdMS_TO_TICKS(100));
                     
+                    // Try to recover the modem connection
                     if (mqttClient.begin(apn, gprsUser, gprsPass, pin)) {
                         LOG_INFO("Successfully reconnected to cellular network!");
                         
@@ -306,11 +312,6 @@ void TaskNetworkManager(void *pvParameters) {
             vTaskDelay(pdMS_TO_TICKS(10));
             
             mqttClient.loop();
-            
-            // Status check (no logging to reduce overhead)
-            if (currentTime - lastStatusCheck > 60000) {
-                lastStatusCheck = currentTime;
-            }
         }
         
         // Longer delay to prevent task from consuming too much CPU
@@ -352,6 +353,145 @@ void TaskDisplayUpdate(void *pvParameters) {
         }
         
         vTaskDelay(xDisplayDelay);
+    }
+}
+
+/**
+ * FreeRTOS Task: MQTT Publisher
+ * 
+ * This task handles all MQTT message publishing in a dedicated task to prevent
+ * blocking the main loop and other critical tasks. It:
+ * - Consumes messages from xMqttPublishQueue
+ * - Publishes messages when MQTT connection is available
+ * - Buffers critical messages when disconnected (up to queue limit)
+ * - Implements retry logic for failed publishes
+ * 
+ * Priority: 2 (Medium priority - important for data delivery)
+ */
+void TaskMqttPublisher(void *pvParameters) {
+    const TickType_t xQueueWaitTime = pdMS_TO_TICKS(100);  // Wait up to 100ms for messages
+    const int MAX_RETRY_COUNT = 3;  // Maximum retry attempts for critical messages
+    MqttMessage msg;
+    
+    LOG_INFO("MQTT Publisher task started");
+    
+    // Wait for MQTT client to be initialized
+    vTaskDelay(3000 / portTICK_PERIOD_MS);
+    
+    // Statistics counters
+    unsigned long messagesPublished = 0;
+    unsigned long messagesDropped = 0;
+    unsigned long lastStatsLog = 0;
+    
+    // Track retry count per message using timestamp as identifier
+    unsigned long lastMessageTimestamp = 0;
+    int currentRetryCount = 0;
+    
+    for(;;) {
+        // Try to receive a message from the queue
+        if (xQueueReceive(xMqttPublishQueue, &msg, xQueueWaitTime) == pdTRUE) {
+            // Check if this is a retry of the same message
+            bool isRetry = (msg.timestamp == lastMessageTimestamp);
+            if (!isRetry) {
+                // New message - reset retry counter
+                currentRetryCount = 0;
+                lastMessageTimestamp = msg.timestamp;
+            } else {
+                // This is a retry
+                currentRetryCount++;
+            }
+            
+            // Check if MQTT is connected
+            if (mqttClient.isConnected()) {
+                // Attempt to publish the message
+                bool published = mqttClient.publish(msg.topic, msg.payload, msg.qos);
+                
+                if (published) {
+                    messagesPublished++;
+                    LOG_DEBUG("Published MQTT message to %s (QoS: %d)", msg.topic, msg.qos);
+                    // Reset retry tracking on success
+                    lastMessageTimestamp = 0;
+                    currentRetryCount = 0;
+                } else {
+                    // Publish failed - check if we should retry
+                    if (msg.isCritical && currentRetryCount < MAX_RETRY_COUNT) {
+                        // Try to re-queue for retry (put back at front)
+                        if (uxQueueSpacesAvailable(xMqttPublishQueue) > 0) {
+                            if (xQueueSendToFront(xMqttPublishQueue, &msg, 0) == pdTRUE) {
+                                LOG_INFO("Re-queued critical message for retry (%d/%d)", 
+                                        currentRetryCount + 1, MAX_RETRY_COUNT);
+                                // Wait before retry
+                                vTaskDelay(pdMS_TO_TICKS(2000));
+                            } else {
+                                messagesDropped++;
+                                LOG_WARNING("Failed to re-queue critical message");
+                            }
+                        } else {
+                            messagesDropped++;
+                            LOG_WARNING("Queue full, cannot retry message");
+                        }
+                    } else {
+                        // Max retries reached or non-critical message
+                        messagesDropped++;
+                        if (msg.isCritical) {
+                            LOG_WARNING("Critical message dropped after %d retries: %s", 
+                                       currentRetryCount, msg.topic);
+                        }
+                        // Reset retry tracking
+                        lastMessageTimestamp = 0;
+                        currentRetryCount = 0;
+                    }
+                }
+            } else {
+                // MQTT not connected - buffer critical messages only
+                if (msg.isCritical && currentRetryCount < MAX_RETRY_COUNT) {
+                    // Try to re-queue critical messages if there's space
+                    if (uxQueueSpacesAvailable(xMqttPublishQueue) > (MQTT_QUEUE_SIZE / 4)) {
+                        // Only buffer if queue is less than 75% full
+                        if (xQueueSendToBack(xMqttPublishQueue, &msg, 0) == pdTRUE) {
+                            LOG_DEBUG("Buffered critical message (MQTT disconnected, retry %d/%d)", 
+                                     currentRetryCount + 1, MAX_RETRY_COUNT);
+                        } else {
+                            messagesDropped++;
+                            LOG_WARNING("Failed to buffer critical message");
+                        }
+                    } else {
+                        messagesDropped++;
+                        LOG_WARNING("Queue too full (>75%%), dropping message to prevent overflow");
+                        lastMessageTimestamp = 0;
+                        currentRetryCount = 0;
+                    }
+                } else {
+                    // Non-critical or max retries reached
+                    messagesDropped++;
+                    if (msg.isCritical) {
+                        LOG_WARNING("Critical message dropped (disconnected, max retries)");
+                    } else {
+                        LOG_DEBUG("Non-critical message dropped (MQTT disconnected)");
+                    }
+                    lastMessageTimestamp = 0;
+                    currentRetryCount = 0;
+                }
+                
+                // Wait longer when disconnected to reduce queue pressure
+                vTaskDelay(pdMS_TO_TICKS(2000));
+            }
+            
+            // Yield to other tasks
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        
+        // Periodic statistics logging (every 60 seconds)
+        unsigned long now = millis();
+        if (now - lastStatsLog > 60000) {
+            lastStatsLog = now;
+            LOG_INFO("MQTT Publisher stats: Published=%lu, Dropped=%lu, Queue=%d/%d", 
+                    messagesPublished, messagesDropped, 
+                    uxQueueMessagesWaiting(xMqttPublishQueue), MQTT_QUEUE_SIZE);
+        }
+        
+        // Yield periodically to prevent watchdog issues
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
@@ -415,6 +555,27 @@ void TaskWatchdog(void *pvParameters) {
             }
         }
         
+        // Check MQTT publisher task
+        if (TaskMqttPublisherHandle != NULL) {
+            eTaskState mqttTaskState = eTaskGetState(TaskMqttPublisherHandle);
+            if (mqttTaskState == eDeleted || mqttTaskState == eInvalid) {
+                LOG_ERROR("MQTT Publisher task died! State: %d", mqttTaskState);
+            } else {
+                UBaseType_t stackHighWater = uxTaskGetStackHighWaterMark(TaskMqttPublisherHandle);
+                if (stackHighWater < 512) {
+                    LOG_WARNING("MQTT Publisher task stack low: %d bytes remaining", stackHighWater);
+                }
+            }
+        }
+        
+        // Monitor MQTT queue depth
+        if (xMqttPublishQueue != NULL) {
+            UBaseType_t queueDepth = uxQueueMessagesWaiting(xMqttPublishQueue);
+            if (queueDepth > (MQTT_QUEUE_SIZE * 0.8)) {  // More than 80% full
+                LOG_WARNING("MQTT queue nearly full: %d/%d messages", queueDepth, MQTT_QUEUE_SIZE);
+            }
+        }
+        
         // Monitor heap usage
         size_t freeHeap = ESP.getFreeHeap();
         size_t minFreeHeap = ESP.getMinFreeHeap();
@@ -437,6 +598,19 @@ void TaskWatchdog(void *pvParameters) {
 }
 
 void mqtt_callback(char *topic, byte *payload, unsigned int len) {
+    // Log every received message
+    Serial.print("[MQTT RX] Topic: ");
+    Serial.print(topic);
+    Serial.print(" | Payload size: ");
+    Serial.print(len);
+    Serial.println(" bytes");
+    
+    // Optionally log payload for debugging (commented out to avoid too much output)
+    // Serial.print("[MQTT RX] Payload: ");
+    // for (unsigned int i = 0; i < len; i++) {
+    //     Serial.print((char)payload[i]);
+    // }
+    // Serial.println();
     
     // Handle command topic specially for changing log level or debug commands
     if (String(topic) == COMMAND_TOPIC) {
@@ -537,6 +711,12 @@ void mqtt_callback(char *topic, byte *payload, unsigned int len) {
                 } else {
                     LOG_WARNING("RTC is not initialized");
                 }
+            }
+            // Add command to get network diagnostics
+            else if (command == "debug_network") {
+                LOG_INFO("Printing network diagnostics");
+                extern MqttLteClient mqttClient;
+                mqttClient.printNetworkDiagnostics();
             }
             // Add command to get BLE configuration status
             else if (command == "debug_ble") {
@@ -758,6 +938,16 @@ void setup() {
         LOG_INFO("Mutexes created successfully");
     }
     
+    // Initialize FreeRTOS queue for MQTT message publishing
+    LOG_INFO("Initializing MQTT publish queue...");
+    xMqttPublishQueue = xQueueCreate(MQTT_QUEUE_SIZE, sizeof(MqttMessage));
+    
+    if (xMqttPublishQueue == NULL) {
+        LOG_ERROR("Failed to create MQTT publish queue!");
+    } else {
+        LOG_INFO("MQTT publish queue created successfully (size: %d)", MQTT_QUEUE_SIZE);
+    }
+    
     // Create FreeRTOS tasks for dedicated interrupt handling
     LOG_INFO("Creating FreeRTOS tasks for coin and button detection...");
     
@@ -891,6 +1081,18 @@ void setup() {
       3,                            // Priority (3 = medium-high, same as coin detector)
       &TaskDisplayUpdateHandle,     // Task handle
       0                             // Pin to core 0 (PRO CPU) - keep display responsive
+  );
+  
+  // Create MQTT Publisher task (handles all MQTT publishing)
+  LOG_INFO("Creating MQTT Publisher task...");
+  xTaskCreatePinnedToCore(
+      TaskMqttPublisher,            // Task function
+      "MqttPublisher",              // Task name
+      8192,                         // Stack size (bytes) - needs space for MQTT operations
+      NULL,                         // Task parameters
+      2,                            // Priority (2 = medium priority, same as NetworkManager)
+      &TaskMqttPublisherHandle,     // Task handle
+      1                             // Pin to core 1 (APP CPU) - same as network operations
   );
   
   LOG_INFO("All FreeRTOS tasks created successfully");

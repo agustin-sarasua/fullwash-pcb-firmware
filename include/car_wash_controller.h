@@ -9,9 +9,14 @@
 #include "domain.h"
 #include "constants.h"
 #include "logger.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 
 // Forward declaration
 class RTCManager;
+
+// External reference to the MQTT publish queue (defined in main.cpp)
+extern QueueHandle_t xMqttPublishQueue;
 
 class CarWashController {
 public:
@@ -78,6 +83,9 @@ private:
 
     void publishActionEvent(int buttonIndex, MachineAction machineAction, TriggerType triggerType = MANUAL);
     void publishPeriodicState(bool force = false);
+    
+    // Helper method to queue MQTT messages for the dedicated publisher task
+    bool queueMqttMessage(const char* topic, const char* payload, uint8_t qos, bool isCritical);
 };
 
 #endif

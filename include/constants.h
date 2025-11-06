@@ -43,4 +43,17 @@ extern String COMMAND_TOPIC;
 const uint32_t QOS0_AT_MOST_ONCE = 0;
 const uint32_t QOS1_AT_LEAST_ONCE = 1;
 
+// MQTT Message Queue Configuration
+const int MQTT_QUEUE_SIZE = 50;  // Maximum number of messages to buffer
+const int MQTT_MESSAGE_MAX_SIZE = 512;  // Maximum size for topic + payload
+
+// MQTT Message Structure for Queue
+struct MqttMessage {
+    char topic[128];        // Topic name
+    char payload[384];      // Message payload (JSON)
+    uint8_t qos;           // Quality of Service (0 or 1)
+    bool isCritical;       // Flag for message priority
+    unsigned long timestamp;  // When message was created
+};
+
 #endif // CONSTANTS_H

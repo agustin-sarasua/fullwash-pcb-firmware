@@ -41,6 +41,7 @@ public:
     String getLocalIP();
     int getSignalQuality();
     bool isValidIP(const String& ip);
+    void printNetworkDiagnostics();
     
     // SSL cleanup for reconnection
     void cleanupSSLClient();

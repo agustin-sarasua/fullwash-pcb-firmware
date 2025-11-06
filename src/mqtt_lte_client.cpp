@@ -61,11 +61,14 @@ void MqttLteClient::powerOnModem() {
     pinMode(_dtrPin, OUTPUT);
     pinMode(_flightPin, OUTPUT);
     
-    // Set DTR (Data Terminal Ready) active
-    digitalWrite(_dtrPin, LOW);
+    // CRITICAL FIX: Ensure proper DTR and Flight pin states
+    // DTR LOW = active (modem stays awake)
+    // Flight HIGH = flight mode disabled (radio active)
+    digitalWrite(_dtrPin, LOW);     // Keep modem awake
+    digitalWrite(_flightPin, HIGH); // Disable flight mode
+    delay(100); // Let pins stabilize
     
-    // Make sure flight mode is disabled
-    digitalWrite(_flightPin, HIGH); 
+    Serial.println("[MODEM] Control pins set: DTR=LOW (active), FLIGHT=HIGH (disabled)"); 
     
     // SIM7600G power on sequence (based on datasheet)
     digitalWrite(_pwrKeyPin, LOW);  // Ensure PWRKEY starts LOW
@@ -154,9 +157,14 @@ bool MqttLteClient::testModemAT() {
 bool MqttLteClient::initModemAndConnectNetwork() {
     Serial.println("Initializing modem...");
     
+    // CRITICAL FIX: Clear any pending data before init
+    clearModemBuffer();
+    delay(500);
+    
     // Try to initialize the modem
     if (!_modem->init()) {
         Serial.println("Failed to initialize modem!");
+        Serial.println("[MODEM] TinyGSM init failed - modem may be in bad state");
         
         // Check if we can talk to the modem directly
         bool basicComm = testModemAT();
@@ -235,6 +243,23 @@ bool MqttLteClient::initModemAndConnectNetwork() {
     
     if (_modem->isGprsConnected()) {
         Serial.println("GPRS connected");
+        
+        // CRITICAL FIX: Configure modem to prevent GPRS connection timeout
+        // Some modems timeout GPRS connections after 30-60 seconds of inactivity
+        // Configure keep-alive and disable auto-disconnect
+        Serial.println("[MODEM] Configuring GPRS keep-alive settings...");
+        clearModemBuffer();
+        
+        // Set TCP keep-alive (if supported) - sends keep-alive packets every 60 seconds
+        _modemSerial.println("AT+CIPKEEPALIVE=1,60");
+        delay(500);
+        clearModemBuffer();
+        
+        // Disable auto-disconnect on inactivity (if supported by modem)
+        // AT+CIPCLOSE=0 means don't auto-close connections
+        _modemSerial.println("AT+CIPCLOSE=0");
+        delay(500);
+        clearModemBuffer();
         
         // Get and validate IP address
         String ip = _modem->localIP().toString();
@@ -423,6 +448,13 @@ bool MqttLteClient::publish(const char* topic, const char* payload, const uint8_
     }
     bool ok = false;
     if (_mqttClient->connected()) {
+        Serial.print("[MQTT TX] Topic: ");
+        Serial.print(topic);
+        Serial.print(" | Payload size: ");
+        Serial.print(strlen(payload));
+        Serial.print(" bytes | QoS: ");
+        Serial.println(qos);
+        
         ok = _mqttClient->publish(topic, payload);
         if (!ok) {
             Serial.print("[MQTT ERROR] Failed to publish to ");
@@ -432,6 +464,8 @@ bool MqttLteClient::publish(const char* topic, const char* payload, const uint8_
             Serial.print(", state: ");
             Serial.print(_mqttClient->state());
             Serial.println(")");
+        } else {
+            Serial.println("[MQTT TX] ✓ Message sent successfully");
         }
     } else {
         Serial.print("[MQTT ERROR] Cannot publish to ");
@@ -451,6 +485,7 @@ bool MqttLteClient::publishNonBlocking(const char* topic, const char* payload, c
         TickType_t timeoutTicks = pdMS_TO_TICKS(timeoutMs);
         if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) != pdTRUE) {
             // Mutex not available - skip publish to avoid blocking
+            Serial.println("[MQTT TX] Non-blocking publish skipped (mutex busy)");
             return false;
         }
     }
@@ -459,11 +494,22 @@ bool MqttLteClient::publishNonBlocking(const char* topic, const char* payload, c
     // Just try to publish if already connected
     bool ok = false;
     if (_mqttClient->connected()) {
+        Serial.print("[MQTT TX] (non-blocking) Topic: ");
+        Serial.print(topic);
+        Serial.print(" | Payload size: ");
+        Serial.print(strlen(payload));
+        Serial.print(" bytes | QoS: ");
+        Serial.println(qos);
+        
         ok = _mqttClient->publish(topic, payload);
         if (!ok) {
             Serial.print("[MQTT] Non-blocking publish failed to ");
             Serial.println(topic);
+        } else {
+            Serial.println("[MQTT TX] ✓ Non-blocking message sent successfully");
         }
+    } else {
+        Serial.println("[MQTT TX] Non-blocking publish skipped (not connected)");
     }
     
     if (_mutex) xSemaphoreGiveRecursive(_mutex);
@@ -493,10 +539,22 @@ void MqttLteClient::loop() {
     if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
     static unsigned long lastConnectionCheck = 0;
     static unsigned long lastHealthLog = 0;
+    static unsigned long lastGprsKeepAlive = 0;
+    static bool wasConnected = false;
     
     // Check connection status more frequently to detect issues early
     if (millis() - lastConnectionCheck > 5000) {  // Check every 5 seconds (increased from 10s)
         lastConnectionCheck = millis();
+        
+        bool currentlyConnected = _mqttClient->connected();
+        
+        // Detect connection state changes
+        if (wasConnected && !currentlyConnected) {
+            Serial.println("[MQTT] Connection LOST - was connected, now disconnected");
+        } else if (!wasConnected && currentlyConnected) {
+            Serial.println("[MQTT] Connection ESTABLISHED - was disconnected, now connected");
+        }
+        wasConnected = currentlyConnected;
         
         if (!_mqttClient->connected() && _networkConnected) {
             // Get MQTT client state for diagnostics
@@ -521,10 +579,30 @@ void MqttLteClient::loop() {
         }
     }
     
+    // CRITICAL FIX: Periodic GPRS keep-alive to prevent connection timeout
+    // Many cellular modems timeout GPRS connections after 30-60 seconds of inactivity
+    // Check IP address every 30 seconds to keep the connection alive
+    if (_networkConnected && _modem && millis() - lastGprsKeepAlive > 30000) {
+        lastGprsKeepAlive = millis();
+        
+        // Lightweight keep-alive: just check if we still have a valid IP
+        // This is less intrusive than isGprsConnected() but still keeps the connection active
+        String ip = _modem->localIP().toString();
+        if (!isValidIP(ip)) {
+            // IP is invalid, connection may have dropped
+            Serial.println("[NETWORK] Keep-alive check: IP address invalid, connection may be lost");
+            _networkConnected = false;
+        }
+        // If IP is valid, the connection is still alive (no need to log every time)
+    }
+    
+    // REMOVED: Signal quality check from loop() - causes UART interference
+    // Signal quality can be checked manually via debug_network command
+    
     // Periodic health logging (every 60 seconds)
     if (_mqttClient->connected() && millis() - lastHealthLog > 60000) {
         lastHealthLog = millis();
-        Serial.println("[MQTT HEALTH] Connection stable");
+        Serial.println("[MQTT HEALTH] Connection stable (keep-alive: 60s)");
     }
     
     // Always call the PubSubClient loop (this handles keep-alive pings automatically)
@@ -551,8 +629,59 @@ bool MqttLteClient::isConnected() {
 }
 
 bool MqttLteClient::isNetworkConnected() {
+    static bool lastNetworkState = false;
+    static unsigned long lastStateChange = 0;
+    static unsigned long lastCheckTime = 0;
+    
     if (_modem) {
-        _networkConnected = _modem->isGprsConnected();
+        // CRITICAL FIX: Don't check network status too frequently
+        // Checking GPRS status requires AT commands that can interfere with MQTT
+        // Only check every 10 seconds minimum (increased from 5s to reduce interference)
+        unsigned long now = millis();
+        if (now - lastCheckTime < 10000 && lastCheckTime > 0) {
+            // Return cached state to avoid excessive modem queries
+            return _networkConnected;
+        }
+        lastCheckTime = now;
+        
+        // CRITICAL FIX: Use mutex protection to prevent UART interference
+        // This ensures network checks don't interfere with ongoing MQTT/SSL operations
+        bool currentState = false;
+        if (_mutex) {
+            // Use timeout to prevent blocking if mutex is held by MQTT operation
+            TickType_t timeoutTicks = pdMS_TO_TICKS(100); // 100ms timeout
+            if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) == pdTRUE) {
+                // Check GPRS connection status while holding mutex
+                currentState = _modem->isGprsConnected();
+                xSemaphoreGiveRecursive(_mutex);
+            } else {
+                // Mutex not available - return cached state to avoid blocking
+                // This prevents interference with ongoing operations
+                return _networkConnected;
+            }
+        } else {
+            // No mutex available, check directly (shouldn't happen in normal operation)
+            currentState = _modem->isGprsConnected();
+        }
+        
+        // Detect network state changes
+        if (lastNetworkState != currentState) {
+            unsigned long timeSinceLastChange = now - lastStateChange;
+            
+            if (currentState) {
+                Serial.println("[NETWORK] ✓ GPRS connection ESTABLISHED");
+            } else {
+                Serial.print("[NETWORK] ✗ GPRS connection LOST after ");
+                Serial.print(timeSinceLastChange / 1000);
+                Serial.println(" seconds");
+                Serial.println("[NETWORK] POSSIBLE CAUSES: Power supply issue, modem crash, or UART interference");
+            }
+            
+            lastNetworkState = currentState;
+            lastStateChange = now;
+        }
+        
+        _networkConnected = currentState;
     }
     return _networkConnected;
 }
@@ -574,7 +703,13 @@ String MqttLteClient::getLocalIP() {
 
 int MqttLteClient::getSignalQuality() {
     if (_modem) {
-        return _modem->getSignalQuality();
+        int quality = _modem->getSignalQuality();
+        // TinyGSM returns 99 as error code, treat as 0 (no signal)
+        if (quality == 99) {
+            Serial.println("[NETWORK WARNING] Signal quality read error (99) - modem may be unresponsive");
+            return 0;
+        }
+        return quality;
     }
     return 0;
 }
@@ -641,4 +776,109 @@ bool MqttLteClient::isValidIP(const String& ip) {
     }
     
     return true;
+}
+
+void MqttLteClient::printNetworkDiagnostics() {
+    if (!_modem) {
+        Serial.println("[NETWORK DIAG] Modem not initialized");
+        return;
+    }
+    
+    Serial.println("=== NETWORK DIAGNOSTICS ===");
+    
+    // Check GPRS connection
+    bool gprsConnected = _modem->isGprsConnected();
+    Serial.print("[NETWORK DIAG] GPRS Connected: ");
+    Serial.println(gprsConnected ? "YES" : "NO");
+    
+    // Check network registration
+    bool networkConnected = _modem->isNetworkConnected();
+    Serial.print("[NETWORK DIAG] Network Registered: ");
+    Serial.println(networkConnected ? "YES" : "NO");
+    
+    // Get signal quality
+    int signalQuality = _modem->getSignalQuality();
+    Serial.print("[NETWORK DIAG] Signal Quality: ");
+    Serial.print(signalQuality);
+    Serial.print("/31 (");
+    if (signalQuality == 99) {
+        Serial.println("ERROR - modem not responding to AT+CSQ)");
+    } else if (signalQuality == 0) {
+        Serial.println("No signal)");
+    } else if (signalQuality < 10) {
+        Serial.println("Poor)");
+    } else if (signalQuality < 20) {
+        Serial.println("Fair)");
+    } else {
+        Serial.println("Good)");
+    }
+    
+    // Get IP address
+    String ip = _modem->localIP().toString();
+    Serial.print("[NETWORK DIAG] IP Address: ");
+    Serial.print(ip);
+    Serial.print(" (");
+    Serial.print(isValidIP(ip) ? "Valid" : "Invalid");
+    Serial.println(")");
+    
+    // Get operator name
+    String operatorName = _modem->getOperator();
+    Serial.print("[NETWORK DIAG] Operator: ");
+    Serial.println(operatorName);
+    
+    // Test modem AT responsiveness
+    Serial.print("[NETWORK DIAG] Testing modem AT responsiveness... ");
+    _modemSerial.println("AT");
+    unsigned long start = millis();
+    String response = "";
+    bool gotResponse = false;
+    
+    while (millis() - start < 1000) {
+        if (_modemSerial.available()) {
+            char c = _modemSerial.read();
+            response += c;
+            if (response.indexOf("OK") != -1) {
+                gotResponse = true;
+                break;
+            }
+        }
+    }
+    
+    if (gotResponse) {
+        Serial.println("OK (modem responding)");
+    } else {
+        Serial.println("FAILED (modem not responding!)");
+        Serial.print("[NETWORK DIAG] Response received: ");
+        Serial.println(response);
+    }
+    
+    // MQTT status
+    Serial.print("[NETWORK DIAG] MQTT Connected: ");
+    Serial.println(_mqttConnected ? "YES" : "NO");
+    
+    if (_mqttClient) {
+        int mqttState = _mqttClient->state();
+        Serial.print("[NETWORK DIAG] MQTT State: ");
+        Serial.print(mqttState);
+        Serial.print(" (");
+        switch(mqttState) {
+            case -4: Serial.print("TIMEOUT"); break;
+            case -3: Serial.print("CONNECTION_LOST"); break;
+            case -2: Serial.print("CONNECT_FAILED"); break;
+            case -1: Serial.print("DISCONNECTED"); break;
+            case 0: Serial.print("CONNECTED"); break;
+            case 1: Serial.print("BAD_PROTOCOL"); break;
+            case 2: Serial.print("BAD_CLIENT_ID"); break;
+            case 3: Serial.print("UNAVAILABLE"); break;
+            case 4: Serial.print("BAD_CREDENTIALS"); break;
+            case 5: Serial.print("UNAUTHORIZED"); break;
+            default: Serial.print("UNKNOWN");
+        }
+        Serial.println(")");
+    }
+    
+    Serial.print("[NETWORK DIAG] Consecutive Failures: ");
+    Serial.println(_consecutiveFailures);
+    
+    Serial.println("=========================");
 }

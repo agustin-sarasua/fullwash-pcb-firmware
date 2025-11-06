@@ -873,7 +873,9 @@ void CarWashController::publishMachineSetupActionEvent() {
     
     String jsonString;
     serializeJson(doc, jsonString);
-    mqttClient.publish(ACTION_TOPIC.c_str(), jsonString.c_str(), QOS1_AT_LEAST_ONCE);
+    
+    // Queue message for publishing (critical - machine setup event)
+    queueMqttMessage(ACTION_TOPIC.c_str(), jsonString.c_str(), QOS1_AT_LEAST_ONCE, true);
 }
 
 unsigned long CarWashController::getSecondsLeft() {
@@ -946,7 +948,8 @@ void CarWashController::publishCoinInsertedEvent() {
     String jsonString;
     serializeJson(doc, jsonString);
 
-    mqttClient.publish(ACTION_TOPIC.c_str(), jsonString.c_str(), QOS1_AT_LEAST_ONCE);
+    // Queue message for publishing (critical - coin/token event)
+    queueMqttMessage(ACTION_TOPIC.c_str(), jsonString.c_str(), QOS1_AT_LEAST_ONCE, true);
 }
 
 // Debug method to directly simulate a coin insertion
@@ -979,7 +982,8 @@ void CarWashController::publishActionEvent(int buttonIndex, MachineAction machin
     String jsonString;
     serializeJson(doc, jsonString);
 
-    mqttClient.publish(ACTION_TOPIC.c_str(), jsonString.c_str(), QOS1_AT_LEAST_ONCE);
+    // Queue message for publishing (critical - button action events)
+    queueMqttMessage(ACTION_TOPIC.c_str(), jsonString.c_str(), QOS1_AT_LEAST_ONCE, true);
 }
 
 void CarWashController::publishPeriodicState(bool force) {
@@ -1041,14 +1045,9 @@ void CarWashController::publishPeriodicState(bool force) {
         LOG_INFO("Publishing state: status=%s, timestamp=%s", 
                   getMachineStateString(currentState).c_str(), timestamp.c_str());
         
-        // CRITICAL: Use non-blocking publish to prevent blocking button handling
-        // If mutex is held by another task or network is slow, skip publish and continue
-        // This ensures update() runs continuously for responsive button handling
-        bool published = mqttClient.publishNonBlocking(STATE_TOPIC.c_str(), jsonString.c_str(), QOS0_AT_MOST_ONCE, 100);
-        if (!published) {
-            // Don't log warning - this is expected when mutex is busy or network is slow
-            // State will be published on next interval
-        }
+        // Queue message for publishing (non-critical - periodic state updates)
+        // State updates are not critical and can be dropped if queue is full
+        queueMqttMessage(STATE_TOPIC.c_str(), jsonString.c_str(), QOS0_AT_MOST_ONCE, false);
 
         lastStatePublishTime = millis();
         
@@ -1123,3 +1122,52 @@ unsigned long CarWashController::getTimeToInactivityTimeout() const {
 }
 
 // getTokensLeft and getUserName are implemented as inline methods in the header
+
+/**
+ * Helper method to queue MQTT messages for the dedicated publisher task
+ * This prevents blocking the controller when MQTT operations are slow or connection is down
+ * 
+ * @param topic The MQTT topic to publish to
+ * @param payload The message payload (JSON string)
+ * @param qos Quality of Service (0 or 1)
+ * @param isCritical Whether this message should be buffered and retried when disconnected
+ * @return true if message was queued successfully, false if queue is full
+ */
+bool CarWashController::queueMqttMessage(const char* topic, const char* payload, uint8_t qos, bool isCritical) {
+    // Check if queue exists
+    if (xMqttPublishQueue == NULL) {
+        LOG_ERROR("MQTT publish queue not initialized!");
+        return false;
+    }
+    
+    // Create message structure
+    MqttMessage msg;
+    
+    // Copy topic (ensure null termination)
+    strncpy(msg.topic, topic, sizeof(msg.topic) - 1);
+    msg.topic[sizeof(msg.topic) - 1] = '\0';
+    
+    // Copy payload (ensure null termination)
+    strncpy(msg.payload, payload, sizeof(msg.payload) - 1);
+    msg.payload[sizeof(msg.payload) - 1] = '\0';
+    
+    // Set QoS and priority
+    msg.qos = qos;
+    msg.isCritical = isCritical;
+    msg.timestamp = millis();
+    
+    // Check if payload was truncated
+    if (strlen(payload) >= sizeof(msg.payload)) {
+        LOG_WARNING("MQTT payload truncated (max size: %d bytes)", sizeof(msg.payload) - 1);
+    }
+    
+    // Try to queue the message (non-blocking)
+    if (xQueueSend(xMqttPublishQueue, &msg, 0) == pdTRUE) {
+        LOG_DEBUG("Queued MQTT message: topic=%s, qos=%d, critical=%d", topic, qos, isCritical);
+        return true;
+    } else {
+        LOG_WARNING("MQTT queue full, cannot queue message to %s (queue: %d/%d)", 
+                   topic, uxQueueMessagesWaiting(xMqttPublishQueue), MQTT_QUEUE_SIZE);
+        return false;
+    }
+}
