@@ -150,6 +150,45 @@ void CarWashController::handleButtons() {
     // Get reference to the IO expander (assumed to be a global or accessible)
     extern IoExpander ioExpander;
 
+    // Fast path: consume button flags set by the ButtonDetector task
+    // This ensures short presses (that may be missed by raw polling) are handled
+    if (ioExpander.isButtonDetected()) {
+        uint8_t detectedId = ioExpander.getDetectedButtonId();
+        ioExpander.clearButtonFlag();
+
+        // Function buttons (0..NUM_BUTTONS-2)
+        if (detectedId < NUM_BUTTONS - 1) {
+            LOG_INFO("Button %d detected via flag", detectedId + 1);
+            if (config.isLoaded) {
+                LOG_INFO("Flag press: state=%d, activeButton=%d, tokens=%d",
+                         currentState, activeButton, config.tokens);
+                if (currentState == STATE_IDLE) {
+                    activateButton(detectedId, MANUAL);
+                } else if (currentState == STATE_RUNNING && (int)detectedId == activeButton) {
+                    pauseMachine();
+                } else if (currentState == STATE_PAUSED) {
+                    resumeMachine(detectedId);
+                } else {
+                    LOG_WARNING("Flag press on button %d ignored. State=%d, activeButton=%d",
+                                detectedId + 1, currentState, activeButton);
+                }
+            } else {
+                LOG_WARNING("Button flag ignored - config not loaded");
+            }
+        } else if (detectedId == NUM_BUTTONS - 1) {
+            // Stop button
+            LOG_INFO("STOP button detected via flag");
+            if (config.isLoaded) {
+                stopMachine(MANUAL);
+            } else {
+                LOG_WARNING("STOP button flag ignored - config not loaded");
+            }
+        }
+
+        // We've handled a flagged press; skip raw polling this cycle
+        return;
+    }
+
     // Protect IO expander access with mutex
     uint8_t rawPortValue0 = 0;
     if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -333,6 +372,9 @@ void CarWashController::resumeMachine(int buttonIndex) {
 }
 
 void CarWashController::stopMachine(TriggerType triggerType) {
+    // Capture activeButton before resetting it (needed for stop event)
+    int buttonToStop = activeButton;
+    
     if (activeButton >= 0) {
         // Add relay state debugging
         extern IoExpander ioExpander;
@@ -370,9 +412,9 @@ void CarWashController::stopMachine(TriggerType triggerType) {
     tokenTimeElapsed = 0;
     pauseStartTime = 0;
     
-    // Publish stop event
-    if (activeButton >= 0) {
-        publishActionEvent(activeButton, ACTION_STOP, triggerType);
+    // Publish stop event (only if we had an active button before stopping)
+    if (buttonToStop >= 0) {
+        publishActionEvent(buttonToStop, ACTION_STOP, triggerType);
     }
 }
 
@@ -916,7 +958,9 @@ void CarWashController::publishActionEvent(int buttonIndex, MachineAction machin
     doc["tokens_left"] = config.tokens;
     doc["physical_tokens"] = config.physicalTokens;
 
-    if (currentState == STATE_RUNNING) {
+    // Include seconds_left for both RUNNING and PAUSED states
+    // (getSecondsLeft() handles both states correctly)
+    if (currentState == STATE_RUNNING || currentState == STATE_PAUSED) {
         doc["seconds_left"] = getSecondsLeft();
     }
 
@@ -943,7 +987,9 @@ void CarWashController::publishPeriodicState(bool force) {
             sessionMetadata["tokens_left"] = config.tokens;
             sessionMetadata["physical_tokens"] = config.physicalTokens;
             sessionMetadata["timestamp"] = config.timestamp;
-            if (tokenStartTime > 0) {
+            // Include seconds_left for RUNNING and PAUSED states
+            // (getSecondsLeft() returns 0 for other states, so this is safe)
+            if (currentState == STATE_RUNNING || currentState == STATE_PAUSED) {
                 sessionMetadata["seconds_left"] = getSecondsLeft();
             }
         }

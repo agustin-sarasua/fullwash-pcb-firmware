@@ -53,10 +53,12 @@ TaskHandle_t TaskCoinDetectorHandle = NULL;
 TaskHandle_t TaskButtonDetectorHandle = NULL;
 TaskHandle_t TaskNetworkManagerHandle = NULL;
 TaskHandle_t TaskWatchdogHandle = NULL;
+TaskHandle_t TaskDisplayUpdateHandle = NULL;
 
 // FreeRTOS mutexes for shared resources
 SemaphoreHandle_t xIoExpanderMutex = NULL;
 SemaphoreHandle_t xControllerMutex = NULL;
+SemaphoreHandle_t xI2CMutex = NULL;  // For Wire1 (LCD and RTC)
 
 /**
  * FreeRTOS Task: Coin Detector
@@ -347,6 +349,41 @@ void TaskNetworkManager(void *pvParameters) {
         // This allows lower priority tasks (including IDLE task) to run
         // CRITICAL: Must delay here to prevent watchdog timeout
         vTaskDelay(pdMS_TO_TICKS(200));  // Increased to 200ms to give more time for IDLE task
+    }
+}
+
+/**
+ * FreeRTOS Task: Display Update
+ * 
+ * This task handles LCD display updates independently to ensure reliable refresh rate.
+ * Updates the display at least once per second, or more frequently for dynamic content
+ * like countdown timers.
+ * 
+ * Priority: 3 (Medium-high priority - ensures display stays responsive)
+ */
+void TaskDisplayUpdate(void *pvParameters) {
+    const TickType_t xDisplayDelay = pdMS_TO_TICKS(500); // Update every 500ms for smooth countdowns
+    unsigned long lastForcedUpdate = 0;
+    
+    LOG_INFO("Display update task started");
+    
+    // Wait for controller and display to be initialized
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
+    
+    for(;;) {
+        if (display && controller) {
+            // Update display - mutex protection is handled inside DisplayManager
+            display->update(controller);
+            
+            // Force update at least once per second even if throttled internally
+            unsigned long now = millis();
+            if (now - lastForcedUpdate >= 1000) {
+                lastForcedUpdate = now;
+                // Force a refresh by clearing lastUpdateTime (handled in display->update)
+            }
+        }
+        
+        vTaskDelay(xDisplayDelay);
     }
 }
 
@@ -748,12 +785,13 @@ void setup() {
     // Configure INT_PIN with internal pull-up for reliable detection
     pinMode(INT_PIN, INPUT_PULLUP);
     
-    // Initialize FreeRTOS mutexes for shared resources
-    LOG_INFO("Initializing FreeRTOS mutexes...");
-    xIoExpanderMutex = xSemaphoreCreateMutex();
-    xControllerMutex = xSemaphoreCreateMutex();
-    
-    if (xIoExpanderMutex == NULL || xControllerMutex == NULL) {
+  // Initialize FreeRTOS mutexes for shared resources
+  LOG_INFO("Initializing FreeRTOS mutexes...");
+  xIoExpanderMutex = xSemaphoreCreateMutex();
+  xControllerMutex = xSemaphoreCreateMutex();
+  xI2CMutex = xSemaphoreCreateMutex();  // For Wire1 (LCD and RTC)
+  
+  if (xIoExpanderMutex == NULL || xControllerMutex == NULL || xI2CMutex == NULL) {
         LOG_ERROR("Failed to create mutexes!");
     } else {
         LOG_INFO("Mutexes created successfully");
@@ -791,6 +829,11 @@ void setup() {
   LOG_INFO("Initializing RTC Manager...");
   rtcManager = new RTCManager(RTC_DS1340_ADDR, &Wire1);
   
+  // Set I2C mutex for RTC manager (must be done after mutex creation)
+  if (rtcManager && xI2CMutex != NULL) {
+    rtcManager->setI2CMutex(xI2CMutex);
+  }
+  
   if (rtcManager->begin()) {
     LOG_INFO("RTC initialization successful!");
     rtcManager->printDebugInfo();
@@ -807,6 +850,9 @@ void setup() {
   
   // Initialize the display with correct LCD pins
   display = new DisplayManager(LCD_ADDR, LCD_COLS, LCD_ROWS, LCD_SDA_PIN, LCD_SCL_PIN);
+  // Set I2C mutex for display manager (shared with RTC)
+  display->setI2CMutex(xI2CMutex);
+  
   // Initialize MQTT client with callback
   mqttClient.setCallback(mqtt_callback);
   mqttClient.setBufferSize(512);
@@ -880,6 +926,18 @@ void setup() {
       1                             // Pin to core 1 (APP CPU)
   );
   
+  // Create Display Update task (handles LCD refresh independently)
+  LOG_INFO("Creating Display Update task...");
+  xTaskCreatePinnedToCore(
+      TaskDisplayUpdate,            // Task function
+      "DisplayUpdate",              // Task name
+      4096,                         // Stack size (bytes) - needs more for String operations
+      NULL,                         // Task parameters
+      3,                            // Priority (3 = medium-high, same as coin detector)
+      &TaskDisplayUpdateHandle,     // Task handle
+      0                             // Pin to core 0 (PRO CPU) - keep display responsive
+  );
+  
   LOG_INFO("All FreeRTOS tasks created successfully");
   
   // Final blink pattern to indicate setup complete
@@ -932,10 +990,8 @@ void loop() {
     }
   }
   
-  // Update display with current state
-  if (display && controller) {
-    display->update(controller);
-  }
+  // NOTE: Display updates are now handled by TaskDisplayUpdate FreeRTOS task
+  // Removed from main loop to ensure consistent refresh rate
   
   // Handle LED indicator
   // Blink pattern based on connection status

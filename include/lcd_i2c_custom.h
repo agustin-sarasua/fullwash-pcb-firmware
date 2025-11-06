@@ -3,6 +3,8 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include "logger.h"
 
 // Commands
@@ -84,6 +86,9 @@ public:
     
     // Low level functions
     void command(uint8_t cmd);
+    
+    // Set I2C mutex for thread-safe access (optional - mutex can be protected at higher level)
+    void setI2CMutex(SemaphoreHandle_t mutex);
 
 private:
     void write4bits(uint8_t value);
@@ -100,6 +105,7 @@ private:
     uint8_t _displaymode;
     
     TwoWire& _wire;
+    SemaphoreHandle_t _i2cMutex;  // Optional mutex for I2C access (managed at DisplayManager level)
 };
 
 #endif // LCD_I2C_CUSTOM_H

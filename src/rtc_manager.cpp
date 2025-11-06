@@ -2,7 +2,11 @@
 
 RTCManager::RTCManager(uint8_t address, TwoWire* wireInterface)
     : _address(address), _wire(wireInterface), _initialized(false),
-      _lastReadMillis(0), _lastReadTime(0) {
+      _lastReadMillis(0), _lastReadTime(0), _i2cMutex(NULL) {
+}
+
+void RTCManager::setI2CMutex(SemaphoreHandle_t mutex) {
+    _i2cMutex = mutex;
 }
 
 bool RTCManager::begin() {
@@ -16,9 +20,21 @@ bool RTCManager::begin() {
     
     LOG_INFO("Initializing DS1340 RTC at address 0x%02X", _address);
     
-    // Check if RTC is responding
+    // Check if RTC is responding (during initialization, mutex may not be set yet, so check first)
+    bool mutexTaken = false;
+    if (_i2cMutex != NULL) {
+        mutexTaken = (xSemaphoreTake(_i2cMutex, pdMS_TO_TICKS(100)) == pdTRUE);
+        if (!mutexTaken) {
+            LOG_WARNING("Failed to acquire I2C mutex during RTC initialization");
+        }
+    }
+    
     _wire->beginTransmission(_address);
     uint8_t error = _wire->endTransmission();
+    
+    if (mutexTaken && _i2cMutex != NULL) {
+        xSemaphoreGive(_i2cMutex);
+    }
     
     if (error != 0) {
         LOG_ERROR("DS1340 RTC not found! I2C error code: %d", error);
@@ -73,10 +89,24 @@ uint8_t RTCManager::bcdToDec(uint8_t val) {
 bool RTCManager::writeRegister(uint8_t reg, uint8_t value) {
     if (!_initialized) return false;
     
+    // Protect I2C access with mutex (shared with LCD)
+    bool mutexTaken = false;
+    if (_i2cMutex != NULL) {
+        mutexTaken = (xSemaphoreTake(_i2cMutex, pdMS_TO_TICKS(100)) == pdTRUE);
+        if (!mutexTaken) {
+            LOG_WARNING("Failed to acquire I2C mutex for RTC write");
+            return false;
+        }
+    }
+    
     _wire->beginTransmission(_address);
     _wire->write(reg);
     _wire->write(value);
     uint8_t error = _wire->endTransmission();
+    
+    if (mutexTaken && _i2cMutex != NULL) {
+        xSemaphoreGive(_i2cMutex);
+    }
     
     if (error != 0) {
         LOG_ERROR("Failed to write RTC register 0x%02X: error %d", reg, error);
@@ -89,51 +119,90 @@ bool RTCManager::writeRegister(uint8_t reg, uint8_t value) {
 uint8_t RTCManager::readRegister(uint8_t reg) {
     if (!_initialized) return 0;
     
+    // Protect I2C access with mutex (shared with LCD)
+    bool mutexTaken = false;
+    if (_i2cMutex != NULL) {
+        mutexTaken = (xSemaphoreTake(_i2cMutex, pdMS_TO_TICKS(100)) == pdTRUE);
+        if (!mutexTaken) {
+            LOG_WARNING("Failed to acquire I2C mutex for RTC read");
+            return 0;
+        }
+    }
+    
     _wire->beginTransmission(_address);
     _wire->write(reg);
     uint8_t error = _wire->endTransmission();
     
-    if (error != 0) {
+    uint8_t result = 0;
+    if (error == 0) {
+        uint8_t bytesReceived = _wire->requestFrom(_address, (uint8_t)1);
+        if (bytesReceived != 1) {
+            LOG_ERROR("Failed to read RTC register 0x%02X: expected 1 byte, got %d", reg, bytesReceived);
+        } else {
+            result = _wire->read();
+        }
+    } else {
         LOG_ERROR("Failed to set RTC register pointer to 0x%02X: error %d", reg, error);
-        return 0;
     }
     
-    uint8_t bytesReceived = _wire->requestFrom(_address, (uint8_t)1);
-    if (bytesReceived != 1) {
-        LOG_ERROR("Failed to read RTC register 0x%02X: expected 1 byte, got %d", reg, bytesReceived);
-        return 0;
+    if (mutexTaken && _i2cMutex != NULL) {
+        xSemaphoreGive(_i2cMutex);
     }
     
-    return _wire->read();
+    return result;
 }
 
 bool RTCManager::readRegisters(uint8_t reg, uint8_t* buffer, uint8_t length) {
     if (!_initialized || !buffer) return false;
     
+    // Protect I2C access with mutex (shared with LCD)
+    bool mutexTaken = false;
+    if (_i2cMutex != NULL) {
+        mutexTaken = (xSemaphoreTake(_i2cMutex, pdMS_TO_TICKS(100)) == pdTRUE);
+        if (!mutexTaken) {
+            LOG_WARNING("Failed to acquire I2C mutex for RTC read");
+            return false;
+        }
+    }
+    
     _wire->beginTransmission(_address);
     _wire->write(reg);
     uint8_t error = _wire->endTransmission();
     
-    if (error != 0) {
+    bool success = false;
+    if (error == 0) {
+        uint8_t bytesReceived = _wire->requestFrom(_address, length);
+        if (bytesReceived != length) {
+            LOG_ERROR("Failed to read %d RTC registers: got %d bytes", length, bytesReceived);
+        } else {
+            for (uint8_t i = 0; i < length; i++) {
+                buffer[i] = _wire->read();
+            }
+            success = true;
+        }
+    } else {
         LOG_ERROR("Failed to set RTC register pointer: error %d", error);
-        return false;
     }
     
-    uint8_t bytesReceived = _wire->requestFrom(_address, length);
-    if (bytesReceived != length) {
-        LOG_ERROR("Failed to read %d RTC registers: got %d bytes", length, bytesReceived);
-        return false;
+    if (mutexTaken && _i2cMutex != NULL) {
+        xSemaphoreGive(_i2cMutex);
     }
     
-    for (uint8_t i = 0; i < length; i++) {
-        buffer[i] = _wire->read();
-    }
-    
-    return true;
+    return success;
 }
 
 bool RTCManager::writeRegisters(uint8_t reg, const uint8_t* buffer, uint8_t length) {
     if (!_initialized || !buffer) return false;
+    
+    // Protect I2C access with mutex (shared with LCD)
+    bool mutexTaken = false;
+    if (_i2cMutex != NULL) {
+        mutexTaken = (xSemaphoreTake(_i2cMutex, pdMS_TO_TICKS(100)) == pdTRUE);
+        if (!mutexTaken) {
+            LOG_WARNING("Failed to acquire I2C mutex for RTC write");
+            return false;
+        }
+    }
     
     _wire->beginTransmission(_address);
     _wire->write(reg);
@@ -143,6 +212,10 @@ bool RTCManager::writeRegisters(uint8_t reg, const uint8_t* buffer, uint8_t leng
     }
     
     uint8_t error = _wire->endTransmission();
+    
+    if (mutexTaken && _i2cMutex != NULL) {
+        xSemaphoreGive(_i2cMutex);
+    }
     
     if (error != 0) {
         LOG_ERROR("Failed to write %d RTC registers: error %d", length, error);

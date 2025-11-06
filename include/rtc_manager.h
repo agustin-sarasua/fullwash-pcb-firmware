@@ -4,6 +4,8 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <TimeLib.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include "logger.h"
 
 /**
@@ -148,6 +150,13 @@ public:
      * @brief Print current RTC time to serial for debugging
      */
     void printDebugInfo();
+    
+    /**
+     * @brief Set I2C mutex for thread-safe access to Wire1 (shared with LCD)
+     * 
+     * @param mutex FreeRTOS semaphore handle for I2C bus protection
+     */
+    void setI2CMutex(SemaphoreHandle_t mutex);
 
 private:
     uint8_t _address;           ///< I2C address of the DS1340
@@ -155,6 +164,7 @@ private:
     bool _initialized;          ///< Initialization status
     unsigned long _lastReadMillis; ///< Millis value from last RTC read
     time_t _lastReadTime;       ///< Time value from last RTC read
+    SemaphoreHandle_t _i2cMutex;  ///< Mutex for Wire1 access (shared with LCD)
     
     // DS1340 Register addresses
     static const uint8_t REG_SECONDS = 0x00;

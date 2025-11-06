@@ -3,7 +3,7 @@
 
 DisplayManager::DisplayManager(uint8_t address, uint8_t columns, uint8_t rows, uint8_t sdaPin, uint8_t sclPin)
     : _columns(columns), _rows(rows), lastState(STATE_FREE), lastTokens(0), 
-      lastSecondsLeft(0), lastUpdateTime(0), lcd(address, columns, rows, Wire1) {
+      lastSecondsLeft(0), lastUpdateTime(0), lcd(address, columns, rows, Wire1), _i2cMutex(NULL) {
     
     // Wire1 is already initialized in main.cpp
     _wire = &Wire1;
@@ -11,7 +11,7 @@ DisplayManager::DisplayManager(uint8_t address, uint8_t columns, uint8_t rows, u
     // Create a log message about our initialization attempt
     LOG_INFO("Initializing LCD at 0x%02X on pins SDA=%d, SCL=%d", address, sdaPin, sclPin);
     
-    // Initialize the LCD
+    // Initialize the LCD (mutex will be set later via setI2CMutex)
     lcd.begin();
     
     // Initial display
@@ -22,25 +22,39 @@ DisplayManager::DisplayManager(uint8_t address, uint8_t columns, uint8_t rows, u
     LOG_INFO("LCD Display initialized on address 0x%02X", address);
 }
 
+void DisplayManager::setI2CMutex(SemaphoreHandle_t mutex) {
+    _i2cMutex = mutex;
+    lcd.setI2CMutex(mutex);
+}
+
 void DisplayManager::update(CarWashController* controller) {
     if (!controller) return;
     
+    // Always update at least once per second for dynamic content (countdown timers)
+    // This task is called every 500ms, so throttling ensures minimum 1Hz refresh
+    unsigned long now = millis();
     MachineState currentState = controller->getCurrentState();
     MachineState previousState = lastState;
-    bool stateChanged = (currentState != lastState);
+    bool stateChanged = (currentState != previousState);
     
-    // Only update when state changes or every second
-    unsigned long currentTime = millis();
-    bool shouldUpdate = stateChanged || 
-                        (currentTime - lastUpdateTime >= 1000);
+    // Update if state changed OR if at least 1 second has passed
+    // This ensures smooth countdowns while avoiding excessive I2C traffic
+    if (!stateChanged && (now - lastUpdateTime) < 1000) {
+        return;
+    }
+    lastUpdateTime = now;
     
-    if (!shouldUpdate) return;
-    
-    lastUpdateTime = currentTime;
-    lastState = currentState;
+    // Protect I2C access with mutex (shared with RTC)
+    bool mutexTaken = false;
+    if (_i2cMutex != NULL) {
+        mutexTaken = (xSemaphoreTake(_i2cMutex, pdMS_TO_TICKS(100)) == pdTRUE);
+        if (!mutexTaken) {
+            LOG_WARNING("Failed to acquire I2C mutex for display update");
+            return;
+        }
+    }
     
     // Update display based on current state
-    // Pass stateChanged flag so display functions know if this is a state transition
     switch (currentState) {
         case STATE_FREE:
             displayFreeState();
@@ -59,6 +73,14 @@ void DisplayManager::update(CarWashController* controller) {
             displayFreeState();
             break;
     }
+    
+    // Release mutex
+    if (mutexTaken && _i2cMutex != NULL) {
+        xSemaphoreGive(_i2cMutex);
+    }
+    
+    // Record last state after updating the display
+    lastState = currentState;
 }
 
 void DisplayManager::clearLine(uint8_t line) {
@@ -105,32 +127,12 @@ void DisplayManager::displayFreeState() {
 }
 
 void DisplayManager::displayIdleState(CarWashController* controller, bool stateChanged) {
-    // Check if tokens or username changed
+    // Always refresh - get current values and display them
     int tokens = controller->getTokensLeft();
     String userName = controller->getUserName();
     unsigned long userInactivityTime = controller->getTimeToInactivityTimeout() / 1000;
     
-    bool contentChanged = (tokens != lastTokens) || 
-                         (userName != lastUserName) ||
-                         (userInactivityTime != lastSecondsLeft);
-    
-    // Always update on state change (e.g., FREE -> IDLE transition)
-    // If state hasn't changed, update() was called because 1 second passed
-    // In IDLE state, we should always refresh to show countdown updates
-    // Only skip if absolutely nothing changed (very rare case)
-    if (!stateChanged && !contentChanged) {
-        // Double-check: if inactivity timeout, tokens, and username are all unchanged, skip
-        if (userInactivityTime == lastSecondsLeft && 
-            tokens == lastTokens && 
-            userName == lastUserName) {
-            return;
-        }
-    }
-    
-    lastTokens = tokens;
-    lastUserName = userName;
-    lastSecondsLeft = userInactivityTime;
-    
+    // Clear and redraw entire screen
     lcd.clear();
     
     // Truncate username if it's too long
@@ -155,17 +157,12 @@ void DisplayManager::displayIdleState(CarWashController* controller, bool stateC
 }
 
 void DisplayManager::displayRunningState(CarWashController* controller) {
-    // Always update during running state to show countdown timer
-    // The update() method already throttles calls to once per second
+    // Always refresh - get current values and display them
     int tokens = controller->getTokensLeft();
     String userName = controller->getUserName();
     unsigned long secondsLeft = controller->getSecondsLeft();
     
-    // Update stored values
-    lastTokens = tokens;
-    lastUserName = userName;
-    lastSecondsLeft = secondsLeft;
-    
+    // Clear and redraw entire screen
     lcd.clear();
     
     // Truncate username if it's too long
@@ -189,18 +186,13 @@ void DisplayManager::displayRunningState(CarWashController* controller) {
 }
 
 void DisplayManager::displayPausedState(CarWashController* controller, MachineState previousState) {
-    // Get current values
+    // Always refresh - get current values and display them
     int tokens = controller->getTokensLeft();
     String userName = controller->getUserName();
     unsigned long secondsLeft = controller->getSecondsLeft();
-
-    // Update stored values
-    lastTokens = tokens;
-    lastUserName = userName;
-    lastSecondsLeft = secondsLeft;
-    
     unsigned long userInactivityTime = controller->getTimeToInactivityTimeout() / 1000;
-    // Clear display and redraw everything when state changes
+    
+    // Clear and redraw entire screen
     lcd.clear();
 
     lcd.setCursor(0, 0);
@@ -215,7 +207,5 @@ void DisplayManager::displayPausedState(CarWashController* controller, MachineSt
     lcd.print("Tiempo: ");
     lcd.print(formatTime(secondsLeft));
     
-    // Make sure PAUSADA is visible by forcing redraw
     displayCentered("PAUSADA", 3);
-
 }

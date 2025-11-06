@@ -3,6 +3,8 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include "lcd_i2c_custom.h"
 #include "car_wash_controller.h"
 #include "domain.h"
@@ -12,6 +14,9 @@ class DisplayManager {
 public:
     // Initialize the LCD display
     DisplayManager(uint8_t address, uint8_t columns, uint8_t rows, uint8_t sdaPin, uint8_t sclPin);
+    
+    // Set I2C mutex for thread-safe access to Wire1 (shared with RTC)
+    void setI2CMutex(SemaphoreHandle_t mutex);
     
     // Update display based on machine state
     void update(CarWashController* controller);
@@ -37,6 +42,7 @@ private:
     uint8_t _columns;
     uint8_t _rows;
     TwoWire* _wire;
+    SemaphoreHandle_t _i2cMutex;  // Mutex for Wire1 access (shared with RTC)
     
     // Track the last state to avoid unnecessary redraw
     MachineState lastState;

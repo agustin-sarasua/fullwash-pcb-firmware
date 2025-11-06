@@ -1,7 +1,7 @@
 #include "lcd_i2c_custom.h"
 
 LcdI2cCustom::LcdI2cCustom(uint8_t lcd_addr, uint8_t lcd_cols, uint8_t lcd_rows, TwoWire& wireInstance)
-    : _addr(lcd_addr), _cols(lcd_cols), _rows(lcd_rows), _wire(wireInstance) {
+    : _addr(lcd_addr), _cols(lcd_cols), _rows(lcd_rows), _wire(wireInstance), _i2cMutex(NULL) {
     _backlightval = LCD_BACKLIGHT;
     _displayfunction = LCD_4BITMODE | LCD_1LINE | LCD_5x8DOTS;
     
@@ -10,10 +10,14 @@ LcdI2cCustom::LcdI2cCustom(uint8_t lcd_addr, uint8_t lcd_cols, uint8_t lcd_rows,
     }
 }
 
+void LcdI2cCustom::setI2CMutex(SemaphoreHandle_t mutex) {
+    _i2cMutex = mutex;
+}
+
 void LcdI2cCustom::begin() {
-    _wire.begin();
-    
-    // The I2C expander might need some time to initialize
+    // Assume I2C (Wire1) is already initialized and configured in main.cpp
+    // Do not call _wire.begin() here to avoid resetting custom SDA/SCL pins
+    // Small settle delay for the expander
     delay(50);
     
     // Initialize with 4-bit interface
@@ -26,7 +30,8 @@ void LcdI2cCustom::begin() {
     // Put the LCD into 4 bit mode
     // And set displaymode, displaycontrol, etc.
     expanderWrite(_backlightval);
-    delay(1000);
+    // Short delay is sufficient for expander stabilization
+    delay(5);
     
     // 4-bit mode init sequence as per HD44780 datasheet
     write4bits(0x03 << 4);
