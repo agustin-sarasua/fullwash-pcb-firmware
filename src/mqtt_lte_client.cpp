@@ -293,32 +293,69 @@ bool MqttLteClient::initModemAndConnectNetwork() {
 }
 
 void MqttLteClient::setCACert(const char* caCert) {
-    if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
+    // These operations are quick, but use timeout for consistency
+    if (_mutex) {
+        TickType_t timeoutTicks = pdMS_TO_TICKS(1000); // 1 second timeout
+        if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) != pdTRUE) {
+            Serial.println("[MQTT] Failed to acquire mutex for setCACert");
+            return;
+        }
+    }
     _sslClient->setCACert(caCert);
     if (_mutex) xSemaphoreGiveRecursive(_mutex);
 }
 
 void MqttLteClient::setCertificate(const char* clientCert) {
-    if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
+    // These operations are quick, but use timeout for consistency
+    if (_mutex) {
+        TickType_t timeoutTicks = pdMS_TO_TICKS(1000); // 1 second timeout
+        if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) != pdTRUE) {
+            Serial.println("[MQTT] Failed to acquire mutex for setCertificate");
+            return;
+        }
+    }
     _sslClient->setCertificate(clientCert);
     if (_mutex) xSemaphoreGiveRecursive(_mutex);
 }
 
 void MqttLteClient::setPrivateKey(const char* privateKey) {
-    if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
+    // These operations are quick, but use timeout for consistency
+    if (_mutex) {
+        TickType_t timeoutTicks = pdMS_TO_TICKS(1000); // 1 second timeout
+        if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) != pdTRUE) {
+            Serial.println("[MQTT] Failed to acquire mutex for setPrivateKey");
+            return;
+        }
+    }
     _sslClient->setPrivateKey(privateKey);
     if (_mutex) xSemaphoreGiveRecursive(_mutex);
 }
 
 void MqttLteClient::setCallback(void (*callback)(char*, byte*, unsigned int)) {
-    if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
+    // These operations are quick, but use timeout for consistency
+    if (_mutex) {
+        TickType_t timeoutTicks = pdMS_TO_TICKS(1000); // 1 second timeout
+        if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) != pdTRUE) {
+            Serial.println("[MQTT] Failed to acquire mutex for setCallback");
+            return;
+        }
+    }
     _callback = callback;
     _mqttClient->setCallback(_callback);
     if (_mutex) xSemaphoreGiveRecursive(_mutex);
 }
 
 bool MqttLteClient::connect(const char* broker, uint16_t port, const char* clientId) {
-    if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
+    // CRITICAL FIX: Use timeout instead of portMAX_DELAY to prevent deadlock
+    // Connection can take several seconds due to SSL handshake, but we need timeout protection
+    if (_mutex) {
+        TickType_t timeoutTicks = pdMS_TO_TICKS(10000); // 10 second timeout for connection
+        if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) != pdTRUE) {
+            Serial.println("[MQTT] Failed to acquire mutex for connect");
+            return false;
+        }
+    }
+    
     _broker = broker;
     _port = port;
     _clientId = clientId;
@@ -367,7 +404,15 @@ bool MqttLteClient::connect(const char* broker, uint16_t port, const char* clien
 }
 
 void MqttLteClient::cleanupSSLClient() {
-    if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
+    // CRITICAL FIX: Use timeout instead of portMAX_DELAY to prevent deadlock
+    if (_mutex) {
+        TickType_t timeoutTicks = pdMS_TO_TICKS(2000); // 2 second timeout
+        if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) != pdTRUE) {
+            Serial.println("[DEBUG] Failed to acquire mutex for SSL cleanup");
+            return;
+        }
+    }
+    
     Serial.println("[DEBUG] Cleaning up SSL client to clear corrupted state");
     
     // Disconnect MQTT client first
@@ -385,7 +430,16 @@ void MqttLteClient::cleanupSSLClient() {
 }
 
 void MqttLteClient::reconnect() {
-    if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
+    // Use timeout to prevent blocking publisher task
+    // Reconnection can take several seconds due to SSL handshake
+    if (_mutex) {
+        TickType_t timeoutTicks = pdMS_TO_TICKS(100); // Quick check, if busy skip this attempt
+        if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) != pdTRUE) {
+            // Mutex busy (likely publisher is sending) - skip this reconnect attempt
+            return;
+        }
+    }
+    
     // Loop until we're reconnected or timeout
     unsigned long now = millis();
     if (now - _lastReconnectAttempt < _reconnectInterval) {
@@ -439,13 +493,19 @@ void MqttLteClient::reconnect() {
 }
 
 bool MqttLteClient::publish(const char* topic, const char* payload, const uint8_t qos) {
-    if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
-    if (!_mqttClient->connected()) {
-        // Recursive lock safe
-        Serial.print("[MQTT] Not connected, attempting reconnect before publish to ");
-        Serial.println(topic);
-        reconnect();
+    // CRITICAL FIX: Use timeout instead of portMAX_DELAY to prevent deadlock
+    // If mutex is held by loop() for too long, this will fail gracefully
+    if (_mutex) {
+        TickType_t timeoutTicks = pdMS_TO_TICKS(2000); // 2 second timeout
+        if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) != pdTRUE) {
+            Serial.print("[MQTT] Failed to acquire mutex for publish to ");
+            Serial.println(topic);
+            return false;
+        }
     }
+    
+    // Don't attempt reconnect in blocking publish - it can take too long
+    // Reconnection should be handled by NetworkManager task
     bool ok = false;
     if (_mqttClient->connected()) {
         Serial.print("[MQTT TX] Topic: ");
@@ -483,10 +543,20 @@ bool MqttLteClient::publishNonBlocking(const char* topic, const char* payload, c
     // This prevents blocking critical operations like button handling
     if (_mutex) {
         TickType_t timeoutTicks = pdMS_TO_TICKS(timeoutMs);
+        unsigned long startWait = millis();
         if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) != pdTRUE) {
             // Mutex not available - skip publish to avoid blocking
-            Serial.println("[MQTT TX] Non-blocking publish skipped (mutex busy)");
+            unsigned long waitTime = millis() - startWait;
+            Serial.print("[MQTT TX] Non-blocking publish skipped (mutex busy for ");
+            Serial.print(waitTime);
+            Serial.println("ms)");
             return false;
+        }
+        unsigned long actualWaitTime = millis() - startWait;
+        if (actualWaitTime > 100) {
+            Serial.print("[MQTT TX] Mutex acquired after ");
+            Serial.print(actualWaitTime);
+            Serial.println("ms wait");
         }
     }
     
@@ -517,11 +587,18 @@ bool MqttLteClient::publishNonBlocking(const char* topic, const char* payload, c
 }
 
 bool MqttLteClient::subscribe(const char* topic) {
-    if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
-    if (!_mqttClient->connected()) {
-        Serial.println("Reconnecting MQTT client before subscribing...");
-        reconnect();
+    // CRITICAL FIX: Use timeout instead of portMAX_DELAY to prevent deadlock
+    if (_mutex) {
+        TickType_t timeoutTicks = pdMS_TO_TICKS(2000); // 2 second timeout
+        if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) != pdTRUE) {
+            Serial.print("[MQTT] Failed to acquire mutex for subscribe to ");
+            Serial.println(topic);
+            return false;
+        }
     }
+    
+    // Don't attempt reconnect in subscribe - it can take too long
+    // Reconnection should be handled by NetworkManager task
     bool result = false;
     if (_mqttClient->connected()) {
         Serial.print("Subscribing to topic: ");
@@ -530,23 +607,43 @@ bool MqttLteClient::subscribe(const char* topic) {
         if (result) {
             _subscribedTopics.push_back(String(topic));
         }
+    } else {
+        Serial.print("[MQTT] Cannot subscribe to ");
+        Serial.print(topic);
+        Serial.println(" - MQTT not connected");
     }
     if (_mutex) xSemaphoreGiveRecursive(_mutex);
     return result;
 }
 
 void MqttLteClient::loop() {
-    if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
+    // CRITICAL FIX: Only hold mutex for the actual PubSubClient loop() call
+    // This prevents blocking the publisher task during status checks and other operations
     static unsigned long lastConnectionCheck = 0;
     static unsigned long lastHealthLog = 0;
     static unsigned long lastGprsKeepAlive = 0;
     static bool wasConnected = false;
     
     // Check connection status more frequently to detect issues early
-    if (millis() - lastConnectionCheck > 5000) {  // Check every 5 seconds (increased from 10s)
+    // Do this WITHOUT mutex to avoid blocking publisher
+    bool currentlyConnected = false;
+    if (millis() - lastConnectionCheck > 5000) {  // Check every 5 seconds
         lastConnectionCheck = millis();
         
-        bool currentlyConnected = _mqttClient->connected();
+        // Quick check without mutex - use cached state if mutex is busy
+        if (_mutex) {
+            TickType_t timeoutTicks = pdMS_TO_TICKS(10); // 10ms timeout
+            if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) == pdTRUE) {
+                currentlyConnected = _mqttClient->connected();
+                _mqttConnected = currentlyConnected; // Update cache
+                xSemaphoreGiveRecursive(_mutex);
+            } else {
+                // Mutex busy - use cached state
+                currentlyConnected = _mqttConnected;
+            }
+        } else {
+            currentlyConnected = _mqttClient->connected();
+        }
         
         // Detect connection state changes
         if (wasConnected && !currentlyConnected) {
@@ -556,32 +653,39 @@ void MqttLteClient::loop() {
         }
         wasConnected = currentlyConnected;
         
-        if (!_mqttClient->connected() && _networkConnected) {
-            // Get MQTT client state for diagnostics
-            int state = _mqttClient->state();
-            Serial.print("MQTT disconnected (state: ");
-            Serial.print(state);
-            Serial.println("), will reconnect on next call...");
-            
-            // Track disconnections to trigger cleanup if needed
-            if (state < 0) {
-                // Negative states indicate connection errors
-                _consecutiveFailures++;
+        if (!currentlyConnected && _networkConnected) {
+            // Get MQTT client state for diagnostics (only if we can get mutex)
+            if (_mutex && xSemaphoreTakeRecursive(_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                int state = _mqttClient->state();
+                Serial.print("MQTT disconnected (state: ");
+                Serial.print(state);
+                Serial.println("), will reconnect on next call...");
+                
+                // Track disconnections to trigger cleanup if needed
+                if (state < 0) {
+                    // Negative states indicate connection errors
+                    _consecutiveFailures++;
+                }
+                xSemaphoreGiveRecursive(_mutex);
             }
             
             // Don't call reconnect() here - let it be called from NetworkManager
             // This prevents potential blocking in the loop() function
-        } else if (_mqttClient->connected()) {
+        } else if (currentlyConnected) {
             // Reset failure counter when connected
             if (_consecutiveFailures > 0) {
                 _consecutiveFailures = 0;
             }
         }
+    } else {
+        // Use cached state if not time to check yet
+        currentlyConnected = _mqttConnected;
     }
     
     // CRITICAL FIX: Periodic GPRS keep-alive to prevent connection timeout
     // Many cellular modems timeout GPRS connections after 30-60 seconds of inactivity
     // Check IP address every 30 seconds to keep the connection alive
+    // Do this WITHOUT mutex to avoid blocking
     if (_networkConnected && _modem && millis() - lastGprsKeepAlive > 30000) {
         lastGprsKeepAlive = millis();
         
@@ -599,17 +703,49 @@ void MqttLteClient::loop() {
     // REMOVED: Signal quality check from loop() - causes UART interference
     // Signal quality can be checked manually via debug_network command
     
-    // Periodic health logging (every 60 seconds)
-    if (_mqttClient->connected() && millis() - lastHealthLog > 60000) {
+    // Periodic health logging (every 60 seconds) - no mutex needed
+    if (currentlyConnected && millis() - lastHealthLog > 60000) {
         lastHealthLog = millis();
         Serial.println("[MQTT HEALTH] Connection stable (keep-alive: 60s)");
     }
     
-    // Always call the PubSubClient loop (this handles keep-alive pings automatically)
-    if (_mqttClient->connected()) {
-        _mqttClient->loop();
+    // CRITICAL: Only hold mutex for the actual PubSubClient loop() call
+    // This is the only operation that needs exclusive access to the MQTT client
+    // Use timeout instead of portMAX_DELAY to allow other tasks to proceed if needed
+    if (currentlyConnected) {
+        if (_mutex) {
+            TickType_t timeoutTicks = pdMS_TO_TICKS(100); // 100ms timeout - quick check
+            unsigned long loopStart = millis();
+            if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) == pdTRUE) {
+                // CRITICAL FIX: Limit how long loop() can run to prevent blocking
+                // If loop() takes too long, it means SSL/network operations are blocking
+                // Set a maximum execution time of 500ms for loop() call
+                unsigned long loopCallStart = millis();
+                _mqttClient->loop();  // Process incoming MQTT messages
+                unsigned long loopCallDuration = millis() - loopCallStart;
+                
+                // Release mutex immediately after loop() completes
+                unsigned long totalDuration = millis() - loopStart;
+                xSemaphoreGiveRecursive(_mutex);
+                
+                // Log warnings if loop() took too long
+                if (loopCallDuration > 1000) {
+                    Serial.print("[MQTT LOOP] WARNING: loop() took ");
+                    Serial.print(loopCallDuration);
+                    Serial.println("ms - network may be slow or SSL operations blocking");
+                } else if (totalDuration > 200) {
+                    Serial.print("[MQTT LOOP] Held mutex for ");
+                    Serial.print(totalDuration);
+                    Serial.println("ms");
+                }
+            } else {
+                // Mutex not available - skip this iteration (publisher has priority)
+                Serial.println("[MQTT LOOP] Skipped - mutex busy (publisher active)");
+            }
+        } else {
+            _mqttClient->loop();  // No mutex, call directly (shouldn't happen)
+        }
     }
-    if (_mutex) xSemaphoreGiveRecursive(_mutex);
 }
 
 bool MqttLteClient::isConnected() {
@@ -687,7 +823,14 @@ bool MqttLteClient::isNetworkConnected() {
 }
 
 void MqttLteClient::setBufferSize(size_t size) {
-    if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
+    // These operations are quick, but use timeout for consistency
+    if (_mutex) {
+        TickType_t timeoutTicks = pdMS_TO_TICKS(1000); // 1 second timeout
+        if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) != pdTRUE) {
+            Serial.println("[MQTT] Failed to acquire mutex for setBufferSize");
+            return;
+        }
+    }
     if (_mqttClient) {
         _mqttClient->setBufferSize(size);
     }

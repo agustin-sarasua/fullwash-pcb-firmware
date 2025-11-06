@@ -307,9 +307,15 @@ void TaskNetworkManager(void *pvParameters) {
         vTaskDelay(pdMS_TO_TICKS(100));
         
         // Process MQTT messages if connected
-        if (mqttClient.isNetworkConnected()) {
-            // Yield to other tasks before potentially blocking operation
-            vTaskDelay(pdMS_TO_TICKS(10));
+        // CRITICAL: Reduced frequency to give publisher task more chances to acquire mutex
+        // Call loop() less frequently (every ~2 seconds) to reduce mutex contention
+        // If loop() is taking 8+ seconds, calling it less often helps prevent blocking
+        static unsigned long lastLoopCall = 0;
+        unsigned long now = millis();
+        if (mqttClient.isNetworkConnected() && (now - lastLoopCall > 2000)) {
+            lastLoopCall = now;
+            // Yield to higher priority tasks (publisher) before potentially blocking operation
+            vTaskDelay(pdMS_TO_TICKS(50));
             
             mqttClient.loop();
         }
@@ -388,23 +394,32 @@ void TaskMqttPublisher(void *pvParameters) {
     int currentRetryCount = 0;
     
     for(;;) {
+        // Check if there are messages waiting - process them quickly if queue is building up
+        UBaseType_t queueDepth = 0;
+        if (xMqttPublishQueue != NULL) {
+            queueDepth = uxQueueMessagesWaiting(xMqttPublishQueue);
+        }
+        
         // Try to receive a message from the queue
-        if (xQueueReceive(xMqttPublishQueue, &msg, xQueueWaitTime) == pdTRUE) {
+        // Use shorter timeout if queue is building up to process faster
+        // Reduced threshold from 10 to 3 to catch queue buildup earlier
+        TickType_t waitTime = (queueDepth > 3) ? pdMS_TO_TICKS(5) : xQueueWaitTime;
+        if (xQueueReceive(xMqttPublishQueue, &msg, waitTime) == pdTRUE) {
             // Check if this is a retry of the same message
             bool isRetry = (msg.timestamp == lastMessageTimestamp);
             if (!isRetry) {
                 // New message - reset retry counter
                 currentRetryCount = 0;
                 lastMessageTimestamp = msg.timestamp;
-            } else {
-                // This is a retry
-                currentRetryCount++;
             }
+            // Note: retry count is incremented when re-queuing, not here
             
             // Check if MQTT is connected
             if (mqttClient.isConnected()) {
-                // Attempt to publish the message
-                bool published = mqttClient.publish(msg.topic, msg.payload, msg.qos);
+                // Attempt to publish the message using non-blocking method with timeout
+                // This prevents blocking if NetworkManager is holding the mutex in loop()
+                // Use 1000ms timeout - gives enough time for loop() to complete processing
+                bool published = mqttClient.publishNonBlocking(msg.topic, msg.payload, msg.qos, 1000);
                 
                 if (published) {
                     messagesPublished++;
@@ -413,29 +428,42 @@ void TaskMqttPublisher(void *pvParameters) {
                     lastMessageTimestamp = 0;
                     currentRetryCount = 0;
                 } else {
-                    // Publish failed - check if we should retry
-                    if (msg.isCritical && currentRetryCount < MAX_RETRY_COUNT) {
-                        // Try to re-queue for retry (put back at front)
+                    // Publish failed - could be due to mutex contention or actual failure
+                    // Re-queue the message to retry (both critical and non-critical)
+                    // This handles mutex contention gracefully
+                    if (currentRetryCount < MAX_RETRY_COUNT) {
+                        // Try to re-queue for retry (put back at front for faster retry)
                         if (uxQueueSpacesAvailable(xMqttPublishQueue) > 0) {
                             if (xQueueSendToFront(xMqttPublishQueue, &msg, 0) == pdTRUE) {
-                                LOG_INFO("Re-queued critical message for retry (%d/%d)", 
-                                        currentRetryCount + 1, MAX_RETRY_COUNT);
-                                // Wait before retry
-                                vTaskDelay(pdMS_TO_TICKS(2000));
+                                currentRetryCount++;  // Increment retry count when re-queuing
+                                if (msg.isCritical) {
+                                    LOG_INFO("Re-queued critical message for retry (%d/%d) - mutex may have been busy", 
+                                            currentRetryCount, MAX_RETRY_COUNT);
+                                } else {
+                                    LOG_DEBUG("Re-queued message for retry (%d/%d) - mutex may have been busy", 
+                                            currentRetryCount, MAX_RETRY_COUNT);
+                                }
+                                // Update lastMessageTimestamp so we recognize this as a retry next time
+                                lastMessageTimestamp = msg.timestamp;
+                                // Short delay before retry to allow mutex to be released
+                                vTaskDelay(pdMS_TO_TICKS(50));
                             } else {
                                 messagesDropped++;
-                                LOG_WARNING("Failed to re-queue critical message");
+                                LOG_WARNING("Failed to re-queue message");
                             }
                         } else {
                             messagesDropped++;
                             LOG_WARNING("Queue full, cannot retry message");
                         }
                     } else {
-                        // Max retries reached or non-critical message
+                        // Max retries reached
                         messagesDropped++;
                         if (msg.isCritical) {
                             LOG_WARNING("Critical message dropped after %d retries: %s", 
                                        currentRetryCount, msg.topic);
+                        } else {
+                            LOG_DEBUG("Non-critical message dropped after %d retries: %s", 
+                                     currentRetryCount, msg.topic);
                         }
                         // Reset retry tracking
                         lastMessageTimestamp = 0;
@@ -477,21 +505,49 @@ void TaskMqttPublisher(void *pvParameters) {
                 vTaskDelay(pdMS_TO_TICKS(2000));
             }
             
-            // Yield to other tasks
-            vTaskDelay(pdMS_TO_TICKS(10));
+            // Re-check queue depth after processing (message was dequeued, so depth decreased)
+            UBaseType_t remainingQueueDepth = 0;
+            if (xMqttPublishQueue != NULL) {
+                remainingQueueDepth = uxQueueMessagesWaiting(xMqttPublishQueue);
+            }
+            
+            // Yield to other tasks - but only if queue is not building up
+            // If queue has messages remaining, process them faster with minimal delay
+            // Reduced threshold from 20 to 5 to prevent queue buildup
+            if (remainingQueueDepth > 5) {
+                vTaskDelay(pdMS_TO_TICKS(1));  // Minimal delay when queue is building up
+            } else if (remainingQueueDepth > 0) {
+                vTaskDelay(pdMS_TO_TICKS(2));  // Small delay when queue has a few messages
+            } else {
+                vTaskDelay(pdMS_TO_TICKS(10));  // Normal delay when queue is empty
+            }
+        } else {
+            // No message received - re-check queue depth in case it changed
+            UBaseType_t currentQueueDepth = 0;
+            if (xMqttPublishQueue != NULL) {
+                currentQueueDepth = uxQueueMessagesWaiting(xMqttPublishQueue);
+            }
+            
+            // If queue is building up, don't wait - check again immediately
+            if (currentQueueDepth > 0) {
+                // Queue has messages - process them quickly
+                vTaskDelay(pdMS_TO_TICKS(1));
+            } else {
+                // No messages - normal periodic delay
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
         }
         
         // Periodic statistics logging (every 60 seconds)
         unsigned long now = millis();
         if (now - lastStatsLog > 60000) {
             lastStatsLog = now;
+            UBaseType_t currentQueueDepth = (xMqttPublishQueue != NULL) ? 
+                uxQueueMessagesWaiting(xMqttPublishQueue) : 0;
             LOG_INFO("MQTT Publisher stats: Published=%lu, Dropped=%lu, Queue=%d/%d", 
                     messagesPublished, messagesDropped, 
-                    uxQueueMessagesWaiting(xMqttPublishQueue), MQTT_QUEUE_SIZE);
+                    currentQueueDepth, MQTT_QUEUE_SIZE);
         }
-        
-        // Yield periodically to prevent watchdog issues
-        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
@@ -1090,7 +1146,7 @@ void setup() {
       "MqttPublisher",              // Task name
       8192,                         // Stack size (bytes) - needs space for MQTT operations
       NULL,                         // Task parameters
-      2,                            // Priority (2 = medium priority, same as NetworkManager)
+      3,                            // Priority (3 = higher than NetworkManager to get mutex first)
       &TaskMqttPublisherHandle,     // Task handle
       1                             // Pin to core 1 (APP CPU) - same as network operations
   );

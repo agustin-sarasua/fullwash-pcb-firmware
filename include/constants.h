@@ -44,7 +44,7 @@ const uint32_t QOS0_AT_MOST_ONCE = 0;
 const uint32_t QOS1_AT_LEAST_ONCE = 1;
 
 // MQTT Message Queue Configuration
-const int MQTT_QUEUE_SIZE = 50;  // Maximum number of messages to buffer
+const int MQTT_QUEUE_SIZE = 100;  // Maximum number of messages to buffer (increased to handle bursts)
 const int MQTT_MESSAGE_MAX_SIZE = 512;  // Maximum size for topic + payload
 
 // MQTT Message Structure for Queue

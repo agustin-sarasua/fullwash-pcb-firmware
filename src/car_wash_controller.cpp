@@ -1047,9 +1047,16 @@ void CarWashController::publishPeriodicState(bool force) {
         
         // Queue message for publishing (non-critical - periodic state updates)
         // State updates are not critical and can be dropped if queue is full
-        queueMqttMessage(STATE_TOPIC.c_str(), jsonString.c_str(), QOS0_AT_MOST_ONCE, false);
-
-        lastStatePublishTime = millis();
+        bool queued = queueMqttMessage(STATE_TOPIC.c_str(), jsonString.c_str(), QOS0_AT_MOST_ONCE, false);
+        
+        // Only update lastStatePublishTime if message was successfully queued
+        // If queue is full and message was dropped, we'll try again on next update() call
+        // This prevents skipping state updates when queue is temporarily full
+        if (queued) {
+            lastStatePublishTime = millis();
+        } else {
+            LOG_WARNING("State publish queued failed (queue full), will retry on next update()");
+        }
         
         // CRITICAL: Re-check timeout after potentially blocking MQTT operation
         // This ensures timeout is not missed even if MQTT publish blocked
