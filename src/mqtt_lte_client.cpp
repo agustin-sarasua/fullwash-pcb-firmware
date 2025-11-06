@@ -891,7 +891,9 @@ void MqttLteClient::loop() {
     // Use timeout instead of portMAX_DELAY to allow other tasks to proceed if needed
     if (currentlyConnected) {
         if (_mutex) {
-            TickType_t timeoutTicks = pdMS_TO_TICKS(100); // 100ms timeout - quick check
+            // CRITICAL FIX: Increased timeout to 500ms to be more aggressive
+            // Loop() must succeed to process incoming messages, so we wait longer
+            TickType_t timeoutTicks = pdMS_TO_TICKS(500); // 500ms timeout - more persistent
             unsigned long loopStart = millis();
             if (xSemaphoreTakeRecursive(_mutex, timeoutTicks) == pdTRUE) {
                 // CRITICAL FIX: Limit how long loop() can run to prevent blocking
@@ -905,6 +907,10 @@ void MqttLteClient::loop() {
                 unsigned long totalDuration = millis() - loopStart;
                 xSemaphoreGiveRecursive(_mutex);
                 
+                // Track if loop() is consistently taking too long
+                static unsigned long lastSlowLoopTime = 0;
+                static int consecutiveSlowLoops = 0;
+                
                 // Log warnings if loop() took too long
                 if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
                     if (loopCallDuration > 5000) {
@@ -915,14 +921,26 @@ void MqttLteClient::loop() {
                         Serial.println("[MQTT LOOP] This may cause GPRS connection timeout - consider reconnecting");
                         // Mark network as potentially disconnected if loop() took too long
                         // The next keep-alive check will verify the connection
+                        consecutiveSlowLoops++;
+                        lastSlowLoopTime = millis();
                     } else if (loopCallDuration > 1000) {
                         Serial.print("[MQTT LOOP] WARNING: loop() took ");
                         Serial.print(loopCallDuration);
                         Serial.println("ms - network may be slow or SSL operations blocking");
-                    } else if (totalDuration > 200) {
-                        Serial.print("[MQTT LOOP] Held mutex for ");
-                        Serial.print(totalDuration);
-                        Serial.println("ms");
+                        consecutiveSlowLoops++;
+                        lastSlowLoopTime = millis();
+                    } else {
+                        // Reset counter on successful fast loop
+                        if (loopCallDuration < 500) {
+                            consecutiveSlowLoops = 0;
+                        }
+                    }
+                    
+                    // If we've had multiple slow loops recently, log a summary
+                    if (consecutiveSlowLoops >= 3 && (millis() - lastSlowLoopTime < 60000)) {
+                        Serial.print("[MQTT LOOP] WARNING: Multiple slow loops detected (");
+                        Serial.print(consecutiveSlowLoops);
+                        Serial.println(" consecutive) - consider reducing loop() frequency");
                     }
                 }
             } else {

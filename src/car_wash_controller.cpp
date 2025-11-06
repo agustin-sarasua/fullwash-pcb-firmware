@@ -65,6 +65,15 @@ void CarWashController::setRTCManager(RTCManager* rtc) {
 }
 
 void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payload, unsigned len) {
+    // Handle get_state topic first (doesn't require JSON parsing)
+    if (String(topic) == GET_STATE_TOPIC) {
+        LOG_INFO("Received get_state request, publishing state on demand");
+        // Publish state on demand with high priority when get_state message is received
+        publishStateOnDemand();
+        return;
+    }
+    
+    // Other topics require JSON parsing
     StaticJsonDocument<512> doc;
     DeserializationError error = deserializeJson(doc, payload, len);
     if (error) {
@@ -108,6 +117,10 @@ void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payl
         LOG_INFO("Switching on LED");
         digitalWrite(LED_PIN_INIT, HIGH);
         LOG_INFO("Machine loaded with new configuration");
+        
+        // CRITICAL: Publish state immediately after loading with high priority (QOS1)
+        // This ensures the backend receives the IDLE state quickly so the app can detect it
+        publishStateOnDemand();
     } else if (String(topic) == CONFIG_TOPIC) {
         LOG_INFO("Received config message from server");
         config.timestamp = doc["timestamp"].as<String>();
@@ -984,12 +997,12 @@ void CarWashController::update() {
             }
             
             bool tokenExpired = (totalElapsedTime >= TOKEN_TIME);
-            LOG_INFO("[TOKEN_TIMEOUT] state=%d, tokenStartTime=%lu, tokenTimeElapsed=%lu, currentTime=%lu, runningTime=%lu, totalElapsedTime=%lu, TOKEN_TIME=%lu, expired=%d",
-                    currentState, tokenStartTime, tokenTimeElapsed, currentTime, 
-                    (currentState == STATE_RUNNING) ? runningTime : 0UL, 
-                    totalElapsedTime, TOKEN_TIME, tokenExpired ? 1 : 0);
+            // LOG_INFO("[TOKEN_TIMEOUT] state=%d, tokenStartTime=%lu, tokenTimeElapsed=%lu, currentTime=%lu, runningTime=%lu, totalElapsedTime=%lu, TOKEN_TIME=%lu, expired=%d",
+            //         currentState, tokenStartTime, tokenTimeElapsed, currentTime, 
+            //         (currentState == STATE_RUNNING) ? runningTime : 0UL, 
+            //         totalElapsedTime, TOKEN_TIME, tokenExpired ? 1 : 0);
         } else {
-            LOG_INFO("[TOKEN_TIMEOUT] state=%d, tokenStartTime=%lu (not active)", currentState, tokenStartTime);
+            // LOG_INFO("[TOKEN_TIMEOUT] state=%d, tokenStartTime=%lu (not active)", currentState, tokenStartTime);
         }
         
         // Log user inactivity timeout variables
@@ -1002,11 +1015,11 @@ void CarWashController::update() {
             }
             
             bool inactivityExpired = (elapsedTime >= USER_INACTIVE_TIMEOUT);
-            LOG_INFO("[INACTIVITY_TIMEOUT] state=%d, isLoaded=%d, lastActionTime=%lu, currentTime=%lu, elapsedTime=%lu, USER_INACTIVE_TIMEOUT=%lu, expired=%d",
-                    currentState, config.isLoaded ? 1 : 0, lastActionTime, currentTime, 
-                    elapsedTime, USER_INACTIVE_TIMEOUT, inactivityExpired ? 1 : 0);
+            // LOG_INFO("[INACTIVITY_TIMEOUT] state=%d, isLoaded=%d, lastActionTime=%lu, currentTime=%lu, elapsedTime=%lu, USER_INACTIVE_TIMEOUT=%lu, expired=%d",
+            //         currentState, config.isLoaded ? 1 : 0, lastActionTime, currentTime, 
+            //         elapsedTime, USER_INACTIVE_TIMEOUT, inactivityExpired ? 1 : 0);
         } else {
-            LOG_INFO("[INACTIVITY_TIMEOUT] state=%d, isLoaded=%d (not active)", currentState, config.isLoaded ? 1 : 0);
+            // LOG_INFO("[INACTIVITY_TIMEOUT] state=%d, isLoaded=%d (not active)", currentState, config.isLoaded ? 1 : 0);
         }
         
         lastTimeoutLogTime = currentTime;
@@ -1155,11 +1168,10 @@ void CarWashController::update() {
         }
     }
     
-    // PRIORITY 3: Publish periodic state LAST (non-critical, can wait, may block for network I/O)
-    // This allows monitoring of machine status even before initialization
-    // CRITICAL: This may block, so it's done last to not delay button/timeout handling
-    // CRITICAL: Re-check timeout before potentially blocking MQTT operation
-    publishPeriodicState();
+    // NOTE: Periodic state publishing has been removed.
+    // State is now published on demand with high priority when:
+    // - A message is received on /init topic
+    // - A message is received on /get_state topic
 }
 
 void CarWashController::publishMachineSetupActionEvent() {
@@ -1388,6 +1400,89 @@ void CarWashController::publishPeriodicState(bool force) {
                 stopMachine(AUTOMATIC);
                 return;
             }
+        }
+    }
+}
+
+void CarWashController::publishStateOnDemand() {
+    // CRITICAL: Re-check timeout before potentially blocking MQTT operation
+    // This ensures timeout is not delayed by network I/O
+    unsigned long currentTime = millis();
+    if (currentState != STATE_FREE && config.isLoaded) {
+        // Handle potential millis() overflow
+        unsigned long elapsedTime;
+        if (currentTime >= lastActionTime) {
+            elapsedTime = currentTime - lastActionTime;
+        } else {
+            // Overflow occurred - calculate correctly
+            elapsedTime = (0xFFFFFFFFUL - lastActionTime) + currentTime + 1;
+        }
+        if (elapsedTime >= USER_INACTIVE_TIMEOUT) {
+            // Timeout reached - stop immediately and skip MQTT publish
+            LOG_INFO("Inactivity timeout reached in publishStateOnDemand (%lu ms >= %lu ms)", elapsedTime, USER_INACTIVE_TIMEOUT);
+            stopMachine(AUTOMATIC);
+            return;
+        }
+    }
+    
+    StaticJsonDocument<512> doc;
+    doc["machine_id"] = MACHINE_ID;
+    String timestamp = getTimestamp();
+    doc["timestamp"] = timestamp;
+    doc["status"] = getMachineStateString(currentState);
+
+    if (config.isLoaded) {
+        JsonObject sessionMetadata = doc.createNestedObject("session_metadata");
+        sessionMetadata["session_id"] = config.sessionId;
+        sessionMetadata["user_id"] = config.userId;
+        sessionMetadata["user_name"] = config.userName;
+        sessionMetadata["tokens_left"] = config.tokens;
+        sessionMetadata["physical_tokens"] = config.physicalTokens;
+        sessionMetadata["timestamp"] = config.timestamp;
+        // Include seconds_left for RUNNING and PAUSED states
+        // (getSecondsLeft() returns 0 for other states, so this is safe)
+        if (currentState == STATE_RUNNING || currentState == STATE_PAUSED) {
+            sessionMetadata["seconds_left"] = getSecondsLeft();
+        }
+    }
+
+    String jsonString;
+    serializeJson(doc, jsonString);
+    
+    // Log state publish attempt for debugging
+    LOG_INFO("Publishing state on demand: status=%s, timestamp=%s", 
+              getMachineStateString(currentState).c_str(), timestamp.c_str());
+    
+    // CRITICAL: On-demand state messages use QOS1 (AT_LEAST_ONCE) with high priority
+    // This ensures the backend receives the state update reliably and quickly
+    // Use longer timeout (1000ms) for high-priority messages
+    bool published = mqttClient.publishNonBlocking(STATE_TOPIC.c_str(), jsonString.c_str(), QOS1_AT_LEAST_ONCE, 1000);
+    
+    // Update lastStatePublishTime to prevent immediate re-publish
+    lastStatePublishTime = millis();
+    
+    if (!published) {
+        LOG_WARNING("On-demand state publish failed (MQTT may be busy or disconnected)");
+    } else {
+        LOG_INFO("State published successfully on demand");
+    }
+    
+    // CRITICAL: Re-check timeout after potentially blocking MQTT operation
+    // This ensures timeout is not missed even if MQTT publish blocked
+    currentTime = millis();
+    if (currentState != STATE_FREE && config.isLoaded) {
+        // Handle potential millis() overflow
+        unsigned long elapsedTime;
+        if (currentTime >= lastActionTime) {
+            elapsedTime = currentTime - lastActionTime;
+        } else {
+            // Overflow occurred - calculate correctly
+            elapsedTime = (0xFFFFFFFFUL - lastActionTime) + currentTime + 1;
+        }
+        if (elapsedTime >= USER_INACTIVE_TIMEOUT) {
+            LOG_INFO("Inactivity timeout reached after on-demand MQTT publish (%lu ms >= %lu ms)", elapsedTime, USER_INACTIVE_TIMEOUT);
+            stopMachine(AUTOMATIC);
+            return;
         }
     }
 }

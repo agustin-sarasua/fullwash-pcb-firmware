@@ -38,6 +38,7 @@ extern String CONFIG_TOPIC;
 extern String ACTION_TOPIC;
 extern String STATE_TOPIC;
 extern String COMMAND_TOPIC;
+extern String GET_STATE_TOPIC;
 
 // QoS Levels
 const uint32_t QOS0_AT_MOST_ONCE = 0;
@@ -57,7 +58,7 @@ struct MqttMessage {
 };
 
 // Diagnostic flags
-const bool ENABLE_NETWORK_MANAGER_DIAGNOSTICS = false; // Set to true to enable diagnostic messages in Network Manager task and MQTT client
-const bool ENABLE_BUTTON_DIAGNOSTICS = true; // Set to true to enable diagnostic messages for button detection and handling
+const bool ENABLE_NETWORK_MANAGER_DIAGNOSTICS = true; // Set to true to enable diagnostic messages in Network Manager task and MQTT client
+const bool ENABLE_BUTTON_DIAGNOSTICS = false; // Set to true to enable diagnostic messages for button detection and handling
 
 #endif // CONSTANTS_H

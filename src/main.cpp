@@ -330,6 +330,7 @@ void TaskNetworkManager(void *pvParameters) {
                             mqttClient.subscribe(INIT_TOPIC.c_str());
                             mqttClient.subscribe(CONFIG_TOPIC.c_str());
                             mqttClient.subscribe(COMMAND_TOPIC.c_str());
+                            mqttClient.subscribe(GET_STATE_TOPIC.c_str());
                             
                             // Notify that we're back online
                             if (controller) {
@@ -372,16 +373,33 @@ void TaskNetworkManager(void *pvParameters) {
         
         // Process MQTT messages if connected
         // SMART CONNECTIVITY CHECKING: Call loop() less frequently to reduce mutex contention
-        // - When connected: call every 5 seconds (reduced from 2s)
+        // - When connected: call every 15 seconds (increased from 5s to reduce mutex contention)
+        // - Skip loop() if publisher queue has messages waiting (publisher has priority)
         // - loop() handles its own smart checking internally
         static unsigned long lastLoopCall = 0;
         unsigned long now = millis();
-        if (wasNetworkConnected && (now - lastLoopCall > 5000)) {
-            lastLoopCall = now;
-            // Yield to higher priority tasks (publisher) before potentially blocking operation
-            vTaskDelay(pdMS_TO_TICKS(50));
+        if (wasNetworkConnected && (now - lastLoopCall > 15000)) {
+            // Check if publisher queue has messages waiting - if so, skip loop() to let publisher run first
+            UBaseType_t queueDepth = 0;
+            if (xMqttPublishQueue != NULL) {
+                queueDepth = uxQueueMessagesWaiting(xMqttPublishQueue);
+            }
             
-            mqttClient.loop();
+            // Only call loop() if publisher queue is empty or very low
+            // This prevents blocking the publisher task when it has work to do
+            if (queueDepth == 0) {
+                lastLoopCall = now;
+                // Yield to higher priority tasks (publisher) before potentially blocking operation
+                vTaskDelay(pdMS_TO_TICKS(50));
+                
+                mqttClient.loop();
+            } else {
+                // Publisher has messages waiting - skip loop() this time
+                // Will try again on next iteration (after 15s delay)
+                if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS && queueDepth > 3) {
+                    LOG_DEBUG("Skipping MQTT loop() - publisher queue has %d messages waiting", queueDepth);
+                }
+            }
         }
         
         // Longer delay to prevent task from consuming too much CPU
@@ -480,10 +498,10 @@ void TaskMqttPublisher(void *pvParameters) {
             
             // Check if MQTT is connected
             if (mqttClient.isConnected()) {
-                // Attempt to publish the message using non-blocking method with timeout
-                // This prevents blocking if NetworkManager is holding the mutex in loop()
-                // Use 1000ms timeout - gives enough time for loop() to complete processing
-                bool published = mqttClient.publishNonBlocking(msg.topic, msg.payload, msg.qos, 1000);
+                // CRITICAL FIX: Use shorter timeout (50ms) to prevent blocking loop()
+                // If mutex is held by loop(), we'll fail fast and retry
+                // This prevents the publisher from monopolizing the mutex
+                bool published = mqttClient.publishNonBlocking(msg.topic, msg.payload, msg.qos, 50);
                 
                 if (published) {
                     messagesPublished++;
@@ -509,8 +527,9 @@ void TaskMqttPublisher(void *pvParameters) {
                                 }
                                 // Update lastMessageTimestamp so we recognize this as a retry next time
                                 lastMessageTimestamp = msg.timestamp;
-                                // Short delay before retry to allow mutex to be released
-                                vTaskDelay(pdMS_TO_TICKS(50));
+                                // CRITICAL: Longer delay (200ms) to give loop() priority to acquire mutex
+                                // This prevents publisher from immediately re-acquiring and blocking loop()
+                                vTaskDelay(pdMS_TO_TICKS(200));
                             } else {
                                 messagesDropped++;
                                 LOG_WARNING("Failed to re-queue message");
@@ -575,15 +594,15 @@ void TaskMqttPublisher(void *pvParameters) {
                 remainingQueueDepth = uxQueueMessagesWaiting(xMqttPublishQueue);
             }
             
-            // Yield to other tasks - but only if queue is not building up
-            // If queue has messages remaining, process them faster with minimal delay
-            // Reduced threshold from 20 to 5 to prevent queue buildup
+            // CRITICAL FIX: Always yield significantly to give loop() a chance to acquire mutex
+            // The old logic tried to process messages too fast, monopolizing the mutex
+            // Now we prioritize letting loop() run to process incoming messages
             if (remainingQueueDepth > 5) {
-                vTaskDelay(pdMS_TO_TICKS(1));  // Minimal delay when queue is building up
+                vTaskDelay(pdMS_TO_TICKS(10));  // Still delay to let loop() run
             } else if (remainingQueueDepth > 0) {
-                vTaskDelay(pdMS_TO_TICKS(2));  // Small delay when queue has a few messages
+                vTaskDelay(pdMS_TO_TICKS(50));  // Longer delay to prioritize loop()
             } else {
-                vTaskDelay(pdMS_TO_TICKS(10));  // Normal delay when queue is empty
+                vTaskDelay(pdMS_TO_TICKS(100));  // Even longer when queue is empty
             }
         } else {
             // No message received - re-check queue depth in case it changed
@@ -1156,6 +1175,7 @@ void setup() {
       mqttClient.subscribe(INIT_TOPIC.c_str());
       mqttClient.subscribe(CONFIG_TOPIC.c_str());
       mqttClient.subscribe(COMMAND_TOPIC.c_str());
+      mqttClient.subscribe(GET_STATE_TOPIC.c_str());
       
       delay(4000);
       LOG_INFO("Publishing Setup Action Event...");
@@ -1210,7 +1230,7 @@ void setup() {
       "MqttPublisher",              // Task name
       8192,                         // Stack size (bytes) - needs space for MQTT operations
       NULL,                         // Task parameters
-      3,                            // Priority (3 = higher than NetworkManager to get mutex first)
+      2,                            // Priority (2 = SAME as NetworkManager, not higher - prevents monopolizing mutex)
       &TaskMqttPublisherHandle,     // Task handle
       1                             // Pin to core 1 (APP CPU) - same as network operations
   );

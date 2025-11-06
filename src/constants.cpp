@@ -21,6 +21,7 @@ void updateMQTTTopics(const String& machineId, const String& environment) {
     ACTION_TOPIC = buildTopicName(MACHINE_ID, "action", environment);
     STATE_TOPIC = buildTopicName(MACHINE_ID, "state", environment);
     COMMAND_TOPIC = buildTopicName(MACHINE_ID, "command", environment);
+    GET_STATE_TOPIC = buildTopicName(MACHINE_ID, "get_state", environment);
     
     LOG_INFO("MQTT topics updated for machine ID: %s, environment: %s", MACHINE_ID.c_str(), environment.c_str());
 }
@@ -31,3 +32,4 @@ String CONFIG_TOPIC = buildTopicName(MACHINE_ID, "config", "prod");
 String ACTION_TOPIC = buildTopicName(MACHINE_ID, "action", "prod");
 String STATE_TOPIC = buildTopicName(MACHINE_ID, "state", "prod");
 String COMMAND_TOPIC = buildTopicName(MACHINE_ID, "command", "prod");
+String GET_STATE_TOPIC = buildTopicName(MACHINE_ID, "get_state", "prod");

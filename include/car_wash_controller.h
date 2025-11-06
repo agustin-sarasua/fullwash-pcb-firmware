@@ -85,6 +85,7 @@ private:
 
     void publishActionEvent(int buttonIndex, MachineAction machineAction, TriggerType triggerType = MANUAL);
     void publishPeriodicState(bool force = false);
+    void publishStateOnDemand();  // Publish state on demand with high priority (QOS1)
     
     // Helper method to queue MQTT messages for the dedicated publisher task
     bool queueMqttMessage(const char* topic, const char* payload, uint8_t qos, bool isCritical);
