@@ -236,6 +236,29 @@ void CarWashController::handleButtons() {
                             timeSinceLastPauseResume = (0xFFFFFFFFUL - lastPauseResumeTime) + currentTime + 1;
                         }
                         
+                        // CRITICAL FIX: Check if this is the same button press that just activated the machine
+                        // If tokenStartTime was set very recently (within 200ms), this is likely the same press
+                        // that activated from IDLE, so we should ignore it to prevent immediate pause
+                        if (tokenStartTime != 0) {
+                            unsigned long timeSinceActivation;
+                            if (currentTime >= tokenStartTime) {
+                                timeSinceActivation = currentTime - tokenStartTime;
+                            } else {
+                                timeSinceActivation = (0xFFFFFFFFUL - tokenStartTime) + currentTime + 1;
+                            }
+                            
+                            // If activation happened very recently (within 200ms), ignore this pause request
+                            // This prevents the flag handler from pausing immediately after raw polling activated
+                            if (timeSinceActivation < 200) {
+                                LOG_INFO("Button %d pressed while RUNNING - ignoring (just activated %lu ms ago, likely same press)", 
+                                       detectedId + 1, timeSinceActivation);
+                                // Still reset inactivity timeout
+                                lastActionTime = currentTime;
+                                buttonProcessed = true;
+                                return; // Skip raw polling
+                            }
+                        }
+                        
                         // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
                         lastActionTime = currentTime;
                         
@@ -403,6 +426,28 @@ void CarWashController::handleButtons() {
                                 timeSinceLastPauseResume = currentTime - lastPauseResumeTime;
                             } else {
                                 timeSinceLastPauseResume = (0xFFFFFFFFUL - lastPauseResumeTime) + currentTime + 1;
+                            }
+                            
+                            // CRITICAL FIX: Check if this is the same button press that just activated the machine
+                            // If tokenStartTime was set very recently (within 200ms), this is likely the same press
+                            // that activated from IDLE, so we should ignore it to prevent immediate pause
+                            if (tokenStartTime != 0) {
+                                unsigned long timeSinceActivation;
+                                if (currentTime >= tokenStartTime) {
+                                    timeSinceActivation = currentTime - tokenStartTime;
+                                } else {
+                                    timeSinceActivation = (0xFFFFFFFFUL - tokenStartTime) + currentTime + 1;
+                                }
+                                
+                                // If activation happened very recently (within 200ms), ignore this pause request
+                                // This prevents double-processing of the same button press
+                                if (timeSinceActivation < 200) {
+                                    LOG_INFO("Button %d pressed while RUNNING - ignoring (just activated %lu ms ago, likely same press) - raw polling", 
+                                           i + 1, timeSinceActivation);
+                                    // Still reset inactivity timeout
+                                    lastActionTime = currentTime;
+                                    continue; // Skip to next button
+                                }
                             }
                             
                             // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
