@@ -11,10 +11,12 @@
 #include "display_manager.h"
 #include "rtc_manager.h"
 #include "ble_config_manager.h"
+#include "ble_machine_loader.h"
 
-#include "certs/AmazonRootCA.h"
-#include "certs/AWSClientCertificate.h"
-#include "certs/AWSClientPrivateKey.h"
+// LTE/MQTT functionality commented out - using BLE only
+// #include "certs/AmazonRootCA.h"
+// #include "certs/AWSClientCertificate.h"
+// #include "certs/AWSClientPrivateKey.h"
 
 // Wire1 is already defined in the ESP32 Arduino framework
 
@@ -47,6 +49,9 @@ DisplayManager* display;
 
 // Create BLE config manager
 BLEConfigManager* bleConfigManager;
+
+// Create BLE machine loader
+BLEMachineLoader* bleMachineLoader;
 
 // FreeRTOS task handles
 TaskHandle_t TaskCoinDetectorHandle = NULL;
@@ -224,6 +229,8 @@ void TaskButtonDetector(void *pvParameters) {
 /**
  * FreeRTOS Task: Network Manager
  * 
+ * COMMENTED OUT - Using BLE only, no LTE/MQTT
+ * 
  * This task handles all network and MQTT operations to prevent blocking the main loop.
  * It manages:
  * - Network connection monitoring
@@ -233,6 +240,7 @@ void TaskButtonDetector(void *pvParameters) {
  * 
  * Priority: 2 (Medium priority - important but not critical like hardware tasks)
  */
+/* DISABLED - BLE ONLY MODE
 void TaskNetworkManager(void *pvParameters) {
     // SMART CONNECTIVITY CHECKING: Check less frequently when things are working
     // Network checks are now handled by smart checking in mqtt_lte_client
@@ -408,6 +416,7 @@ void TaskNetworkManager(void *pvParameters) {
         vTaskDelay(pdMS_TO_TICKS(200));  // Increased to 200ms to give more time for IDLE task
     }
 }
+*/ // END DISABLED - BLE ONLY MODE
 
 /**
  * FreeRTOS Task: Display Update
@@ -447,6 +456,8 @@ void TaskDisplayUpdate(void *pvParameters) {
 /**
  * FreeRTOS Task: MQTT Publisher
  * 
+ * COMMENTED OUT - Using BLE only, no LTE/MQTT
+ * 
  * This task handles all MQTT message publishing in a dedicated task to prevent
  * blocking the main loop and other critical tasks. It:
  * - Consumes messages from xMqttPublishQueue
@@ -456,6 +467,7 @@ void TaskDisplayUpdate(void *pvParameters) {
  * 
  * Priority: 2 (Medium priority - important for data delivery)
  */
+/* DISABLED - BLE ONLY MODE
 void TaskMqttPublisher(void *pvParameters) {
     const TickType_t xQueueWaitTime = pdMS_TO_TICKS(100);  // Wait up to 100ms for messages
     const int MAX_RETRY_COUNT = 3;  // Maximum retry attempts for critical messages
@@ -633,6 +645,7 @@ void TaskMqttPublisher(void *pvParameters) {
         }
     }
 }
+*/ // END DISABLED - BLE ONLY MODE
 
 /**
  * FreeRTOS Task: System Watchdog
@@ -736,6 +749,7 @@ void TaskWatchdog(void *pvParameters) {
     }
 }
 
+/* DISABLED - BLE ONLY MODE
 void mqtt_callback(char *topic, byte *payload, unsigned int len) {
     // Log every received message
     Serial.print("[MQTT RX] Topic: ");
@@ -954,6 +968,7 @@ void mqtt_callback(char *topic, byte *payload, unsigned int len) {
         controller->handleMqttMessage(topic, payload, len);
     }
 }
+*/ // END DISABLED - BLE ONLY MODE
 
 void setup() {
   // Initialize Logger with default log level
@@ -1143,21 +1158,11 @@ void setup() {
   // Set I2C mutex for display manager (shared with RTC)
   display->setI2CMutex(xI2CMutex);
   
+  // MQTT initialization commented out - using BLE only
+  /* DISABLED - BLE ONLY MODE
   // Initialize MQTT client with callback
   mqttClient.setCallback(mqtt_callback);
   mqttClient.setBufferSize(512);
-
-//   // Deinitialize BLE if it was initialized (to free memory for MQTT/SSL)
-//   // BLE consumes ~30-40KB of heap which is needed for SSL/TLS handshake
-//   if (bleConfigManager && bleConfigManager->isInitialized()) {
-//     LOG_INFO("=== Freeing BLE Memory for MQTT ===");
-//     LOG_INFO("Current free heap: %d bytes", ESP.getFreeHeap());
-//     bleConfigManager->deinit();
-//     delay(1000); // Give system time to clean up
-//     LOG_INFO("After BLE deinit, free heap: %d bytes", ESP.getFreeHeap());
-//     LOG_INFO("BLE deinitialized - memory freed for MQTT/SSL");
-//     LOG_INFO("===================================");
-//   }
 
   // Initialize modem and connect to network (in setup, network task will handle reconnections)
   LOG_INFO("Initializing modem and connecting to network...");
@@ -1186,7 +1191,21 @@ void setup() {
   } else {
     LOG_ERROR("Failed to initialize modem");
   }
+  */ // END DISABLED - BLE ONLY MODE
   
+  // Initialize BLE Machine Loader for direct machine loading
+  LOG_INFO("Initializing BLE Machine Loader...");
+  bleMachineLoader = new BLEMachineLoader();
+  if (bleMachineLoader->begin(machineNum, controller)) {
+    LOG_INFO("BLE Machine Loader initialized successfully!");
+    LOG_INFO("Device name: FullWash-%s", machineNum.c_str());
+    LOG_INFO("Machine will advertise via BLE when FREE");
+  } else {
+    LOG_ERROR("Failed to initialize BLE Machine Loader");
+  }
+  
+  // Network Manager task commented out - using BLE only
+  /* DISABLED - BLE ONLY MODE
   // Create Network Manager task (handles all network/MQTT operations)
   LOG_INFO("Creating Network Manager task...");
   xTaskCreatePinnedToCore(
@@ -1198,6 +1217,7 @@ void setup() {
       &TaskNetworkManagerHandle,    // Task handle
       1                             // Pin to core 1 (APP CPU)
   );
+  */ // END DISABLED - BLE ONLY MODE
   
   // Create Watchdog task (monitors system health)
   LOG_INFO("Creating Watchdog task...");
@@ -1223,6 +1243,8 @@ void setup() {
       0                             // Pin to core 0 (PRO CPU) - keep display responsive
   );
   
+  // MQTT Publisher task commented out - using BLE only
+  /* DISABLED - BLE ONLY MODE
   // Create MQTT Publisher task (handles all MQTT publishing)
   LOG_INFO("Creating MQTT Publisher task...");
   xTaskCreatePinnedToCore(
@@ -1234,6 +1256,7 @@ void setup() {
       &TaskMqttPublisherHandle,     // Task handle
       1                             // Pin to core 1 (APP CPU) - same as network operations
   );
+  */ // END DISABLED - BLE ONLY MODE
   
   LOG_INFO("All FreeRTOS tasks created successfully");
   
@@ -1252,18 +1275,36 @@ void loop() {
   static unsigned long lastLedToggle = 0;
   static unsigned long lastBleUpdate = 0;
   static bool ledState = HIGH;
+  static bool lastMachineFree = true;
   
   // Current time
   unsigned long currentTime = millis();
   
-//   // Update BLE config manager (check auth timeout, etc.) - only if BLE is still initialized
-//   if (bleConfigManager && bleConfigManager->isInitialized() && currentTime - lastBleUpdate > 1000) {
-//     lastBleUpdate = currentTime;
-//     bleConfigManager->update();
-//   }
+  // Update BLE machine loader state and advertising
+  if (bleMachineLoader && currentTime - lastBleUpdate > 1000) {
+    lastBleUpdate = currentTime;
+    bleMachineLoader->update();
+    
+    // Manage BLE advertising based on machine state
+    if (controller) {
+      bool isMachineFree = (controller->getCurrentState() == STATE_FREE);
+      
+      // Start advertising when machine becomes FREE
+      if (isMachineFree && !lastMachineFree) {
+        LOG_INFO("Machine is FREE - starting BLE advertising");
+        bleMachineLoader->startAdvertising();
+      }
+      // Stop advertising when machine is no longer FREE
+      else if (!isMachineFree && lastMachineFree) {
+        LOG_INFO("Machine is loaded - stopping BLE advertising");
+        bleMachineLoader->stopAdvertising();
+      }
+      
+      lastMachineFree = isMachineFree;
+    }
+  }
   
-  // NOTE: Network operations are now handled by TaskNetworkManager
-  // No need to check network status or process MQTT messages here
+  // NOTE: Network operations disabled - using BLE only
   
     // Periodic check (no logging to reduce overhead)
     if (currentTime - lastIoDebugCheck > 4000) {  // Every 4 seconds
@@ -1286,22 +1327,21 @@ if (controller) {
   // Removed from main loop to ensure consistent refresh rate
   
   // Handle LED indicator
-  // Blink pattern based on connection status
-  // Note: Network status is checked less frequently to avoid blocking
-  if (mqttClient.isConnected()) {
-    // Solid LED when fully connected
+  // Simple pattern for BLE mode
+  if (controller && controller->isMachineLoaded()) {
+    // Solid LED when machine is loaded
     digitalWrite(LED_PIN, HIGH);
     ledState = HIGH;
-  } else if (mqttClient.isNetworkConnected()) {
-    // Slow blink when network is connected but MQTT is not
-    if (currentTime - lastLedToggle > 1000) {
+  } else if (bleMachineLoader && bleMachineLoader->isConnected()) {
+    // Fast blink when BLE client is connected
+    if (currentTime - lastLedToggle > 300) {
       lastLedToggle = currentTime;
       ledState = !ledState;
       digitalWrite(LED_PIN, ledState);
     }
   } else {
-    // Fast blink when not connected to network
-    if (currentTime - lastLedToggle > 300) {
+    // Slow blink when waiting for BLE connection
+    if (currentTime - lastLedToggle > 1000) {
       lastLedToggle = currentTime;
       ledState = !ledState;
       digitalWrite(LED_PIN, ledState);
