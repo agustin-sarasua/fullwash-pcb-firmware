@@ -28,18 +28,39 @@ CarWashController::CarWashController(MqttLteClient& client)
     if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
         xSemaphoreGive(xIoExpanderMutex);
+    } else {
+        LOG_ERROR("COIN INIT: Failed to acquire mutex for initial coin state read!");
     }
+    
+    // EXTENSIVE DEBUG: Log the raw values in different formats
+    LOG_INFO("=== COIN DETECTOR INITIALIZATION ===");
+    LOG_INFO("COIN INIT: Raw port value: 0x%02X | Binary: %d%d%d%d%d%d%d%d", 
+           rawPortValue0,
+           (rawPortValue0 & 0x80) ? 1 : 0, (rawPortValue0 & 0x40) ? 1 : 0,
+           (rawPortValue0 & 0x20) ? 1 : 0, (rawPortValue0 & 0x10) ? 1 : 0,
+           (rawPortValue0 & 0x08) ? 1 : 0, (rawPortValue0 & 0x04) ? 1 : 0,
+           (rawPortValue0 & 0x02) ? 1 : 0, (rawPortValue0 & 0x01) ? 1 : 0);
+    LOG_INFO("COIN INIT: COIN_SIG (bit %d) raw bit value = %d", COIN_SIG, (rawPortValue0 & (1 << COIN_SIG)) ? 1 : 0);
     
     // Initialize coin signal state correctly
     // When coin is present: Pin is LOW (bit=0) = ACTIVE
     // When no coin: Pin is HIGH (bit=1) = INACTIVE
     bool initialCoinSignal = ((rawPortValue0 & (1 << COIN_SIG)) == 0); // LOW = coin present = ACTIVE
-    lastCoinState = initialCoinSignal ? LOW : HIGH; // Store as HIGH/LOW for edge detection
+    lastCoinState = initialCoinSignal ? HIGH : LOW; // Store as HIGH/LOW for edge detection (inverted for proper edge detection)
+    
+    LOG_INFO("COIN INIT: initialCoinSignal (active when LOW) = %s", initialCoinSignal ? "ACTIVE (LOW/0)" : "INACTIVE (HIGH/1)");
+    LOG_INFO("COIN INIT: lastCoinState initialized to = %s (for edge detection)", lastCoinState == LOW ? "LOW" : "HIGH");
+    LOG_INFO("COIN INIT: COIN_PROCESS_COOLDOWN = %lu ms", COIN_PROCESS_COOLDOWN);
+    LOG_INFO("COIN INIT: COIN_EDGE_WINDOW = %lu ms", COIN_EDGE_WINDOW);
+    LOG_INFO("COIN INIT: COIN_MIN_EDGES = %d", COIN_MIN_EDGES);
     
     // IMPORTANT: Initialize these static variables to prevent false triggers at startup
     // We'll skip any coin signals that happen in the first 2 seconds after boot
-    lastCoinProcessedTime = millis();
-    lastCoinDebounceTime = millis();
+    unsigned long initTime = millis();
+    lastCoinProcessedTime = initTime;
+    lastCoinDebounceTime = initTime;
+    LOG_INFO("COIN INIT: Timers initialized at %lu ms (will ignore coins for first 3 seconds)", initTime);
+    LOG_INFO("=== END COIN DETECTOR INITIALIZATION ===");
 
     // Initialize LED pins - using built-in LED
     pinMode(LED_PIN_INIT, OUTPUT);
@@ -852,54 +873,63 @@ void CarWashController::handleCoinAcceptor() {
     
     // Skip startup period to avoid false triggers
     static bool startupPeriod = true;
-    static unsigned long startupEndTime = 0;
+    static unsigned long startupBeginTime = 0;
     if (startupPeriod) {
-        if (currentTime < 5000) { // Skip first 5 seconds
+        if (startupBeginTime == 0) {
+            startupBeginTime = currentTime;
+            LOG_INFO("COIN: Startup period started at %lu ms (will monitor after 3000ms)", currentTime);
+        }
+        if (currentTime < 3000) { // Skip first 3 seconds
+            static unsigned long lastStartupLog = 0;
+            if (currentTime - lastStartupLog > 1000) {
+                lastStartupLog = currentTime;
+                LOG_DEBUG("COIN: Still in startup period (%lu ms remaining)", 3000 - currentTime);
+            }
             return;
         }
-        // Re-initialize coin state at the end of startup period to avoid false edge detection
-        uint8_t rawPortValue0 = 0;
-        if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
-            xSemaphoreGive(xIoExpanderMutex);
-        }
-        bool initialCoinSignal = ((rawPortValue0 & (1 << COIN_SIG)) == 0);
-        lastCoinState = initialCoinSignal ? LOW : HIGH;
-        lastCoinProcessedTime = currentTime; // Reset cooldown timer
-        startupEndTime = currentTime;
         startupPeriod = false;
-        return; // Skip this cycle to avoid immediate false detection
+        LOG_INFO("COIN: Startup period over at %lu ms (elapsed: %lu ms), now actively monitoring", 
+                currentTime, currentTime - startupBeginTime);
     }
-    
-    // Additional grace period after startup - ignore any edge detection for 1 second after startup ends
-    if (startupEndTime > 0 && (currentTime - startupEndTime) < 1000) {
-        // Re-read and update state during grace period to prevent false edge detection
-        uint8_t rawPortValue0 = 0;
-        if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
-            xSemaphoreGive(xIoExpanderMutex);
-        }
-        bool currentCoinSignal = ((rawPortValue0 & (1 << COIN_SIG)) == 0);
-        lastCoinState = currentCoinSignal ? LOW : HIGH;
-        return;
-    }
-    startupEndTime = 0; // Clear grace period flag after it expires
     
     // FIXED: Check if the interrupt handler detected a coin signal
     if (ioExpander.isCoinSignalDetected()) {
+        LOG_INFO("COIN: *** Interrupt-based coin signal detected! *** (time: %lu ms)", currentTime);
+        
+        // Read the current state to get more details
         uint8_t rawPortValue0 = 0;
         if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
             rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
+            LOG_INFO("COIN: Interrupt detected - Port0=0x%02X, COIN_SIG bit=%d", 
+                    rawPortValue0, (rawPortValue0 & (1 << COIN_SIG)) ? 1 : 0);
             ioExpander.clearCoinSignalFlag();
+            LOG_DEBUG("COIN: Cleared coin signal flag");
             xSemaphoreGive(xIoExpanderMutex);
         } else {
-            LOG_WARNING("Failed to acquire IO expander mutex in handleCoinAcceptor()");
+            LOG_WARNING("COIN: Failed to acquire IO expander mutex in handleCoinAcceptor()");
             return;
         }
         
+        // For your hardware configuration, 3.3V = active coin, 0.05V = no coin
+        // When a coin passes (3.3V), the TCA9535 reads LOW (bit=0)
+        // When no coin is present (0.05V), the TCA9535 reads HIGH (bit=1)
+        bool coinSignalActive = ((rawPortValue0 & (1 << COIN_SIG)) == 0);
+        
+        LOG_INFO("COIN: Interrupt - Coin signal state: %s (raw bit: %d)", 
+                coinSignalActive ? "ACTIVE (LOW/0 - coin present)" : "INACTIVE (HIGH/1 - no coin)",
+                (rawPortValue0 & (1 << COIN_SIG)) ? 1 : 0);
+        
+        unsigned long timeSinceLastCoin = currentTime - lastCoinProcessedTime;
+        LOG_INFO("COIN: Time since last coin: %lu ms (cooldown: %lu ms)", 
+                timeSinceLastCoin, COIN_PROCESS_COOLDOWN);
+        
         // Only process the coin if it's been long enough since the last coin
-        if (currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
+        if (timeSinceLastCoin > COIN_PROCESS_COOLDOWN) {
+            LOG_INFO("COIN: *** Processing coin from interrupt detection ***");
             processCoinInsertion(currentTime);
+        } else {
+            LOG_WARNING("COIN: Ignoring coin signal - too soon after last coin (%lu ms < %lu ms cooldown)",
+                    timeSinceLastCoin, COIN_PROCESS_COOLDOWN);
         }
         
         return;
@@ -914,7 +944,11 @@ void CarWashController::handleCoinAcceptor() {
         rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
         xSemaphoreGive(xIoExpanderMutex);
     } else {
-        LOG_WARNING("Failed to acquire IO expander mutex in handleCoinAcceptor() fallback");
+        static unsigned long lastMutexWarning = 0;
+        if (currentTime - lastMutexWarning > 5000) {
+            LOG_WARNING("COIN: Failed to acquire IO expander mutex in handleCoinAcceptor() fallback");
+            lastMutexWarning = currentTime;
+        }
         return;
     }
     
@@ -922,6 +956,22 @@ void CarWashController::handleCoinAcceptor() {
     // When coin is present: Pin is LOW (bit=0) = ACTIVE
     // When no coin: Pin is HIGH (bit=1) = INACTIVE
     bool coinSignalActive = ((rawPortValue0 & (1 << COIN_SIG)) == 0);
+    
+    // Periodic detailed state logging
+    static unsigned long lastStateLog = 0;
+    static uint8_t lastLoggedPortValue = 0xFF;
+    if (currentTime - lastStateLog > 2000 || rawPortValue0 != lastLoggedPortValue) {
+        if (rawPortValue0 != lastLoggedPortValue) {
+            LOG_INFO("COIN: Polling - Port0 changed: 0x%02X -> 0x%02X", lastLoggedPortValue, rawPortValue0);
+            lastLoggedPortValue = rawPortValue0;
+        }
+        LOG_DEBUG("COIN: Polling - Port0=0x%02X, COIN_SIG bit=%d, Signal=%s, lastCoinState=%s", 
+                rawPortValue0,
+                (rawPortValue0 & (1 << COIN_SIG)) ? 1 : 0,
+                coinSignalActive ? "ACTIVE (LOW/0)" : "INACTIVE (HIGH/1)",
+                lastCoinState == LOW ? "LOW" : "HIGH");
+        lastStateLog = currentTime;
+    }
     
     // Static variables to track edges and timing patterns
     static unsigned long lastEdgeTime = 0;
@@ -933,28 +983,53 @@ void CarWashController::handleCoinAcceptor() {
     bool lastCoinStateBool = (lastCoinState == LOW);
     
     if (coinSignalActive != lastCoinStateBool) {
-        unsigned long timeSinceLastEdge = currentTime - lastEdgeTime;
+        unsigned long timeSinceLastEdge = (lastEdgeTime > 0) ? (currentTime - lastEdgeTime) : 0;
         lastEdgeTime = currentTime;
+        
+        LOG_INFO("COIN: *** EDGE DETECTED *** %s -> %s (time: %lu ms, since last edge: %lu ms)", 
+                lastCoinStateBool ? "ACTIVE (coin present, LOW/0)" : "INACTIVE (no coin, HIGH/1)", 
+                coinSignalActive ? "ACTIVE (coin present, LOW/0)" : "INACTIVE (no coin, HIGH/1)",
+                currentTime, timeSinceLastEdge);
         
         // Multi-edge detection logic for coins that generate multiple pulses
         // Track ALL edges (both rising and falling) to detect coin patterns
         if (edgeCount == 0 || currentTime - edgeWindowStart > 1000) {
+            if (edgeCount > 0) {
+                LOG_DEBUG("COIN: Starting new edge window (previous had %d edges)", edgeCount);
+            }
             edgeWindowStart = currentTime;
             edgeCount = 1;
+            LOG_DEBUG("COIN: Edge window started, edgeCount=1");
         } else {
             edgeCount++;
-            
             unsigned long windowDuration = currentTime - edgeWindowStart;
             
-            if (edgeCount >= COIN_MIN_EDGES && windowDuration < COIN_EDGE_WINDOW && 
-                currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
-                
+            LOG_DEBUG("COIN: Edge #%d in window (duration: %lu ms, window limit: %lu ms)", 
+                    edgeCount, windowDuration, COIN_EDGE_WINDOW);
+            
+            unsigned long timeSinceLastCoin = currentTime - lastCoinProcessedTime;
+            bool meetsMinEdges = (edgeCount >= COIN_MIN_EDGES);
+            bool withinWindow = (windowDuration < COIN_EDGE_WINDOW);
+            bool pastCooldown = (timeSinceLastCoin > COIN_PROCESS_COOLDOWN);
+            
+            LOG_DEBUG("COIN: Pattern check - edges: %d/%d, window: %lu/%lu ms, cooldown: %lu/%lu ms", 
+                    edgeCount, COIN_MIN_EDGES, windowDuration, COIN_EDGE_WINDOW, 
+                    timeSinceLastCoin, COIN_PROCESS_COOLDOWN);
+            
+            if (meetsMinEdges && withinWindow && pastCooldown) {
+                LOG_INFO("COIN: *** Detected coin pattern: %d edges in %lu ms window ***", 
+                        edgeCount, windowDuration);
                 processCoinInsertion(currentTime);
                 edgeCount = 0;
                 edgeWindowStart = 0;
+            } else {
+                if (!meetsMinEdges) LOG_DEBUG("COIN: Pattern rejected - not enough edges");
+                if (!withinWindow) LOG_DEBUG("COIN: Pattern rejected - window too long");
+                if (!pastCooldown) LOG_DEBUG("COIN: Pattern rejected - cooldown not met");
             }
             
             if (edgeCount > 10) {
+                LOG_WARNING("COIN: Too many edges (%d), resetting edge counter", edgeCount);
                 edgeCount = 0;
                 edgeWindowStart = 0;
             }
@@ -966,35 +1041,73 @@ void CarWashController::handleCoinAcceptor() {
         // We detect when the pin goes from INACTIVE (HIGH) to ACTIVE (LOW)
         // This is the primary detection method - single falling edge
         if (coinSignalActive && !lastCoinStateBool) {
-            if (currentTime - lastCoinProcessedTime > COIN_PROCESS_COOLDOWN) {
+            unsigned long timeSinceLastCoin = currentTime - lastCoinProcessedTime;
+            LOG_INFO("COIN: *** FALLING EDGE DETECTED - Pin went from INACTIVE (HIGH/1) to ACTIVE (LOW/0) ***");
+            LOG_INFO("COIN: Time since last coin: %lu ms (cooldown: %lu ms)", 
+                    timeSinceLastCoin, COIN_PROCESS_COOLDOWN);
+            
+            if (timeSinceLastCoin > COIN_PROCESS_COOLDOWN) {
+                LOG_INFO("COIN: *** Processing coin insertion from falling edge ***");
                 processCoinInsertion(currentTime);
                 edgeCount = 0; // Reset edge count after valid coin
                 edgeWindowStart = 0; // Reset window
+            } else {
+                LOG_WARNING("COIN: Ignoring coin signal - too soon after last coin (%lu ms < %lu ms cooldown)",
+                        timeSinceLastCoin, COIN_PROCESS_COOLDOWN);
             }
         }
         
         // Update lastCoinState (store as HIGH/LOW)
+        uint8_t oldLastCoinState = lastCoinState;
         lastCoinState = coinSignalActive ? LOW : HIGH;
+        LOG_DEBUG("COIN: Updated lastCoinState: %s -> %s", 
+                oldLastCoinState == LOW ? "LOW" : "HIGH",
+                lastCoinState == LOW ? "LOW" : "HIGH");
     }
     
     // Reset edge detection if it's been too long
     if (edgeCount > 0 && currentTime - edgeWindowStart > 1000) {
+        LOG_WARNING("COIN: Resetting incomplete edge pattern after timeout (had %d edges, window: %lu ms)", 
+                edgeCount, currentTime - edgeWindowStart);
         edgeCount = 0;
         edgeWindowStart = 0;
+    }
+    
+    // Periodic debug logging
+    static unsigned long lastDebugTime = 0;
+    if (currentTime - lastDebugTime > 5000) {
+        lastDebugTime = currentTime;
+        unsigned long timeSinceLastCoin = currentTime - lastCoinProcessedTime;
+        LOG_INFO("COIN: Status - Signal=%s, EdgeCount=%d, LastCoin=%lu ms ago, Cooldown=%lu ms, InterruptFlag=%s", 
+                coinSignalActive ? "ACTIVE (LOW/0)" : "INACTIVE (HIGH/1)",
+                edgeCount,
+                timeSinceLastCoin,
+                COIN_PROCESS_COOLDOWN,
+                ioExpander.isCoinSignalDetected() ? "SET" : "CLEAR");
     }
 }
 
 // Helper method to handle the business logic of a coin insertion
 void CarWashController::processCoinInsertion(unsigned long currentTime) {
+    LOG_INFO("COIN: ========================================");
+    LOG_INFO("COIN: *** COIN DETECTED AND PROCESSED! ***");
+    LOG_INFO("COIN: Time: %lu ms", currentTime);
+    LOG_INFO("COIN: ========================================");
+    
     // Update activity tracking - crucial for debouncing and cooldown periods
+    unsigned long oldLastCoinProcessedTime = lastCoinProcessedTime;
     lastActionTime = currentTime;
     lastCoinProcessedTime = currentTime; // This is critical for the cooldown between coins
+    LOG_DEBUG("COIN: Updated lastCoinProcessedTime: %lu -> %lu", oldLastCoinProcessedTime, currentTime);
     
     // Update or create session
     if (config.isLoaded) {
+        LOG_INFO("COIN: Adding physical token to existing session (tokens: %d -> %d)", 
+                config.tokens, config.tokens + 1);
         config.physicalTokens++;
         config.tokens++;
     } else {
+        LOG_INFO("COIN: Creating new anonymous session from coin insertion");
         
         char sessionIdBuffer[30];
         sprintf(sessionIdBuffer, "manual_%lu", currentTime);
@@ -1008,6 +1121,9 @@ void CarWashController::processCoinInsertion(unsigned long currentTime) {
         
         currentState = STATE_IDLE;
         digitalWrite(LED_PIN_INIT, HIGH);
+        
+        LOG_INFO("COIN: Anonymous session created - sessionId='%s', userId='unknown', tokens=%d, state=IDLE", 
+                config.sessionId.c_str(), config.tokens);
     }
     
     publishCoinInsertedEvent();
@@ -1122,14 +1238,17 @@ void CarWashController::update() {
         LOG_INFO("Handling buttons and coin acceptor - isLoaded=%d, timestamp='%s'", config.isLoaded, config.timestamp.c_str());
     }
     
+    // Always handle coin acceptor - coins can create anonymous sessions when machine is not loaded
+    handleCoinAcceptor();
+    
+    // Only handle buttons when machine is loaded (buttons require a loaded session)
     if (config.isLoaded) {
         handleButtons();
-        handleCoinAcceptor();
     } else {
         // Log when buttons are skipped (only in debug mode to avoid spam)
         static unsigned long lastSkipLog = 0;
         if (currentTime - lastSkipLog > 5000) { // Log every 5 seconds max
-            LOG_INFO("Skipping button handling - machine not loaded (isLoaded=%d, timestamp empty=%d)", 
+            LOG_DEBUG("Skipping button handling - machine not loaded (isLoaded=%d, timestamp empty=%d). Coins can still be inserted to create anonymous session.", 
                      config.isLoaded, config.timestamp.length() == 0);
             lastSkipLog = currentTime;
         }

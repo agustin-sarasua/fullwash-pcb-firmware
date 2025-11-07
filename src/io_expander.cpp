@@ -300,12 +300,21 @@ void IoExpander::handleInterrupt() {
         
         // LOG_DEBUG("Interrupt detected! Port 0 Value: 0x%02X", portValue);
         
-        bool coinSigActive = ((portValue & (1 << COIN_SIG)) != 0);
+        uint8_t coinSigBit = (portValue & (1 << COIN_SIG));
+        bool coinSigActive = (coinSigBit != 0);
+        
+        LOG_DEBUG("IO EXP: Interrupt handler - Port0=0x%02X, COIN_SIG bit=%d, active=%s", 
+                portValue, coinSigBit ? 1 : 0, coinSigActive ? "YES" : "NO");
         
         // If coin signal is active (3.3V), set the flag
         if (coinSigActive) {
+            bool wasSet = _coinSignalDetected;
             _coinSignalDetected = true;
-            LOG_DEBUG("Coin signal detected in interrupt! SIG=ACTIVE (3.3V)");
+            if (!wasSet) {
+                LOG_INFO("IO EXP: Coin signal detected in interrupt handler! SIG=ACTIVE (3.3V), flag SET");
+            }
+        } else {
+            LOG_DEBUG("IO EXP: Coin signal not active in interrupt (bit=0, LOW)");
         }
         
         // If we have a callback registered, call it with the port value
@@ -323,15 +332,26 @@ bool IoExpander::isCoinSignalDetected() {
 }
 
 void IoExpander::setCoinSignal(uint8_t sign) {
+    bool oldState = _coinSignalDetected;
     if (sign) {
         _coinSignalDetected = true;
+        if (!oldState) {
+            LOG_INFO("IO EXP: Coin signal flag SET (was %s, now SET)", oldState ? "SET" : "CLEAR");
+        }
     } else {
         _coinSignalDetected = false;
+        if (oldState) {
+            LOG_INFO("IO EXP: Coin signal flag CLEARED (was %s, now CLEAR)", oldState ? "SET" : "CLEAR");
+        }
     }
 }
 
 void IoExpander::clearCoinSignalFlag() {
+    bool oldState = _coinSignalDetected;
     _coinSignalDetected = false;
+    if (oldState) {
+        LOG_INFO("IO EXP: Coin signal flag CLEARED (was SET, now CLEAR)");
+    }
 }
 
 // Button detection methods implementation

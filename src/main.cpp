@@ -88,36 +88,88 @@ void TaskCoinDetector(void *pvParameters) {
     const TickType_t xDelay = 50 / portTICK_PERIOD_MS; // 50ms polling interval
     uint8_t coins_sig_state = (1 << COIN_SIG); // Initialize to HIGH (no coin)
     uint8_t _portVal = 0;
+    unsigned long taskStartTime = millis();
     
     // Wait for IO expander to be fully initialized
     vTaskDelay(1000 / portTICK_PERIOD_MS);
     
-    LOG_INFO("Coin detector task started");
+    LOG_INFO("COIN TASK: Coin detector task started (INT_PIN=%d, COIN_SIG bit=%d)", INT_PIN, COIN_SIG);
+    LOG_INFO("COIN TASK: Initial coin_sig_state = 0x%02X (bit %d = %s)", 
+            coins_sig_state, COIN_SIG, 
+            (coins_sig_state & (1 << COIN_SIG)) ? "HIGH (no coin)" : "LOW (coin present)");
+    
+    unsigned long lastTaskLog = 0;
+    unsigned long lastIntPinLog = 0;
     
     for(;;) {
+        unsigned long currentTime = millis();
+        int intPinState = digitalRead(INT_PIN);
+        
+        // Log INT_PIN state changes
+        static int lastIntPinState = -1;
+        if (intPinState != lastIntPinState) {
+            LOG_INFO("COIN TASK: INT_PIN state changed: %d -> %d (time: %lu ms)", 
+                    lastIntPinState, intPinState, currentTime);
+            lastIntPinState = intPinState;
+        }
+        
+        // Periodic INT_PIN status (every 5 seconds)
+        if (currentTime - lastIntPinLog > 5000) {
+            LOG_DEBUG("COIN TASK: INT_PIN=%d (LOW=interrupt active), coin_sig_state=0x%02X, task uptime=%lu ms", 
+                    intPinState, coins_sig_state, currentTime - taskStartTime);
+            lastIntPinLog = currentTime;
+        }
+        
         // Check if interrupt pin is LOW (hardware detected a change)
-        if (digitalRead(INT_PIN) == LOW) {
+        if (intPinState == LOW) {
+            LOG_DEBUG("COIN TASK: INT_PIN is LOW (interrupt detected), attempting to read port");
+            
             // Protect IO expander access with mutex
             // Reduced from 100ms to 50ms for faster failure and better responsiveness
             if (xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                 _portVal = ioExpander.readRegister(INPUT_PORT0);
                 
+                LOG_DEBUG("COIN TASK: Read Port0=0x%02X, COIN_SIG bit=%d, current state=0x%02X", 
+                        _portVal, (_portVal & (1 << COIN_SIG)) ? 1 : 0, coins_sig_state);
+                
                 // Check if COIN_SIG state has changed
-                if (coins_sig_state != (_portVal & (1 << COIN_SIG))) {
+                uint8_t coinSigBit = (_portVal & (1 << COIN_SIG));
+                if (coins_sig_state != coinSigBit) {
+                    LOG_INFO("COIN TASK: *** COIN_SIG state changed: 0x%02X -> 0x%02X ***", 
+                            coins_sig_state, coinSigBit);
+                    
                     // Detect HIGH->LOW transition (coin inserted)
                     if (coins_sig_state == (1 << COIN_SIG)) {
+                        LOG_INFO("COIN TASK: *** HIGH->LOW transition detected! Setting coin signal flag ***");
                         ioExpander.setCoinSignal(1);
                         ioExpander._intCnt++;
+                        LOG_INFO("COIN TASK: Coin signal flag set, interrupt count=%d", ioExpander._intCnt);
+                    } else {
+                        LOG_INFO("COIN TASK: LOW->HIGH transition (coin removed or signal cleared)");
                     }
                     
                     // Update state for next comparison
-                    coins_sig_state = (_portVal & (1 << COIN_SIG));
+                    coins_sig_state = coinSigBit;
+                    LOG_DEBUG("COIN TASK: Updated coins_sig_state to 0x%02X", coins_sig_state);
+                } else {
+                    LOG_DEBUG("COIN TASK: COIN_SIG state unchanged (0x%02X)", coinSigBit);
                 }
                 
                 xSemaphoreGive(xIoExpanderMutex);
             } else {
-                LOG_WARNING("Failed to acquire IO expander mutex in coin detector task");
+                static unsigned long lastMutexWarning = 0;
+                if (currentTime - lastMutexWarning > 2000) {
+                    LOG_WARNING("COIN TASK: Failed to acquire IO expander mutex (timeout)");
+                    lastMutexWarning = currentTime;
+                }
             }
+        }
+        
+        // Periodic task status (every 10 seconds)
+        if (currentTime - lastTaskLog > 10000) {
+            LOG_INFO("COIN TASK: Status - INT_PIN=%d, coin_sig_state=0x%02X, interrupt_count=%d, uptime=%lu ms", 
+                    intPinState, coins_sig_state, ioExpander._intCnt, currentTime - taskStartTime);
+            lastTaskLog = currentTime;
         }
         
         vTaskDelay(xDelay); // Wait 50ms before next check
