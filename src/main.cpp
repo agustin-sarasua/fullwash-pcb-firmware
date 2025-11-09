@@ -70,110 +70,47 @@ SemaphoreHandle_t xI2CMutex = NULL;  // For Wire1 (LCD and RTC)
 QueueHandle_t xMqttPublishQueue = NULL;
 
 /**
- * FreeRTOS Task: Coin Detector
+ * FreeRTOS Task: Coin Detector (Simplified Working Version)
  * 
  * This task monitors the coin acceptor signal pin (COIN_SIG) for state changes.
- * It runs independently to detect coin insertions reliably without blocking the main loop.
+ * Uses a simple state machine to detect HIGH->LOW transitions (coin insertion).
  * 
  * Detection Logic:
- * - Monitors INT_PIN (active LOW when hardware detects a change)
- * - Reads PORT0 register to get current coin signal state
- * - Detects HIGH->LOW transition (coin insertion)
+ * - Polls INT_PIN every 50ms
+ * - When INT_PIN is LOW, reads PORT0 register
+ * - Detects HIGH->LOW transition on COIN_SIG bit
  * - Sets coin signal flag for controller to process
- * 
- * Thread Safety:
- * - Uses mutex protection when accessing ioExpander
  */
 void TaskCoinDetector(void *pvParameters) {
-    const TickType_t xDelay = 50 / portTICK_PERIOD_MS; // 50ms polling interval
-    uint8_t coins_sig_state = (1 << COIN_SIG); // Initialize to HIGH (no coin)
-    uint8_t _portVal = 0;
-    unsigned long taskStartTime = millis();
-    
-    // Wait for IO expander to be fully initialized
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-    
-    LOG_INFO("COIN TASK: Coin detector task started (INT_PIN=%d, COIN_SIG bit=%d)", INT_PIN, COIN_SIG);
-    LOG_INFO("COIN TASK: Initial coin_sig_state = 0x%02X (bit %d = %s)", 
-            coins_sig_state, COIN_SIG, 
-            (coins_sig_state & (1 << COIN_SIG)) ? "HIGH (no coin)" : "LOW (coin present)");
-    
-    unsigned long lastTaskLog = 0;
-    unsigned long lastIntPinLog = 0;
-    
-    for(;;) {
-        unsigned long currentTime = millis();
-        int intPinState = digitalRead(INT_PIN);
-        
-        // Log INT_PIN state changes
-        static int lastIntPinState = -1;
-        if (intPinState != lastIntPinState) {
-            LOG_INFO("COIN TASK: INT_PIN state changed: %d -> %d (time: %lu ms)", 
-                    lastIntPinState, intPinState, currentTime);
-            lastIntPinState = intPinState;
-        }
-        
-        // Periodic INT_PIN status (every 5 seconds)
-        if (currentTime - lastIntPinLog > 5000) {
-            LOG_DEBUG("COIN TASK: INT_PIN=%d (LOW=interrupt active), coin_sig_state=0x%02X, task uptime=%lu ms", 
-                    intPinState, coins_sig_state, currentTime - taskStartTime);
-            lastIntPinLog = currentTime;
-        }
-        
-        // Check if interrupt pin is LOW (hardware detected a change)
-        if (intPinState == LOW) {
-            LOG_DEBUG("COIN TASK: INT_PIN is LOW (interrupt detected), attempting to read port");
-            
-            // Protect IO expander access with mutex
-            // Reduced from 100ms to 50ms for faster failure and better responsiveness
-            if (xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                _portVal = ioExpander.readRegister(INPUT_PORT0);
+  const TickType_t xDelay = 50 / portTICK_PERIOD_MS; // 50ms转换为FreeRTOS ticks
+  uint8_t coins_sig_state = (1 << COIN_SIG);
+  uint8_t _portVal = 0;
+  for(;;) {
+    // 任务A的工作代码
+    if (digitalRead(INT_PIN) == LOW)
+    {
+        _portVal = ioExpander.readRegister(INPUT_PORT0);
+        if(coins_sig_state != (_portVal & (1 << COIN_SIG)))
+        {
+            // 1--->0 硬币型号产生
+            if(coins_sig_state == (1 << COIN_SIG))
+            {
+                ioExpander.setCoinSignal(1);
+                ioExpander._intCnt++;
+                LOG_INFO("COIN DETECTED! Port 0 Value: 0x%02X, coin count: %d", _portVal, ioExpander._intCnt);
                 
-                LOG_DEBUG("COIN TASK: Read Port0=0x%02X, COIN_SIG bit=%d, current state=0x%02X", 
-                        _portVal, (_portVal & (1 << COIN_SIG)) ? 1 : 0, coins_sig_state);
-                
-                // Check if COIN_SIG state has changed
-                uint8_t coinSigBit = (_portVal & (1 << COIN_SIG));
-                if (coins_sig_state != coinSigBit) {
-                    LOG_INFO("COIN TASK: *** COIN_SIG state changed: 0x%02X -> 0x%02X ***", 
-                            coins_sig_state, coinSigBit);
-                    
-                    // Detect HIGH->LOW transition (coin inserted)
-                    if (coins_sig_state == (1 << COIN_SIG)) {
-                        LOG_INFO("COIN TASK: *** HIGH->LOW transition detected! Setting coin signal flag ***");
-                        ioExpander.setCoinSignal(1);
-                        ioExpander._intCnt++;
-                        LOG_INFO("COIN TASK: Coin signal flag set, interrupt count=%d", ioExpander._intCnt);
-                    } else {
-                        LOG_INFO("COIN TASK: LOW->HIGH transition (coin removed or signal cleared)");
-                    }
-                    
-                    // Update state for next comparison
-                    coins_sig_state = coinSigBit;
-                    LOG_DEBUG("COIN TASK: Updated coins_sig_state to 0x%02X", coins_sig_state);
-                } else {
-                    LOG_DEBUG("COIN TASK: COIN_SIG state unchanged (0x%02X)", coinSigBit);
-                }
-                
-                xSemaphoreGive(xIoExpanderMutex);
-            } else {
-                static unsigned long lastMutexWarning = 0;
-                if (currentTime - lastMutexWarning > 2000) {
-                    LOG_WARNING("COIN TASK: Failed to acquire IO expander mutex (timeout)");
-                    lastMutexWarning = currentTime;
-                }
+                // Additional debug info
+                bool coin_bit = (_portVal & (1 << COIN_SIG)) ? 1 : 0;
+                LOG_INFO("COIN_SIG (bit %d) = %d", COIN_SIG, coin_bit);
+                LOG_INFO("Coin transition: HIGH->LOW (coin inserted)");
             }
+
+            coins_sig_state = (_portVal & (1 << COIN_SIG));
         }
-        
-        // Periodic task status (every 10 seconds)
-        if (currentTime - lastTaskLog > 10000) {
-            LOG_INFO("COIN TASK: Status - INT_PIN=%d, coin_sig_state=0x%02X, interrupt_count=%d, uptime=%lu ms", 
-                    intPinState, coins_sig_state, ioExpander._intCnt, currentTime - taskStartTime);
-            lastTaskLog = currentTime;
-        }
-        
-        vTaskDelay(xDelay); // Wait 50ms before next check
     }
+    
+    vTaskDelay(xDelay); // 延迟50ms
+  }
 }
 
 /**
@@ -217,12 +154,6 @@ void TaskButtonDetector(void *pvParameters) {
             
             // Check if any button state changed
             if (currentPortValue != lastPortValue) {
-                if (ENABLE_BUTTON_DIAGNOSTICS) {
-                    Serial.print("[BUTTON DIAG] Port value changed: 0x");
-                    Serial.print(lastPortValue, HEX);
-                    Serial.print(" -> 0x");
-                    Serial.println(currentPortValue, HEX);
-                }
                 
                 // Check each button for press events (transition from HIGH to LOW)
                 for (int i = 0; i < NUM_BUTTONS; i++) {
@@ -239,21 +170,9 @@ void TaskButtonDetector(void *pvParameters) {
                     // Detect button press (transition from released to pressed)
                     if (currentButtonPressed && !lastButtonPressed) {
                         LOG_INFO("Button %d transition detected: HIGH->LOW (pressed)", i + 1);
-                        if (ENABLE_BUTTON_DIAGNOSTICS) {
-                            Serial.print("[BUTTON DIAG] Button ");
-                            Serial.print(i + 1);
-                            Serial.print(" PRESSED - setting flag (pin=");
-                            Serial.print(buttonPin);
-                            Serial.println(")");
-                        }
                         ioExpander.setButtonFlag(i, true);
                     } else if (!currentButtonPressed && lastButtonPressed) {
                         // Button released - log for debugging
-                        if (ENABLE_BUTTON_DIAGNOSTICS) {
-                            Serial.print("[BUTTON DIAG] Button ");
-                            Serial.print(i + 1);
-                            Serial.println(" RELEASED");
-                        }
                         LOG_DEBUG("Button %d transition detected: LOW->HIGH (released)", i + 1);
                     }
                 }
@@ -263,14 +182,7 @@ void TaskButtonDetector(void *pvParameters) {
             
             xSemaphoreGive(xIoExpanderMutex);
         } else {
-            if (ENABLE_BUTTON_DIAGNOSTICS) {
-                static unsigned long lastMutexWarning = 0;
-                unsigned long now = millis();
-                if (now - lastMutexWarning > 5000) { // Throttle warnings
-                    Serial.println("[BUTTON DIAG] Failed to acquire IO expander mutex");
-                    lastMutexWarning = now;
-                }
-            }
+            // Mutex contention is normal - no logging needed
         }
         // Removed warning log to reduce overhead - mutex contention is normal
         
@@ -803,19 +715,7 @@ void TaskWatchdog(void *pvParameters) {
 
 /* DISABLED - BLE ONLY MODE
 void mqtt_callback(char *topic, byte *payload, unsigned int len) {
-    // Log every received message
-    Serial.print("[MQTT RX] Topic: ");
-    Serial.print(topic);
-    Serial.print(" | Payload size: ");
-    Serial.print(len);
-    Serial.println(" bytes");
-    
-    // Optionally log payload for debugging (commented out to avoid too much output)
-    // Serial.print("[MQTT RX] Payload: ");
-    // for (unsigned int i = 0; i < len; i++) {
-    //     Serial.print((char)payload[i]);
-    // }
-    // Serial.println();
+    // MQTT message received - handled by controller
     
     // Handle command topic specially for changing log level or debug commands
     if (String(topic) == COMMAND_TOPIC) {
@@ -1122,15 +1022,37 @@ void setup() {
     // Initialize all relays to OFF state
     ioExpander.writeRegister(OUTPUT_PORT1, 0x00);
     
-    // Enable interrupt for all input pins (buttons + coin acceptor)
-    LOG_INFO("Enabling interrupt for all input pins (buttons + coin acceptor)...");
-    // Enable interrupt for all pins on port 0: buttons (0-5) + coin acceptor (6-7)
-    ioExpander.enableInterrupt(0, 0xFF); // All 8 pins
+    // Verify Port 1 configuration
+    uint8_t configPort1Verify = ioExpander.readRegister(CONFIG_PORT1);
+    LOG_INFO("Port 1 Configuration Register: 0x%02X (should be 0x00 for all outputs)", configPort1Verify);
+    if (configPort1Verify != 0x00) {
+        LOG_ERROR("WARNING: Port 1 not fully configured as outputs! Some pins may be inputs.");
+        LOG_ERROR("Port 1 Config: 0x%02X (binary: %d%d%d%d%d%d%d%d)", 
+                 configPort1Verify,
+                 (configPort1Verify & 0x80) ? 1 : 0, (configPort1Verify & 0x40) ? 1 : 0,
+                 (configPort1Verify & 0x20) ? 1 : 0, (configPort1Verify & 0x10) ? 1 : 0,
+                 (configPort1Verify & 0x08) ? 1 : 0, (configPort1Verify & 0x04) ? 1 : 0,
+                 (configPort1Verify & 0x02) ? 1 : 0, (configPort1Verify & 0x01) ? 1 : 0);
+    }
+    
+    // Verify initial relay state
+    uint8_t initialRelayState = ioExpander.readRegister(OUTPUT_PORT1);
+    LOG_INFO("Initial Port 1 Output State: 0x%02X (all relays should be OFF)", initialRelayState);
+    
+    // Enable interrupt for coin acceptor pins
+    LOG_INFO("Enabling interrupt for coin acceptor (COIN_SIG on bit %d)...", COIN_SIG);
+    ioExpander.enableInterrupt(0, 0xc0); // Enable interrupt for upper bits including COIN_SIG
+    
+    // Configure interrupt pin
+    pinMode(INT_PIN, INPUT_PULLUP);
+    LOG_INFO("Interrupt pin %d configured with pull-up", INT_PIN);
+    
+    // Read initial state
+    uint8_t initialPortValue = ioExpander.readRegister(INPUT_PORT0);
+    LOG_INFO("Initial port value: 0x%02X", initialPortValue);
+    LOG_INFO("Initial COIN_SIG state: %d", (initialPortValue & (1 << COIN_SIG)) ? 1 : 0);
     
     LOG_INFO("TCA9535 fully initialized. Ready to control relays and read buttons.");
-    
-    // Configure INT_PIN with internal pull-up for reliable detection
-    pinMode(INT_PIN, INPUT_PULLUP);
     
   // Initialize FreeRTOS mutexes for shared resources
   LOG_INFO("Initializing FreeRTOS mutexes...");
@@ -1159,10 +1081,10 @@ void setup() {
     
     xTaskCreate(
         TaskCoinDetector,           // Task function
-        "CoinDetector",             // Task name (for debugging)
-        4096,                       // Stack size (bytes)
+        "CoinDetection",            // Task name
+        2048,                       // Stack size
         NULL,                       // Task parameters
-        1,                          // Priority (3 = medium-high priority for hardware)
+        1,                          // Priority
         &TaskCoinDetectorHandle     // Task handle
     );
     
@@ -1175,7 +1097,9 @@ void setup() {
         &TaskButtonDetectorHandle   // Task handle
     );
     
-    LOG_INFO("FreeRTOS tasks created successfully (CoinDetector: priority 3, ButtonDetector: priority 5)");
+    LOG_INFO("Coin detection task created successfully!");
+    LOG_INFO("=== READY FOR COIN DETECTION ===");
+    LOG_INFO("Insert coins to test detection...");
   }
   // Initialize Wire1 for the LCD display and RTC (shared I2C bus)
   LOG_INFO("Initializing Wire1 (I2C) for LCD and RTC...");

@@ -36,6 +36,9 @@ public:
     // Debug method to simulate a coin insertion
     void simulateCoinInsertion();
     
+    // Debug method to print current relay states
+    void printRelayStates();
+    
     // Getter methods
     MachineState getCurrentState() const;
     bool isMachineLoaded() const;

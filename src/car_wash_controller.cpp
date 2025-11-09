@@ -46,7 +46,10 @@ CarWashController::CarWashController(MqttLteClient& client)
     // When coin is present: Pin is LOW (bit=0) = ACTIVE
     // When no coin: Pin is HIGH (bit=1) = INACTIVE
     bool initialCoinSignal = ((rawPortValue0 & (1 << COIN_SIG)) == 0); // LOW = coin present = ACTIVE
-    lastCoinState = initialCoinSignal ? HIGH : LOW; // Store as HIGH/LOW for edge detection (inverted for proper edge detection)
+    // CRITICAL FIX: lastCoinState must match the actual initial signal state
+    // If signal is ACTIVE (LOW), lastCoinState should be LOW
+    // If signal is INACTIVE (HIGH), lastCoinState should be HIGH
+    lastCoinState = initialCoinSignal ? LOW : HIGH; // Store actual state to prevent false edge detection
     
     LOG_INFO("COIN INIT: initialCoinSignal (active when LOW) = %s", initialCoinSignal ? "ACTIVE (LOW/0)" : "INACTIVE (HIGH/1)");
     LOG_INFO("COIN INIT: lastCoinState initialized to = %s (for edge detection)", lastCoinState == LOW ? "LOW" : "HIGH");
@@ -182,24 +185,6 @@ void CarWashController::handleButtons() {
                 detectedId + 1, currentState, activeButton, config.isLoaded, 
                 config.timestamp.length() > 0 ? config.timestamp.c_str() : "(empty)");
 
-        if (ENABLE_BUTTON_DIAGNOSTICS) {
-            Serial.print("[BUTTON DIAG] handleButtons() - Flag detected: button=");
-            Serial.print(detectedId + 1);
-            Serial.print(", state=");
-            Serial.print(currentState);
-            Serial.print(" (");
-            Serial.print(currentState == STATE_FREE ? "FREE" : 
-                        currentState == STATE_IDLE ? "IDLE" :
-                        currentState == STATE_RUNNING ? "RUNNING" :
-                        currentState == STATE_PAUSED ? "PAUSED" : "UNKNOWN");
-            Serial.print("), activeButton=");
-            Serial.print(activeButton);
-            Serial.print(", tokens=");
-            Serial.print(config.tokens);
-            Serial.print(", isLoaded=");
-            Serial.println(config.isLoaded ? "YES" : "NO");
-        }
-
         // CRITICAL FIX: Always clear the flag immediately to prevent delayed processing
         // The old logic kept flags when state was wrong, causing 20-second delays
         ioExpander.clearButtonFlag();
@@ -221,25 +206,7 @@ void CarWashController::handleButtons() {
             if (config.isLoaded) {
                 if (currentState == STATE_IDLE) {
                     LOG_INFO("Activating button %d from IDLE state", detectedId + 1);
-                    if (ENABLE_BUTTON_DIAGNOSTICS) {
-                        Serial.print("[BUTTON DIAG] Calling activateButton(");
-                        Serial.print(detectedId);
-                        Serial.print(") - BEFORE: state=");
-                        Serial.print(currentState);
-                        Serial.print(", tokens=");
-                        Serial.print(config.tokens);
-                        Serial.print(", activeButton=");
-                        Serial.println(activeButton);
-                    }
                     activateButton(detectedId, MANUAL);
-                    if (ENABLE_BUTTON_DIAGNOSTICS) {
-                        Serial.print("[BUTTON DIAG] activateButton() RETURNED - AFTER: state=");
-                        Serial.print(currentState);
-                        Serial.print(", tokens=");
-                        Serial.print(config.tokens);
-                        Serial.print(", activeButton=");
-                        Serial.println(activeButton);
-                    }
                     buttonProcessed = true;
                 } else if (currentState == STATE_RUNNING) {
                     // CRITICAL FIX: Allow pause on button press when RUNNING
@@ -414,25 +381,7 @@ void CarWashController::handleButtons() {
                 if (config.isLoaded) {
                     if (currentState == STATE_IDLE) {
                         LOG_INFO("Button %d: Activating from IDLE state", i + 1);
-                        if (ENABLE_BUTTON_DIAGNOSTICS) {
-                            Serial.print("[BUTTON DIAG] Raw polling - Calling activateButton(");
-                            Serial.print(i);
-                            Serial.print(") - BEFORE: state=");
-                            Serial.print(currentState);
-                            Serial.print(", tokens=");
-                            Serial.print(config.tokens);
-                            Serial.print(", activeButton=");
-                            Serial.println(activeButton);
-                        }
                         activateButton(i, MANUAL);
-                        if (ENABLE_BUTTON_DIAGNOSTICS) {
-                            Serial.print("[BUTTON DIAG] Raw polling - activateButton() RETURNED - AFTER: state=");
-                            Serial.print(currentState);
-                            Serial.print(", tokens=");
-                            Serial.print(config.tokens);
-                            Serial.print(", activeButton=");
-                            Serial.println(activeButton);
-                        }
                     } else if (currentState == STATE_RUNNING) {
                         // CRITICAL FIX: Allow pause on button press when RUNNING
                         // If activeButton is -1 (shouldn't happen, but handle gracefully), allow any button to pause
@@ -623,11 +572,22 @@ void CarWashController::pauseMachine() {
 }
 
 void CarWashController::resumeMachine(int buttonIndex) {
+    LOG_INFO("Resuming machine with button %d (relay %d, bit %d)", 
+             buttonIndex+1, buttonIndex+1, RELAY_INDICES[buttonIndex]);
     activeButton = buttonIndex;
     
     extern IoExpander ioExpander;
     
     if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        // Read relay state before activation
+        uint8_t relayStateBefore = ioExpander.readRegister(OUTPUT_PORT1);
+        LOG_INFO("Relay state BEFORE resume: 0x%02X (binary: %d%d%d%d%d%d%d%d)", 
+                 relayStateBefore,
+                 (relayStateBefore & 0x80) ? 1 : 0, (relayStateBefore & 0x40) ? 1 : 0,
+                 (relayStateBefore & 0x20) ? 1 : 0, (relayStateBefore & 0x10) ? 1 : 0,
+                 (relayStateBefore & 0x08) ? 1 : 0, (relayStateBefore & 0x04) ? 1 : 0,
+                 (relayStateBefore & 0x02) ? 1 : 0, (relayStateBefore & 0x01) ? 1 : 0);
+        
         // Turn on the relay for the active button
         ioExpander.setRelay(RELAY_INDICES[buttonIndex], true);
         
@@ -635,10 +595,21 @@ void CarWashController::resumeMachine(int buttonIndex) {
         uint8_t relayStateAfter = ioExpander.readRegister(OUTPUT_PORT1);
         xSemaphoreGive(xIoExpanderMutex);
         
+        LOG_INFO("Relay state AFTER resume: 0x%02X (binary: %d%d%d%d%d%d%d%d)", 
+                 relayStateAfter,
+                 (relayStateAfter & 0x80) ? 1 : 0, (relayStateAfter & 0x40) ? 1 : 0,
+                 (relayStateAfter & 0x20) ? 1 : 0, (relayStateAfter & 0x10) ? 1 : 0,
+                 (relayStateAfter & 0x08) ? 1 : 0, (relayStateAfter & 0x04) ? 1 : 0,
+                 (relayStateAfter & 0x02) ? 1 : 0, (relayStateAfter & 0x01) ? 1 : 0);
+        
         // Check if relay bit was actually set
         bool relayBitSet = (relayStateAfter & (1 << RELAY_INDICES[buttonIndex])) != 0;
-        if (!relayBitSet) {
-            LOG_ERROR("Failed to activate relay %d for resume!", buttonIndex+1);
+        if (relayBitSet) {
+            LOG_INFO("Relay %d (bit %d) successfully activated for button %d", 
+                     buttonIndex+1, RELAY_INDICES[buttonIndex], buttonIndex+1);
+        } else {
+            LOG_ERROR("Failed to activate relay %d (bit %d) for resume! Expected bit %d to be set in 0x%02X", 
+                     buttonIndex+1, RELAY_INDICES[buttonIndex], RELAY_INDICES[buttonIndex], relayStateAfter);
         }
     } else {
         LOG_WARNING("Failed to acquire IO expander mutex in resumeMachine()");
@@ -692,17 +663,6 @@ void CarWashController::stopMachine(TriggerType triggerType) {
 }
 
 void CarWashController::activateButton(int buttonIndex, TriggerType triggerType) {
-    if (ENABLE_BUTTON_DIAGNOSTICS) {
-        Serial.print("[BUTTON DIAG] activateButton() ENTERED: buttonIndex=");
-        Serial.print(buttonIndex);
-        Serial.print(", tokens=");
-        Serial.print(config.tokens);
-        Serial.print(", state=");
-        Serial.print(currentState);
-        Serial.print(", activeButton=");
-        Serial.println(activeButton);
-    }
-    
     // CRITICAL FIX: Ensure we're in IDLE state before activating
     // This prevents issues where activateButton might be called from wrong state
     if (currentState != STATE_IDLE) {
@@ -717,9 +677,6 @@ void CarWashController::activateButton(int buttonIndex, TriggerType triggerType)
     
     if (config.tokens <= 0) {
         LOG_WARNING("Cannot activate button %d - no tokens left (tokens=%d)", buttonIndex+1, config.tokens);
-        if (ENABLE_BUTTON_DIAGNOSTICS) {
-            Serial.println("[BUTTON DIAG] activateButton() EXIT - No tokens left");
-        }
         return;
     }
 
@@ -728,35 +685,27 @@ void CarWashController::activateButton(int buttonIndex, TriggerType triggerType)
     unsigned long currentTime = millis();
     lastActionTime = currentTime;
     
-    if (ENABLE_BUTTON_DIAGNOSTICS) {
-        Serial.print("[BUTTON DIAG] Setting state to RUNNING - BEFORE: state=");
-        Serial.print(currentState);
-        Serial.print(", activeButton=");
-        Serial.print(activeButton);
-        Serial.print(", tokenStartTime=");
-        Serial.println(tokenStartTime);
-    }
-    
     digitalWrite(RUNNING_LED_PIN, HIGH);
     currentState = STATE_RUNNING;
     activeButton = buttonIndex;
     tokenStartTime = currentTime;
     tokenTimeElapsed = 0;
     
-    if (ENABLE_BUTTON_DIAGNOSTICS) {
-        Serial.print("[BUTTON DIAG] State set to RUNNING - AFTER: state=");
-        Serial.print(currentState);
-        Serial.print(", activeButton=");
-        Serial.print(activeButton);
-        Serial.print(", tokenStartTime=");
-        Serial.print(tokenStartTime);
-        Serial.print(", TOKEN_TIME=");
-        Serial.println(TOKEN_TIME);
-    }
-    
     extern IoExpander ioExpander;
     
+    LOG_INFO("Activating button %d (relay %d, bit %d)", 
+             buttonIndex+1, buttonIndex+1, RELAY_INDICES[buttonIndex]);
+    
     if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        // Read relay state before activation
+        uint8_t relayStateBefore = ioExpander.readRegister(OUTPUT_PORT1);
+        LOG_INFO("Relay state BEFORE activation: 0x%02X (binary: %d%d%d%d%d%d%d%d)", 
+                 relayStateBefore,
+                 (relayStateBefore & 0x80) ? 1 : 0, (relayStateBefore & 0x40) ? 1 : 0,
+                 (relayStateBefore & 0x20) ? 1 : 0, (relayStateBefore & 0x10) ? 1 : 0,
+                 (relayStateBefore & 0x08) ? 1 : 0, (relayStateBefore & 0x04) ? 1 : 0,
+                 (relayStateBefore & 0x02) ? 1 : 0, (relayStateBefore & 0x01) ? 1 : 0);
+        
         // Turn on the corresponding relay
         ioExpander.setRelay(RELAY_INDICES[buttonIndex], true);
         
@@ -764,31 +713,37 @@ void CarWashController::activateButton(int buttonIndex, TriggerType triggerType)
         uint8_t relayStateAfter = ioExpander.readRegister(OUTPUT_PORT1);
         xSemaphoreGive(xIoExpanderMutex);
         
+        LOG_INFO("Relay state AFTER activation: 0x%02X (binary: %d%d%d%d%d%d%d%d)", 
+                 relayStateAfter,
+                 (relayStateAfter & 0x80) ? 1 : 0, (relayStateAfter & 0x40) ? 1 : 0,
+                 (relayStateAfter & 0x20) ? 1 : 0, (relayStateAfter & 0x10) ? 1 : 0,
+                 (relayStateAfter & 0x08) ? 1 : 0, (relayStateAfter & 0x04) ? 1 : 0,
+                 (relayStateAfter & 0x02) ? 1 : 0, (relayStateAfter & 0x01) ? 1 : 0);
+        
         // Check if relay bit was actually set
         bool relayBitSet = (relayStateAfter & (1 << RELAY_INDICES[buttonIndex])) != 0;
-        if (!relayBitSet) {
-            LOG_ERROR("Failed to activate relay %d! Bit %d not set", buttonIndex+1, RELAY_INDICES[buttonIndex]);
-            if (ENABLE_BUTTON_DIAGNOSTICS) {
-                Serial.print("[BUTTON DIAG] ERROR: Relay activation failed! relay=");
-                Serial.print(buttonIndex + 1);
-                Serial.print(", bit=");
-                Serial.print(RELAY_INDICES[buttonIndex]);
-                Serial.print(", relayStateAfter=0x");
-                Serial.println(relayStateAfter, HEX);
-            }
+        if (relayBitSet) {
+            LOG_INFO("Relay %d (bit %d) successfully activated for button %d", 
+                     buttonIndex+1, RELAY_INDICES[buttonIndex], buttonIndex+1);
         } else {
-            if (ENABLE_BUTTON_DIAGNOSTICS) {
-                Serial.print("[BUTTON DIAG] Relay activated successfully: relay=");
-                Serial.print(buttonIndex + 1);
-                Serial.print(", relayStateAfter=0x");
-                Serial.println(relayStateAfter, HEX);
-            }
+            LOG_ERROR("Failed to activate relay %d (bit %d)! Expected bit %d to be set in 0x%02X", 
+                     buttonIndex+1, RELAY_INDICES[buttonIndex], RELAY_INDICES[buttonIndex], relayStateAfter);
         }
+        
+        // Verify port configuration
+        uint8_t configPort1 = ioExpander.readRegister(CONFIG_PORT1);
+        bool pinConfiguredAsOutput = ((configPort1 & (1 << RELAY_INDICES[buttonIndex])) == 0);
+        if (!pinConfiguredAsOutput) {
+            LOG_ERROR("CRITICAL: Relay %d pin (P1%d, bit %d) is configured as INPUT instead of OUTPUT!", 
+                     buttonIndex+1, RELAY_INDICES[buttonIndex], RELAY_INDICES[buttonIndex]);
+            LOG_ERROR("Port 1 Config register: 0x%02X (should have bit %d = 0 for output)", 
+                     configPort1, RELAY_INDICES[buttonIndex]);
+        }
+        
+        // Print full relay state diagnostic
+        printRelayStates();
     } else {
         LOG_WARNING("Failed to acquire IO expander mutex in activateButton()");
-        if (ENABLE_BUTTON_DIAGNOSTICS) {
-            Serial.println("[BUTTON DIAG] WARNING: Failed to acquire mutex for relay activation");
-        }
         // Even if mutex fails, we've already updated state and lastActionTime
         // The relay activation will be retried on next update cycle if needed
     }
@@ -799,40 +754,10 @@ void CarWashController::activateButton(int buttonIndex, TriggerType triggerType)
     }
     config.tokens--;
 
-    if (ENABLE_BUTTON_DIAGNOSTICS) {
-        Serial.print("[BUTTON DIAG] Tokens decremented - tokens=");
-        Serial.print(config.tokens);
-        Serial.print(", physicalTokens=");
-        Serial.print(config.physicalTokens);
-        Serial.print(", state=");
-        Serial.print(currentState);
-        Serial.println(" (should be RUNNING)");
-    }
-
     publishActionEvent(buttonIndex, ACTION_START, triggerType);
-    
-    if (ENABLE_BUTTON_DIAGNOSTICS) {
-        Serial.print("[BUTTON DIAG] activateButton() EXITING: state=");
-        Serial.print(currentState);
-        Serial.print(", activeButton=");
-        Serial.print(activeButton);
-        Serial.print(", tokens=");
-        Serial.println(config.tokens);
-    }
 }
 
 void CarWashController::tokenExpired() {
-    if (ENABLE_BUTTON_DIAGNOSTICS) {
-        Serial.print("[BUTTON DIAG] tokenExpired() CALLED - BEFORE: state=");
-        Serial.print(currentState);
-        Serial.print(", activeButton=");
-        Serial.print(activeButton);
-        Serial.print(", tokenStartTime=");
-        Serial.print(tokenStartTime);
-        Serial.print(", tokenTimeElapsed=");
-        Serial.println(tokenTimeElapsed);
-    }
-    
     if (activeButton >= 0) {
         // Turn off the active relay
         extern IoExpander ioExpander;
@@ -846,12 +771,13 @@ void CarWashController::tokenExpired() {
     activeButton = -1;
     currentState = STATE_IDLE;
     
-    if (ENABLE_BUTTON_DIAGNOSTICS) {
-        Serial.print("[BUTTON DIAG] tokenExpired() - AFTER: state=");
-        Serial.print(currentState);
-        Serial.print(" (IDLE), activeButton=");
-        Serial.println(activeButton);
+    // CRITICAL FIX: If no tokens remain, finish immediately instead of waiting for inactivity timeout
+    if (config.tokens <= 0) {
+        LOG_INFO("Token expired and no tokens remaining (tokens=%d), finishing immediately", config.tokens);
+        stopMachine(AUTOMATIC);
+        return;
     }
+    
     // CRITICAL FIX: Reset inactivity timeout when token expires and machine goes to IDLE
     // This gives the user a fresh timeout period to start a new token after the previous one finished
     lastActionTime = millis();
@@ -879,17 +805,27 @@ void CarWashController::handleCoinAcceptor() {
             startupBeginTime = currentTime;
             LOG_INFO("COIN: Startup period started at %lu ms (will monitor after 3000ms)", currentTime);
         }
-        if (currentTime < 3000) { // Skip first 3 seconds
+        // CRITICAL FIX: Check elapsed time since startup, not absolute time
+        // This ensures we always wait 3 seconds after first call, regardless of when it's called
+        unsigned long elapsedSinceStartup;
+        if (currentTime >= startupBeginTime) {
+            elapsedSinceStartup = currentTime - startupBeginTime;
+        } else {
+            // Handle millis() overflow
+            elapsedSinceStartup = (0xFFFFFFFFUL - startupBeginTime) + currentTime + 1;
+        }
+        
+        if (elapsedSinceStartup < 3000) { // Skip first 3 seconds after initialization
             static unsigned long lastStartupLog = 0;
             if (currentTime - lastStartupLog > 1000) {
                 lastStartupLog = currentTime;
-                LOG_DEBUG("COIN: Still in startup period (%lu ms remaining)", 3000 - currentTime);
+                LOG_DEBUG("COIN: Still in startup period (%lu ms remaining)", 3000 - elapsedSinceStartup);
             }
             return;
         }
         startupPeriod = false;
         LOG_INFO("COIN: Startup period over at %lu ms (elapsed: %lu ms), now actively monitoring", 
-                currentTime, currentTime - startupBeginTime);
+                currentTime, elapsedSinceStartup);
     }
     
     // FIXED: Check if the interrupt handler detected a coin signal
@@ -1272,27 +1208,6 @@ void CarWashController::update() {
                 runningTime = (0xFFFFFFFFUL - tokenStartTime) + currentTime + 1;
             }
             totalElapsedTime = tokenTimeElapsed + runningTime;
-            
-            if (ENABLE_BUTTON_DIAGNOSTICS) {
-                static unsigned long lastTokenCheckLog = 0;
-                if (currentTime - lastTokenCheckLog > 1000) { // Log every second when RUNNING
-                    Serial.print("[BUTTON DIAG] Token check (RUNNING): currentTime=");
-                    Serial.print(currentTime);
-                    Serial.print(", tokenStartTime=");
-                    Serial.print(tokenStartTime);
-                    Serial.print(", runningTime=");
-                    Serial.print(runningTime);
-                    Serial.print(", tokenTimeElapsed=");
-                    Serial.print(tokenTimeElapsed);
-                    Serial.print(", totalElapsedTime=");
-                    Serial.print(totalElapsedTime);
-                    Serial.print(", TOKEN_TIME=");
-                    Serial.print(TOKEN_TIME);
-                    Serial.print(", expired=");
-                    Serial.println(totalElapsedTime >= TOKEN_TIME ? "YES" : "NO");
-                    lastTokenCheckLog = currentTime;
-                }
-            }
         } else { // STATE_PAUSED
             // When paused, elapsed time is frozen at tokenTimeElapsed
             totalElapsedTime = tokenTimeElapsed;
@@ -1300,16 +1215,6 @@ void CarWashController::update() {
         
         if (totalElapsedTime >= TOKEN_TIME) {
             LOG_INFO("Token time expired (%lu ms >= %lu ms), calling tokenExpired()", totalElapsedTime, TOKEN_TIME);
-            if (ENABLE_BUTTON_DIAGNOSTICS) {
-                Serial.print("[BUTTON DIAG] *** TOKEN EXPIRED *** - totalElapsedTime=");
-                Serial.print(totalElapsedTime);
-                Serial.print(" >= TOKEN_TIME=");
-                Serial.print(TOKEN_TIME);
-                Serial.print(", state=");
-                Serial.print(currentState);
-                Serial.print(", calling tokenExpired()");
-                Serial.println();
-            }
             tokenExpired();
             // Re-check inactivity timeout after token expires (user might be logged out)
             // CRITICAL: Re-capture currentTime after tokenExpired() as it may have taken time
@@ -1442,6 +1347,62 @@ void CarWashController::publishCoinInsertedEvent() {
 // Debug method to directly simulate a coin insertion
 void CarWashController::simulateCoinInsertion() {
     processCoinInsertion(millis());
+}
+
+void CarWashController::printRelayStates() {
+    extern IoExpander ioExpander;
+    
+    if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        // Read output states
+        uint8_t relayStatePort1 = ioExpander.readRegister(OUTPUT_PORT1);
+        uint8_t relayStatePort0 = ioExpander.readRegister(OUTPUT_PORT0);
+        
+        // Read configuration registers to verify port setup
+        uint8_t configPort0 = ioExpander.readRegister(CONFIG_PORT0);
+        uint8_t configPort1 = ioExpander.readRegister(CONFIG_PORT1);
+        
+        xSemaphoreGive(xIoExpanderMutex);
+        
+        LOG_INFO("=== RELAY STATES & CONFIGURATION ===");
+        LOG_INFO("Port 0 Output Value: 0x%02X (binary: %d%d%d%d%d%d%d%d)",
+                 relayStatePort0,
+                 (relayStatePort0 & 0x80) ? 1 : 0, (relayStatePort0 & 0x40) ? 1 : 0,
+                 (relayStatePort0 & 0x20) ? 1 : 0, (relayStatePort0 & 0x10) ? 1 : 0,
+                 (relayStatePort0 & 0x08) ? 1 : 0, (relayStatePort0 & 0x04) ? 1 : 0,
+                 (relayStatePort0 & 0x02) ? 1 : 0, (relayStatePort0 & 0x01) ? 1 : 0);
+        LOG_INFO("Port 0 Config: 0x%02X (1=input, 0=output)", configPort0);
+        
+        LOG_INFO("Port 1 Output Value: 0x%02X (binary: %d%d%d%d%d%d%d%d)",
+                 relayStatePort1,
+                 (relayStatePort1 & 0x80) ? 1 : 0, (relayStatePort1 & 0x40) ? 1 : 0,
+                 (relayStatePort1 & 0x20) ? 1 : 0, (relayStatePort1 & 0x10) ? 1 : 0,
+                 (relayStatePort1 & 0x08) ? 1 : 0, (relayStatePort1 & 0x04) ? 1 : 0,
+                 (relayStatePort1 & 0x02) ? 1 : 0, (relayStatePort1 & 0x01) ? 1 : 0);
+        LOG_INFO("Port 1 Config: 0x%02X (1=input, 0=output)", configPort1);
+        
+        LOG_INFO("Individual Relay States (Port 1):");
+        for (int i = 0; i < 5; i++) {
+            bool relayOn = (relayStatePort1 & (1 << RELAY_INDICES[i])) != 0;
+            bool pinConfiguredAsOutput = ((configPort1 & (1 << RELAY_INDICES[i])) == 0);
+            LOG_INFO("  Button %d -> Relay %d (P1%d, bit %d): %s [Config: %s]", 
+                     i+1, i+1, RELAY_INDICES[i], RELAY_INDICES[i], 
+                     relayOn ? "ON" : "OFF",
+                     pinConfiguredAsOutput ? "OUTPUT" : "INPUT (WRONG!)");
+        }
+        
+        LOG_INFO("Port 0 Pins (checking if relays might be here):");
+        LOG_INFO("  P00 (clearwater?): Output=%d, Config=%s", 
+                 (relayStatePort0 & 0x01) ? 1 : 0,
+                 (configPort0 & 0x01) ? "INPUT" : "OUTPUT");
+        LOG_INFO("  P04 (inflatable?): Output=%d, Config=%s", 
+                 (relayStatePort0 & 0x10) ? 1 : 0,
+                 (configPort0 & 0x10) ? "INPUT" : "OUTPUT");
+        
+        LOG_INFO("Active Button: %d", activeButton >= 0 ? activeButton + 1 : -1);
+        LOG_INFO("====================================");
+    } else {
+        LOG_WARNING("Failed to acquire IO expander mutex in printRelayStates()");
+    }
 }
 
 void CarWashController::publishActionEvent(int buttonIndex, MachineAction machineAction, TriggerType triggerType) {

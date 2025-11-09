@@ -183,3 +183,5 @@ The log pattern suggests **hardware issue** if software fixes don't help:
 
 **Test:** Power the ESP32+modem from a bench power supply (not USB) and see if issue persists.
 
+
+

@@ -164,3 +164,5 @@ If the network still drops after this fix, then it's **definitely hardware**:
 
 **Key Takeaway**: When debugging embedded systems with shared communication buses (UART/I2C/SPI), adding more debug code can make the problem worse. Always consider the timing and concurrency implications of your diagnostic code.
 
+
+
