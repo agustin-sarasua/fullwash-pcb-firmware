@@ -2,6 +2,8 @@
 #include "io_expander.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <Preferences.h>
+#include "ble_config_manager.h"
 
 // External mutex for ioExpander access (defined in main.cpp)
 extern SemaphoreHandle_t xIoExpanderMutex;
@@ -103,6 +105,34 @@ void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payl
         return;
     }
     if (String(topic) == INIT_TOPIC) {
+        // Check if machine ID is 99 (factory default) and this is the first load
+        // If so, use the number of tokens as the new machine ID and DO NOT load tokens
+        if (MACHINE_ID == "99") {
+            int tokensFromMessage = doc["tokens"].as<int>();
+            String newMachineId = String(tokensFromMessage);
+            LOG_INFO("Factory machine ID (99) detected on first load. Setting new machine ID to: %s (from tokens: %d)", 
+                     newMachineId.c_str(), tokensFromMessage);
+            LOG_INFO("NOT loading tokens - this is a setup operation only");
+            
+            // Store the new machine ID in persistent storage
+            Preferences prefs;
+            prefs.begin(PREFS_NAMESPACE, false); // false = read-write mode
+            prefs.putString(PREFS_MACHINE_NUM, newMachineId);
+            
+            // Get current environment to preserve it
+            String environment = prefs.getString(PREFS_ENVIRONMENT, "prod");
+            prefs.end();
+            
+            // Update MACHINE_ID and MQTT topics
+            updateMQTTTopics(newMachineId, environment);
+            LOG_INFO("Machine ID updated to: %s, MQTT topics updated. Machine NOT loaded with tokens.", newMachineId.c_str());
+            
+            // Return early - do NOT load tokens or initialize the machine
+            // The tokens were only used to determine the new machine ID
+            return;
+        }
+        
+        // Normal initialization flow (machine ID is not 99)
         config.sessionId = doc["session_id"].as<String>();
         config.userId = doc["user_id"].as<String>();
         config.userName = doc["user_name"].as<String>();
@@ -315,12 +345,58 @@ void CarWashController::handleButtons() {
                 // Flag already cleared above - no delayed processing
             }
         } else if (detectedId == NUM_BUTTONS - 1) {
-            // Stop button
+            // Stop button - should only pause when RUNNING, same behavior as pressing same button
             // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
             lastActionTime = millis();
             if (config.isLoaded) {
-                stopMachine(MANUAL);
-                buttonProcessed = true;
+                if (currentState == STATE_RUNNING) {
+                    // Same behavior as pressing the same button when RUNNING - pause the machine
+                    unsigned long currentTime = millis();
+                    
+                    // CRITICAL FIX: Check if this is the same button press that just activated the machine
+                    // If tokenStartTime was set very recently (within 200ms), this is likely the same press
+                    // that activated from IDLE, so we should ignore it to prevent immediate pause
+                    if (tokenStartTime != 0) {
+                        unsigned long timeSinceActivation;
+                        if (currentTime >= tokenStartTime) {
+                            timeSinceActivation = currentTime - tokenStartTime;
+                        } else {
+                            timeSinceActivation = (0xFFFFFFFFUL - tokenStartTime) + currentTime + 1;
+                        }
+                        
+                        // If activation happened very recently (within 200ms), ignore this pause request
+                        if (timeSinceActivation < 200) {
+                            LOG_INFO("STOP button pressed while RUNNING - ignoring (just activated %lu ms ago, likely same press)", 
+                                   timeSinceActivation);
+                            buttonProcessed = true;
+                            return; // Skip raw polling
+                        }
+                    }
+                    
+                    // CRITICAL FIX: Check if we just switched to this button - if so, ignore pause request
+                    // This prevents the same button press that triggered the switch from also triggering a pause
+                    unsigned long timeSinceFunctionSwitch;
+                    if (currentTime >= lastFunctionSwitchTime) {
+                        timeSinceFunctionSwitch = currentTime - lastFunctionSwitchTime;
+                    } else {
+                        timeSinceFunctionSwitch = (0xFFFFFFFFUL - lastFunctionSwitchTime) + currentTime + 1;
+                    }
+                    
+                    if (timeSinceFunctionSwitch < FUNCTION_SWITCH_COOLDOWN) {
+                        LOG_INFO("STOP button pressed while RUNNING - ignoring (just switched function %lu ms ago, likely same press)", 
+                               timeSinceFunctionSwitch);
+                        buttonProcessed = true;
+                        return; // Skip raw polling
+                    }
+                    
+                    LOG_INFO("STOP button: Pausing machine (same behavior as pressing same button when RUNNING)");
+                    pauseMachine();
+                    buttonProcessed = true;
+                } else {
+                    // Not in RUNNING state - ignore stop button press
+                    LOG_INFO("STOP button pressed but machine is not RUNNING (state=%d) - ignoring", currentState);
+                    buttonProcessed = true;
+                }
             } else {
                 LOG_WARNING("STOP button press ignored - config not loaded");
                 // Flag already cleared above - no delayed processing
@@ -503,7 +579,7 @@ void CarWashController::handleButtons() {
         }
     }
 
-    // Handle stop button (BUTTON6) - using the same approach as other buttons
+    // Handle stop button (BUTTON6) - should only pause when RUNNING, same behavior as pressing same button
     bool stopButtonPressed = !(rawPortValue0 & (1 << STOP_BUTTON_PIN));
     
     // Print debug for stop button
@@ -523,9 +599,49 @@ void CarWashController::handleButtons() {
             // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
             lastActionTime = millis();
             
-            // Process button action - stop button should log out user whenever machine is loaded
-            if (config.isLoaded) {
-                stopMachine(MANUAL);
+            // Process button action - stop button should only pause when RUNNING
+            if (config.isLoaded && currentState == STATE_RUNNING) {
+                unsigned long currentTime = millis();
+                
+                // CRITICAL FIX: Check if this is the same button press that just activated the machine
+                // If tokenStartTime was set very recently (within 200ms), this is likely the same press
+                // that activated from IDLE, so we should ignore it to prevent immediate pause
+                if (tokenStartTime != 0) {
+                    unsigned long timeSinceActivation;
+                    if (currentTime >= tokenStartTime) {
+                        timeSinceActivation = currentTime - tokenStartTime;
+                    } else {
+                        timeSinceActivation = (0xFFFFFFFFUL - tokenStartTime) + currentTime + 1;
+                    }
+                    
+                    // If activation happened very recently (within 200ms), ignore this pause request
+                    if (timeSinceActivation < 200) {
+                        LOG_INFO("STOP button pressed while RUNNING - ignoring (just activated %lu ms ago, likely same press)", 
+                               timeSinceActivation);
+                        return; // Skip processing
+                    }
+                }
+                
+                // CRITICAL FIX: Check if we just switched to this button - if so, ignore pause request
+                // This prevents the same button press that triggered the switch from also triggering a pause
+                unsigned long timeSinceFunctionSwitch;
+                if (currentTime >= lastFunctionSwitchTime) {
+                    timeSinceFunctionSwitch = currentTime - lastFunctionSwitchTime;
+                } else {
+                    timeSinceFunctionSwitch = (0xFFFFFFFFUL - lastFunctionSwitchTime) + currentTime + 1;
+                }
+                
+                if (timeSinceFunctionSwitch < FUNCTION_SWITCH_COOLDOWN) {
+                    LOG_INFO("STOP button pressed while RUNNING - ignoring (just switched function %lu ms ago, likely same press)", 
+                           timeSinceFunctionSwitch);
+                    return; // Skip processing
+                }
+                
+                LOG_INFO("STOP button: Pausing machine (same behavior as pressing same button when RUNNING) - raw polling");
+                pauseMachine();
+            } else if (config.isLoaded && currentState != STATE_RUNNING) {
+                // Not in RUNNING state - ignore stop button press
+                LOG_INFO("STOP button pressed but machine is not RUNNING (state=%d) - ignoring", currentState);
             }
         }
     } else {
