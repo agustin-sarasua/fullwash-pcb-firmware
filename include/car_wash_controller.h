@@ -4,7 +4,6 @@
 #include "mqtt_lte_client.h"
 #include "utilities.h"
 #include <ArduinoJson.h>
-#include <TimeLib.h>
 #include <algorithm>
 #include "domain.h"
 #include "constants.h"
@@ -12,8 +11,6 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-// Forward declaration
-class RTCManager;
 
 // External reference to the MQTT publish queue (defined in main.cpp)
 extern QueueHandle_t xMqttPublishQueue;
@@ -45,18 +42,16 @@ public:
     String getTimestamp();
     void setLogLevel(LogLevel level);
     
-    // RTC integration
-    void setRTCManager(RTCManager* rtc);
-    
     // Additional getters for LCD display
     String getUserName() const { return config.userName; }
     int getTokensLeft() const { return config.tokens; }
     unsigned long getTimeToInactivityTimeout() const;
     unsigned long getSecondsLeft();
+    unsigned long getGracePeriodSecondsLeft() const; // Get remaining grace period time (0 if not active)
+    int getActiveButton() const { return activeButton; } // Get current active button index (-1 if none)
 
 private:
     MqttLteClient& mqttClient;
-    RTCManager* rtcManager;  // Pointer to RTC manager for accurate timestamps
     MachineState currentState;
     MachineConfig config;
     
@@ -66,9 +61,14 @@ private:
     unsigned long tokenTimeElapsed;
     unsigned long pauseStartTime;
     unsigned long lastPauseResumeTime; // Track last pause/resume to prevent rapid toggling
+    unsigned long lastFunctionSwitchTime; // Track last function switch to prevent same button press from pausing immediately after switch
+    unsigned long gracePeriodStartTime; // Track when grace period started (for IDLE or PAUSED)
+    bool gracePeriodActive; // Whether the grace period is currently active
+    int tokensConsumedCount; // Track how many tokens have been consumed in current session
 
     static const unsigned long DEBOUNCE_DELAY = 100;
     static const unsigned long PAUSE_RESUME_COOLDOWN = 500; // Minimum time between pause/resume (500ms)
+    static const unsigned long FUNCTION_SWITCH_COOLDOWN = 500; // Minimum time after function switch before same button can pause (500ms)
     static const unsigned long COIN_DEBOUNCE_DELAY = 50;
     static const unsigned long COIN_PROCESS_COOLDOWN = 2000; // 1000ms (1 second) between accepted coins
     static const unsigned long COIN_EDGE_WINDOW = 500;      // Maximum window for detecting multiple edges as one coin
@@ -85,10 +85,14 @@ private:
 
     void diagnosticCoinSignal();
     void processCoinInsertion(unsigned long currentTime);
+    void autoConsumeToken(); // Automatically consume a token and transition to PAUSED
+    void consumeNextToken(); // Consume next token when current one expires
+    void switchFunction(int newButtonIndex); // Switch to a different function while RUNNING
+    unsigned long getInactivityTimeout() const; // Calculate dynamic inactivity timeout based on tokens
 
-    void publishActionEvent(int buttonIndex, MachineAction machineAction, TriggerType triggerType = MANUAL);
-    void publishPeriodicState(bool force = false);
-    void publishStateOnDemand();  // Publish state on demand with high priority (QOS1)
+    // void publishActionEvent(int buttonIndex, MachineAction machineAction, TriggerType triggerType = MANUAL);
+    // void publishPeriodicState(bool force = false);
+    // void publishStateOnDemand();  // Publish state on demand with high priority (QOS1)
     
     // Helper method to queue MQTT messages for the dedicated publisher task
     bool queueMqttMessage(const char* topic, const char* payload, uint8_t qos, bool isCritical);

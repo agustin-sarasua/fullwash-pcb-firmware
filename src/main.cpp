@@ -9,7 +9,6 @@
 #include "car_wash_controller.h"
 #include "logger.h"
 #include "display_manager.h"
-#include "rtc_manager.h"
 #include "ble_config_manager.h"
 #include "ble_machine_loader.h"
 
@@ -38,8 +37,6 @@ MqttLteClient mqttClient(SerialAT, MODEM_PWRKEY, MODEM_DTR, MODEM_FLIGHT, MODEM_
 // Create IO Expander
 IoExpander ioExpander(TCA9535_ADDR, I2C_SDA_PIN, I2C_SCL_PIN, INT_PIN);
 
-// Create RTC Manager (uses Wire1, shared with LCD)
-RTCManager* rtcManager;
 
 // Create controller
 CarWashController* controller;
@@ -64,7 +61,7 @@ TaskHandle_t TaskMqttPublisherHandle = NULL;
 // FreeRTOS mutexes for shared resources
 SemaphoreHandle_t xIoExpanderMutex = NULL;
 SemaphoreHandle_t xControllerMutex = NULL;
-SemaphoreHandle_t xI2CMutex = NULL;  // For Wire1 (LCD and RTC)
+SemaphoreHandle_t xI2CMutex = NULL;  // For Wire1 (LCD)
 
 // FreeRTOS queue for MQTT message publishing
 QueueHandle_t xMqttPublishQueue = NULL;
@@ -807,16 +804,6 @@ void mqtt_callback(char *topic, byte *payload, unsigned int len) {
                 extern IoExpander ioExpander;
                 ioExpander.printDebugInfo();
             }
-            // Add debug command to print RTC state
-            else if (command == "debug_rtc") {
-                LOG_INFO("Printing RTC debug info");
-                extern RTCManager* rtcManager;
-                if (rtcManager && rtcManager->isInitialized()) {
-                    rtcManager->printDebugInfo();
-                } else {
-                    LOG_WARNING("RTC is not initialized");
-                }
-            }
             // Add command to get network diagnostics
             else if (command == "debug_network") {
                 LOG_INFO("Printing network diagnostics");
@@ -897,22 +884,6 @@ void mqtt_callback(char *topic, byte *payload, unsigned int len) {
                     LOG_INFO("NOTE: Restart device to fully apply changes");
                 } else {
                     LOG_ERROR("Failed to update environment in storage");
-                }
-            }
-            // Add command to manually set RTC time from server
-            else if (command == "sync_rtc" && doc.containsKey("timestamp")) {
-                String timestamp = doc["timestamp"].as<String>();
-                LOG_INFO("Manual RTC sync requested with timestamp: %s", timestamp.c_str());
-                extern RTCManager* rtcManager;
-                if (rtcManager && rtcManager->isInitialized()) {
-                    if (rtcManager->setDateTimeFromISO(timestamp)) {
-                        LOG_INFO("RTC synchronized successfully!");
-                        rtcManager->printDebugInfo();
-                    } else {
-                        LOG_ERROR("Failed to sync RTC");
-                    }
-                } else {
-                    LOG_WARNING("RTC is not initialized");
                 }
             }
         }
@@ -1058,7 +1029,7 @@ void setup() {
   LOG_INFO("Initializing FreeRTOS mutexes...");
   xIoExpanderMutex = xSemaphoreCreateMutex();
   xControllerMutex = xSemaphoreCreateMutex();
-  xI2CMutex = xSemaphoreCreateMutex();  // For Wire1 (LCD and RTC)
+  xI2CMutex = xSemaphoreCreateMutex();  // For Wire1 (LCD)
   
   if (xIoExpanderMutex == NULL || xControllerMutex == NULL || xI2CMutex == NULL) {
         LOG_ERROR("Failed to create mutexes!");
@@ -1101,37 +1072,17 @@ void setup() {
     LOG_INFO("=== READY FOR COIN DETECTION ===");
     LOG_INFO("Insert coins to test detection...");
   }
-  // Initialize Wire1 for the LCD display and RTC (shared I2C bus)
-  LOG_INFO("Initializing Wire1 (I2C) for LCD and RTC...");
+  // Initialize Wire1 for the LCD display
+  LOG_INFO("Initializing Wire1 (I2C) for LCD...");
   Wire1.begin(LCD_SDA_PIN, LCD_SCL_PIN);
   Wire1.setClock(100000); // Set I2C clock to 100kHz (standard mode)
   
-  // Initialize the RTC manager
-  LOG_INFO("Initializing RTC Manager...");
-  rtcManager = new RTCManager(RTC_DS1340_ADDR, &Wire1);
-  
-  // Set I2C mutex for RTC manager (must be done after mutex creation)
-  if (rtcManager && xI2CMutex != NULL) {
-    rtcManager->setI2CMutex(xI2CMutex);
-  }
-  
-  if (rtcManager->begin()) {
-    LOG_INFO("RTC initialization successful!");
-    rtcManager->printDebugInfo();
-    // Connect RTC to logger for timestamps
-    Logger::setRTCManager(rtcManager);
-  } else {
-    LOG_ERROR("Failed to initialize RTC!");
-    LOG_WARNING("System will continue without RTC. Timestamps may be inaccurate.");
-  }
-  
-  // Initialize the controller with RTC
+  // Initialize the controller
   controller = new CarWashController(mqttClient);
-  controller->setRTCManager(rtcManager);
   
   // Initialize the display with correct LCD pins
   display = new DisplayManager(LCD_ADDR, LCD_COLS, LCD_ROWS, LCD_SDA_PIN, LCD_SCL_PIN);
-  // Set I2C mutex for display manager (shared with RTC)
+  // Set I2C mutex for display manager
   display->setI2CMutex(xI2CMutex);
   
   // MQTT initialization commented out - using BLE only

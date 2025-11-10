@@ -1,5 +1,15 @@
 #include "display_manager.h"
 #include "utilities.h"
+#include "constants.h"
+
+// Define button name mapping (static member)
+const char* DisplayManager::BUTTON_NAMES[5] = {
+    "BUTTON_1",
+    "BUTTON_2", 
+    "BUTTON_3",
+    "BUTTON_4",
+    "BUTTON_5"
+};
 
 DisplayManager::DisplayManager(uint8_t address, uint8_t columns, uint8_t rows, uint8_t sdaPin, uint8_t sclPin)
     : _columns(columns), _rows(rows), lastState(STATE_FREE), lastTokens(0), 
@@ -132,6 +142,13 @@ String DisplayManager::formatTime(unsigned long seconds) {
     return String(timeBuffer);
 }
 
+String DisplayManager::getButtonName(int buttonIndex) {
+    if (buttonIndex >= 0 && buttonIndex < 5) {
+        return String(BUTTON_NAMES[buttonIndex]);
+    }
+    return "NONE";
+}
+
 void DisplayManager::displayFreeState() {
     lcd.clear();
     displayCentered("MAQUINA LIBRE", 0);
@@ -144,89 +161,107 @@ void DisplayManager::displayFreeState() {
 }
 
 void DisplayManager::displayIdleState(CarWashController* controller, bool stateChanged) {
-    // Always refresh - get current values and display them
+    // Get current values
     int tokens = controller->getTokensLeft();
-    String userName = controller->getUserName();
-    unsigned long userInactivityTimeMs = controller->getTimeToInactivityTimeout();
-    unsigned long userInactivityTime = userInactivityTimeMs / 1000;
+    unsigned long tokenSecondsLeft = controller->getSecondsLeft();
+    unsigned long gracePeriodSeconds = controller->getGracePeriodSecondsLeft();
+    int activeButton = controller->getActiveButton();
+    
+    // If grace period is active, no token has been consumed yet, so show total available time
+    // Also, if no token has been consumed yet (tokenSecondsLeft == 0 and activeButton == -1),
+    // calculate total available time from tokens
+    if (gracePeriodSeconds > 0 || (tokenSecondsLeft == 0 && activeButton == -1 && tokens > 0)) {
+        // Calculate total time: tokens * TOKEN_TIME (in milliseconds) / 1000 to get seconds
+        tokenSecondsLeft = (tokens * TOKEN_TIME) / 1000;
+    }
     
     // Clear and redraw entire screen
     lcd.clear();
     
-    // Truncate username if it's too long
-    if (userName.length() > 16) {
-        userName = userName.substring(0, 13) + "...";
+    // Line 1: State with grace period countdown if active
+    lcd.setCursor(0, 0);
+    if (gracePeriodSeconds > 0) {
+        String line1 = "INICIADA - " + formatTime(gracePeriodSeconds);
+        lcd.print(line1);
+    } else {
+        lcd.print("INICIADA");
     }
     
-    String helloMsg = "Hola " + userName;
-    lcd.setCursor(0, 0);
-    lcd.print(helloMsg);
-    
+    // Line 2: Instruction
     lcd.setCursor(0, 1);
+    lcd.print("Presiona un Boton");
+    
+    // Line 3: Tokens
+    lcd.setCursor(0, 2);
     lcd.print("Fichas: ");
     lcd.print(tokens);
     
-    lcd.setCursor(0, 2);
-    lcd.print("Salida en: ");
-    String timeStr = formatTime(userInactivityTime);
-    lcd.print(timeStr);
-    
-    // No logging to reduce overhead
-    
+    // Line 4: Time left
     lcd.setCursor(0, 3);
-    lcd.print("Pulse boton");
+    lcd.print("Tiempo: ");
+    lcd.print(formatTime(tokenSecondsLeft));
 }
 
 void DisplayManager::displayRunningState(CarWashController* controller) {
-    // Always refresh - get current values and display them
+    // Get current values
     int tokens = controller->getTokensLeft();
-    String userName = controller->getUserName();
     unsigned long secondsLeft = controller->getSecondsLeft();
+    int activeButton = controller->getActiveButton();
     
     // Clear and redraw entire screen
     lcd.clear();
     
-    // Truncate username if it's too long
-    if (userName.length() > 16) {
-        userName = userName.substring(0, 13) + "...";
-    }
-    
-    String helloMsg = "Hola " + userName;
+    // Line 1: State
     lcd.setCursor(0, 0);
-    lcd.print(helloMsg);
+    lcd.print("LAVANDO");
     
+    // Line 2: Active button name
     lcd.setCursor(0, 1);
+    String buttonName = getButtonName(activeButton);
+    lcd.print(buttonName);
+    
+    // Line 3: Tokens
+    lcd.setCursor(0, 2);
     lcd.print("Fichas: ");
     lcd.print(tokens);
     
-    lcd.setCursor(0, 2);
+    // Line 4: Time left
+    lcd.setCursor(0, 3);
     lcd.print("Tiempo: ");
     lcd.print(formatTime(secondsLeft));
-    
-    displayCentered("LAVANDO", 3);
 }
 
 void DisplayManager::displayPausedState(CarWashController* controller, MachineState previousState) {
-    // Always refresh - get current values and display them
+    // Get current values
     int tokens = controller->getTokensLeft();
-    String userName = controller->getUserName();
     unsigned long secondsLeft = controller->getSecondsLeft();
-    unsigned long userInactivityTime = controller->getTimeToInactivityTimeout() / 1000;
+    unsigned long gracePeriodSeconds = controller->getGracePeriodSecondsLeft();
+    int activeButton = controller->getActiveButton();
     
     // Clear and redraw entire screen
     lcd.clear();
-
-    lcd.setCursor(0, 0);
-    lcd.print("Salida en: ");
-    lcd.print(formatTime(userInactivityTime));
     
+    // Line 1: State with grace period countdown if active
+    lcd.setCursor(0, 0);
+    if (gracePeriodSeconds > 0) {
+        String line1 = "PAUSADA - " + formatTime(gracePeriodSeconds);
+        lcd.print(line1);
+    } else {
+        lcd.print("PAUSADA");
+    }
+    
+    // Line 2: Active button name
     lcd.setCursor(0, 1);
+    String buttonName = getButtonName(activeButton);
+    lcd.print(buttonName);
+    
+    // Line 3: Tokens
+    lcd.setCursor(0, 2);
     lcd.print("Fichas: ");
     lcd.print(tokens);
     
-    lcd.setCursor(0, 2);
+    // Line 4: Time left
+    lcd.setCursor(0, 3);
     lcd.print("Tiempo: ");
     lcd.print(formatTime(secondsLeft));
-    
-    displayCentered("PAUSADA", 3);
 }

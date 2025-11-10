@@ -19,11 +19,12 @@ const int RUNNING_LED_PIN = LED_PIN;  // Use same LED for running state
 const int RELAY_INDICES[] = {RELAY1, RELAY2, RELAY3, RELAY4, RELAY5};
 
 // Timing Constants
-// NOTE: These values are divided by 6 for testing/debugging (20 seconds instead of 2 minutes)
-// For production, remove "/ 6" to get 120000 ms = 2 minutes
-const unsigned long STATE_RUNNING_TIME = 120000 / 6; // Currently 20 seconds (was 2 minutes)
-const unsigned long TOKEN_TIME = 120000 / 6;         // Currently 20 seconds (was 2 minutes)
-const unsigned long USER_INACTIVE_TIMEOUT = 120000 / 6; // Currently 20 seconds (was 2 minutes)
+// Each token is 2 minutes (120000 ms)
+const unsigned long TOKEN_TIME = 120000;         // 2 minutes per token
+// Grace period: 30 seconds to press a button before token consumption begins/continues
+const unsigned long GRACE_PERIOD_TIMEOUT = 30000; // 30 seconds
+// Base inactivity timeout (used as minimum, actual timeout is calculated dynamically based on tokens)
+const unsigned long BASE_INACTIVE_TIMEOUT = 30000; // 30 seconds base
 
 // MQTT Topics
 extern String MACHINE_ID;  // Changed to String to allow dynamic loading

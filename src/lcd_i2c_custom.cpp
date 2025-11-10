@@ -180,14 +180,13 @@ void LcdI2cCustom::write4bits(uint8_t value) {
 }
 
 void LcdI2cCustom::expanderWrite(uint8_t data) {
-    // Protect I2C access with mutex (shared with RTC)
-    // Use 100ms timeout to match RTC timeout for consistency
+    // Protect I2C access with mutex
+    // Use 100ms timeout for consistency
     bool mutexTaken = false;
     if (_i2cMutex != NULL) {
         mutexTaken = (xSemaphoreTake(_i2cMutex, pdMS_TO_TICKS(100)) == pdTRUE);
         if (!mutexTaken) {
             // Failed to acquire mutex - skip this write to avoid blocking
-            // This prevents I2C bus conflicts with RTC operations
             // Note: During initialization, mutex may not be set yet, which is OK
             return;
         }

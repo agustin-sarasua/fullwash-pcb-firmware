@@ -353,7 +353,7 @@ void BLEMachineLoader::processLoadCommand() {
     doc["user_id"] = loadData.userId;
     doc["user_name"] = loadData.userName;
     doc["tokens"] = loadData.tokens;
-    doc["timestamp"] = "";  // Will be set by controller if RTC is available
+    doc["timestamp"] = "";  // Will be set by controller
     
     String jsonString;
     serializeJson(doc, jsonString);
@@ -454,7 +454,7 @@ bool BLEMachineLoader::validateAuthToken(const String& token, const String& user
     // Also validate the token timestamp is reasonable (not too old from backend perspective)
     // This is a sanity check - token should be from last 10 minutes max
     unsigned long tokenTimestamp = tokenTimestampStr.toInt();
-    // We can't validate absolute time without RTC, but we can check it's a reasonable Unix timestamp
+    // We can check it's a reasonable Unix timestamp
     // (after year 2020 = 1577836800, before year 2100 = 4102444800)
     if (tokenTimestamp < 1577836800 || tokenTimestamp > 4102444800) {
         LOG_ERROR("Token timestamp out of reasonable range: %lu", tokenTimestamp);

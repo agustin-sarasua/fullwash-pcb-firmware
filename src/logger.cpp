@@ -1,11 +1,8 @@
 #include "../include/logger.h"
-#include "../include/rtc_manager.h"
 #include <stdarg.h>
-#include <TimeLib.h>
 
 LogLevel Logger::currentLevel = LOG_DEBUG;
 bool Logger::initialized = false;
-RTCManager* Logger::rtcManager = nullptr;
 const char* Logger::levelNames[] = {"NONE", "ERROR", "WARNING", "INFO", "DEBUG"};
 
 void Logger::init(LogLevel level, unsigned long baudRate) {
@@ -26,28 +23,8 @@ LogLevel Logger::getLogLevel() {
     return currentLevel;
 }
 
-void Logger::setRTCManager(RTCManager* rtc) {
-    rtcManager = rtc;
-}
-
 void Logger::getTimestamp(char* buffer, size_t bufferSize) {
-    // Try to use RTC if available
-    // NOTE: We don't call isTimeValid() here to avoid recursion - 
-    // that method logs, which would call getTimestamp() again
-    if (rtcManager && rtcManager->isInitialized()) {
-        time_t now = rtcManager->getDateTime();
-        // Only use RTC time if it's reasonable (after 2020-01-01)
-        if (now > 0 && now >= 1577836800UL) {
-            // Format as HH:MM:SS using TimeLib
-            int h = hour(now);
-            int m = minute(now);
-            int s = second(now);
-            snprintf(buffer, bufferSize, "%02d:%02d:%02d", h, m, s);
-            return;
-        }
-    }
-    
-    // Fallback to uptime from millis()
+    // Use uptime from millis()
     unsigned long totalSeconds = millis() / 1000;
     unsigned long hours = totalSeconds / 3600;
     unsigned long minutes = (totalSeconds % 3600) / 60;
