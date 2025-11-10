@@ -15,7 +15,7 @@ public:
     // Initialize the LCD display
     DisplayManager(uint8_t address, uint8_t columns, uint8_t rows, uint8_t sdaPin, uint8_t sclPin);
     
-    // Set I2C mutex for thread-safe access to Wire1 (shared with RTC)
+    // Set I2C mutex for thread-safe access to Wire1
     void setI2CMutex(SemaphoreHandle_t mutex);
     
     // Update display based on machine state
@@ -29,6 +29,9 @@ public:
     
     // Format seconds into MM:SS
     String formatTime(unsigned long seconds);
+    
+    // Get button name from button index
+    String getButtonName(int buttonIndex);
 
 private:
     // Display specific screens based on machine state
@@ -42,7 +45,7 @@ private:
     uint8_t _columns;
     uint8_t _rows;
     TwoWire* _wire;
-    SemaphoreHandle_t _i2cMutex;  // Mutex for Wire1 access (shared with RTC)
+    SemaphoreHandle_t _i2cMutex;  // Mutex for Wire1 access
     
     // Track the last state to avoid unnecessary redraw
     MachineState lastState;
@@ -50,6 +53,9 @@ private:
     int lastTokens;
     unsigned long lastSecondsLeft;
     unsigned long lastUpdateTime;
+    
+    // Button name mapping
+    static const char* BUTTON_NAMES[5];
 };
 
 #endif // DISPLAY_MANAGER_H
