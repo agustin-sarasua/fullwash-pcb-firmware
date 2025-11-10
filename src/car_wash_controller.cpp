@@ -252,41 +252,54 @@ void CarWashController::handleButtons() {
                         buttonProcessed = true;
                     }
                 } else if (currentState == STATE_PAUSED) {
-                    // CRITICAL FIX: Only resume if the button matches the active button
-                    // This prevents accidentally activating a different button when paused
-                    // If user wants a different button, they should stop first
-                    if (activeButton == -1 || (int)detectedId == activeButton) {
-                        // CRITICAL FIX: Prevent rapid pause/resume toggling
-                        unsigned long currentTime = millis();
-                        unsigned long timeSinceLastPauseResume;
-                        if (currentTime >= lastPauseResumeTime) {
-                            timeSinceLastPauseResume = currentTime - lastPauseResumeTime;
-                        } else {
-                            timeSinceLastPauseResume = (0xFFFFFFFFUL - lastPauseResumeTime) + currentTime + 1;
-                        }
-                        
-                        // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
-                        lastActionTime = currentTime;
-                        
-                        if (timeSinceLastPauseResume < PAUSE_RESUME_COOLDOWN) {
-                            LOG_WARNING("Button %d pressed while PAUSED - ignoring (cooldown: %lu ms < %lu ms)", 
-                                       detectedId + 1, timeSinceLastPauseResume, PAUSE_RESUME_COOLDOWN);
-                        } else {
+                    // Same button resumes, different button switches function and resumes
+                    unsigned long currentTime = millis();
+                    
+                    // CRITICAL FIX: Prevent rapid pause/resume toggling
+                    unsigned long timeSinceLastPauseResume;
+                    if (currentTime >= lastPauseResumeTime) {
+                        timeSinceLastPauseResume = currentTime - lastPauseResumeTime;
+                    } else {
+                        timeSinceLastPauseResume = (0xFFFFFFFFUL - lastPauseResumeTime) + currentTime + 1;
+                    }
+                    
+                    // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
+                    lastActionTime = currentTime;
+                    
+                    if (timeSinceLastPauseResume < PAUSE_RESUME_COOLDOWN) {
+                        LOG_WARNING("Button %d pressed while PAUSED - ignoring (cooldown: %lu ms < %lu ms)", 
+                                   detectedId + 1, timeSinceLastPauseResume, PAUSE_RESUME_COOLDOWN);
+                    } else {
+                        if (activeButton == -1 || (int)detectedId == activeButton) {
+                            // Same button (or no active button) - resume with same button
                             if (activeButton == -1) {
                                 LOG_WARNING("activeButton is -1 in PAUSED state - allowing resume anyway (button %d)", detectedId + 1);
                                 // Set activeButton to the pressed button to fix the tracking
                                 activeButton = detectedId;
                             }
-                            LOG_INFO("Resuming machine - button matches active button");
+                            LOG_INFO("Button %d: Resuming from PAUSED state (same button)", detectedId + 1);
                             resumeMachine(detectedId);
                             lastPauseResumeTime = currentTime;
                             buttonProcessed = true;
-                        }
-                    } else {
-                        // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
-                        lastActionTime = millis();
-                        LOG_WARNING("Button %d pressed while PAUSED (activeButton=%d) - ignoring (must press same button to resume)", 
+                        } else {
+                            // Different button pressed - switch function and resume
+                            LOG_INFO("Button %d pressed while PAUSED (activeButton=%d) - switching function and resuming", 
                                    detectedId + 1, activeButton + 1);
+                            // First deactivate the old relay if there was one
+                            if (activeButton >= 0) {
+                                extern IoExpander ioExpander;
+                                if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                                    ioExpander.setRelay(RELAY_INDICES[activeButton], false);
+                                    LOG_INFO("Deactivated relay %d (button %d)", activeButton + 1, activeButton + 1);
+                                    xSemaphoreGive(xIoExpanderMutex);
+                                }
+                            }
+                            // Now resume with the new button
+                            resumeMachine(detectedId);
+                            lastPauseResumeTime = currentTime;
+                            lastFunctionSwitchTime = currentTime;
+                            buttonProcessed = true;
+                        }
                     }
                 } else {
                     // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
@@ -428,39 +441,50 @@ void CarWashController::handleButtons() {
                             switchFunction(i);
                         }
                     } else if (currentState == STATE_PAUSED) {
-                        // CRITICAL FIX: Only resume if the button matches the active button
-                        // This prevents accidentally activating a different button when paused
-                        if (activeButton == -1 || i == activeButton) {
-                            // CRITICAL FIX: Prevent rapid pause/resume toggling
-                            unsigned long currentTime = millis();
-                            unsigned long timeSinceLastPauseResume;
-                            if (currentTime >= lastPauseResumeTime) {
-                                timeSinceLastPauseResume = currentTime - lastPauseResumeTime;
-                            } else {
-                                timeSinceLastPauseResume = (0xFFFFFFFFUL - lastPauseResumeTime) + currentTime + 1;
-                            }
-                            
-                            // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
-                            lastActionTime = currentTime;
-                            
-                            if (timeSinceLastPauseResume < PAUSE_RESUME_COOLDOWN) {
-                                LOG_WARNING("Button %d pressed while PAUSED - ignoring (cooldown: %lu ms < %lu ms) - raw polling", 
-                                           i + 1, timeSinceLastPauseResume, PAUSE_RESUME_COOLDOWN);
-                            } else {
+                        // Same button resumes, different button switches function and resumes
+                        unsigned long currentTime = millis();
+                        
+                        // CRITICAL FIX: Prevent rapid pause/resume toggling
+                        unsigned long timeSinceLastPauseResume;
+                        if (currentTime >= lastPauseResumeTime) {
+                            timeSinceLastPauseResume = currentTime - lastPauseResumeTime;
+                        } else {
+                            timeSinceLastPauseResume = (0xFFFFFFFFUL - lastPauseResumeTime) + currentTime + 1;
+                        }
+                        
+                        // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
+                        lastActionTime = currentTime;
+                        
+                        if (timeSinceLastPauseResume < PAUSE_RESUME_COOLDOWN) {
+                            LOG_WARNING("Button %d pressed while PAUSED - ignoring (cooldown: %lu ms < %lu ms) - raw polling", 
+                                       i + 1, timeSinceLastPauseResume, PAUSE_RESUME_COOLDOWN);
+                        } else {
+                            if (activeButton == -1 || i == activeButton) {
+                                // Same button (or no active button) - resume with same button
                                 if (activeButton == -1) {
                                     LOG_WARNING("activeButton is -1 in PAUSED state - allowing resume anyway (button %d) - raw polling", i + 1);
                                     // Set activeButton to the pressed button to fix the tracking
                                     activeButton = i;
                                 }
-                                LOG_INFO("Button %d: Resuming from PAUSED state", i + 1);
+                                LOG_INFO("Button %d: Resuming from PAUSED state (same button) - raw polling", i + 1);
                                 resumeMachine(i);
                                 lastPauseResumeTime = currentTime;
-                            }
-                        } else {
-                            // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
-                            lastActionTime = millis();
-                            LOG_WARNING("Button %d pressed while PAUSED (activeButton=%d) - ignoring (must press same button to resume) - raw polling", 
+                            } else {
+                                // Different button pressed - switch function and resume
+                                LOG_INFO("Button %d pressed while PAUSED (activeButton=%d) - switching function and resuming (raw polling)", 
                                        i + 1, activeButton + 1);
+                                // First deactivate the old relay if there was one
+                                extern IoExpander ioExpander;
+                                if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                                    ioExpander.setRelay(RELAY_INDICES[activeButton], false);
+                                    LOG_INFO("Deactivated relay %d (button %d)", activeButton + 1, activeButton + 1);
+                                    xSemaphoreGive(xIoExpanderMutex);
+                                }
+                                // Now resume with the new button
+                                resumeMachine(i);
+                                lastPauseResumeTime = currentTime;
+                                lastFunctionSwitchTime = currentTime;
+                            }
                         }
                     }
                 } else {
@@ -1322,34 +1346,7 @@ void CarWashController::update() {
         }
     }
     
-    // PRIORITY 1: Handle buttons and coin acceptor (time-critical, must be responsive)
-    // CRITICAL: Handle buttons BEFORE any blocking operations to ensure immediate response
-    // CRITICAL FIX: Always handle buttons if machine is loaded, even if timestamp is empty
-    // This ensures buttons work immediately after machine is loaded
-    
-    // Throttle log message to avoid spam (update() runs very frequently)
-    static unsigned long lastButtonLogTime = 0;
-    bool shouldLog = false;
-     if (lastButtonLogTime == 0) {
-        shouldLog = true;
-        lastButtonLogTime = currentTime;
-    } else {
-        // Handle potential millis() overflow
-        unsigned long elapsed;
-        if (currentTime >= lastButtonLogTime) {
-            elapsed = currentTime - lastButtonLogTime;
-        } else {
-            elapsed = (0xFFFFFFFFUL - lastButtonLogTime) + currentTime + 1;
-        }
-        if (elapsed > 5000) { // Log every 5 seconds max
-            shouldLog = true;
-            lastButtonLogTime = currentTime;
-        }
-    }
-    
-    if (shouldLog) {
-        LOG_INFO("Handling buttons and coin acceptor - isLoaded=%d, timestamp='%s'", config.isLoaded, config.timestamp.c_str());
-    }
+
     
     // Always handle coin acceptor - coins can create anonymous sessions when machine is not loaded
     handleCoinAcceptor();

@@ -15,9 +15,6 @@
 		},
 		{
 			"path": "../../../../../workspace/fullwash-app"
-		},
-		{
-			"path": "../../../../fullwash-pcb-firmware-main-modify"
 		}
 	],
 	"settings": {
