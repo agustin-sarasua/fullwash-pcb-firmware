@@ -2,88 +2,51 @@
 #include "utilities.h"
 #include "constants.h"
 
-// Define button name mapping (static member)
-const char* DisplayManager::BUTTON_NAMES[5] = {
-    "BUTTON_1",
-    "BUTTON_2", 
-    "BUTTON_3",
-    "BUTTON_4",
-    "BUTTON_5"
-};
-
-DisplayManager::DisplayManager(uint8_t address, uint8_t columns, uint8_t rows, uint8_t sdaPin, uint8_t sclPin)
-    : _columns(columns), _rows(rows), lastState(STATE_FREE), lastTokens(0), 
-      lastSecondsLeft(0), lastUpdateTime(0), lcd(address, columns, rows, Wire1), _i2cMutex(NULL) {
+DisplayManager::DisplayManager(uint8_t sdaPin, uint8_t sclPin)
+    : _lastState(STATE_FREE), _lastSecondsLeft(0), _lastTokensLeft(0), 
+      _lastUpdateTime(0), _i2cMutex(NULL) {
     
-    // Wire1 is already initialized in main.cpp
+    // Wire1 should be initialized in main.cpp before creating DisplayManager
     _wire = &Wire1;
     
-    // Create a log message about our initialization attempt
-    LOG_INFO("Initializing LCD at 0x%02X on pins SDA=%d, SCL=%d", address, sdaPin, sclPin);
+    LOG_INFO("Initializing 7-segment display on pins SDA=%d, SCL=%d", sdaPin, sclPin);
     
-    // Initialize the LCD (mutex will be set later via setI2CMutex)
-    lcd.begin();
+    // Create the CH453S driver
+    _display = new CH453SDriver(*_wire);
     
-    // Initial display
-    lcd.clear();
-    displayCentered("FULLWASH", 0);
-    displayCentered("Initializing...", 1);
-    
-    LOG_INFO("LCD Display initialized on address 0x%02X", address);
+    // Initialize the display (mutex will be set later via setI2CMutex)
+    if (_display->begin(10)) {  // Medium brightness
+        LOG_INFO("CH453S 7-segment display initialized successfully");
+        displayInit();
+    } else {
+        LOG_ERROR("Failed to initialize CH453S 7-segment display!");
+    }
 }
 
 void DisplayManager::setI2CMutex(SemaphoreHandle_t mutex) {
     _i2cMutex = mutex;
-    lcd.setI2CMutex(mutex);
+    if (_display) {
+        _display->setI2CMutex(mutex);
+    }
 }
 
 void DisplayManager::update(CarWashController* controller) {
-    if (!controller) return;
+    if (!controller || !_display) return;
     
-    // Always update at least once per second for dynamic content (countdown timers)
-    // This task is called every 500ms, so throttling ensures minimum 1Hz refresh
     unsigned long now = millis();
     MachineState currentState = controller->getCurrentState();
-    MachineState previousState = lastState;
-    bool stateChanged = (currentState != previousState);
+    bool stateChanged = (currentState != _lastState);
     
-    // CRITICAL: Always update immediately when state changes
-    // This ensures display updates to FREE state as soon as timeout happens
+    // Always update immediately when state changes
     if (stateChanged) {
-        lastUpdateTime = now;
-        // Continue to update...
+        _lastUpdateTime = now;
     } else {
-        // Only throttle if state hasn't changed
-        // Check if we're near timeout - update more frequently for accurate countdown
-        unsigned long timeToTimeout = controller->getTimeToInactivityTimeout();
-        unsigned long timeToTimeoutSeconds = timeToTimeout / 1000;
-        bool nearTimeout = (timeToTimeoutSeconds > 0 && timeToTimeoutSeconds <= 5); // Update every 500ms when <= 5 seconds
-        bool timeoutReached = (timeToTimeout == 0 && currentState != STATE_FREE); // Timeout is 0 but state hasn't changed yet
-        
-        // CRITICAL: If timeout reached 0 but state is still IDLE/PAUSED, force immediate update
-        // This ensures display updates as soon as timeout expires, even if controller hasn't processed it yet
-        // With the fix in update(), state should change immediately, but this is a safety measure
-        if (timeoutReached) {
-            lastUpdateTime = now;
-            // Continue to update - this will show 00:00, but next update (within 500ms) should catch state change
-            // The controller update() now checks timeout first and returns immediately after logout
-        } else {
-            // Update more frequently (every 500ms) when near timeout to avoid showing stale 00:00
-            // When timeout is exactly 0, we want to update immediately to catch the state change
-            unsigned long updateInterval = nearTimeout ? 500 : 1000;
-            unsigned long timeSinceLastUpdate = now - lastUpdateTime;
-            
-            if (timeSinceLastUpdate < updateInterval) {
-                return; // Throttle updates (removed excessive logging)
-            }
-            
-            lastUpdateTime = now;
+        // Throttle updates to every 500ms for smooth countdown display
+        if (now - _lastUpdateTime < 500) {
+            return;
         }
+        _lastUpdateTime = now;
     }
-    
-    // NOTE: I2C mutex is now handled internally by the LCD library
-    // The DisplayManager no longer needs to manage the mutex at this level
-    // This prevents double-locking and ensures all LCD operations are protected
     
     // Update display based on current state
     switch (currentState) {
@@ -91,177 +54,195 @@ void DisplayManager::update(CarWashController* controller) {
             displayFreeState();
             break;
         case STATE_IDLE:
-            displayIdleState(controller, stateChanged);
+            displayIdleState(controller);
             break;
         case STATE_RUNNING:
             displayRunningState(controller);
             break;
         case STATE_PAUSED:
-            displayPausedState(controller, previousState);
+            displayPausedState(controller);
             break;
         default:
-            // Fallback to free state for unknown states
             LOG_WARNING("[DISPLAY] Unknown state %d, showing FREE", currentState);
             displayFreeState();
             break;
     }
     
-    // Record last state after updating the display
-    lastState = currentState;
+    _lastState = currentState;
 }
 
-void DisplayManager::clearLine(uint8_t line) {
-    if (line >= _rows) return;
-    
-    lcd.setCursor(0, line);
-    for (uint8_t i = 0; i < _columns; i++) {
-        lcd.print(" ");
+void DisplayManager::clearAll() {
+    if (_display) {
+        _display->clear();
     }
-    lcd.setCursor(0, line);
 }
 
-void DisplayManager::displayCentered(const String& text, uint8_t line) {
-    if (line >= _rows) return;
-    
-    clearLine(line);
-    
-    int padding = (_columns - text.length()) / 2;
-    if (padding < 0) padding = 0;
-    
-    lcd.setCursor(padding, line);
-    lcd.print(text);
-}
-
-String DisplayManager::formatTime(unsigned long seconds) {
-    unsigned long minutes = seconds / 60;
-    unsigned long remainingSeconds = seconds % 60;
-    
-    char timeBuffer[6]; // MM:SS + null terminator
-    sprintf(timeBuffer, "%02lu:%02lu", minutes, remainingSeconds);
-    
-    return String(timeBuffer);
-}
-
-String DisplayManager::getButtonName(int buttonIndex) {
-    if (buttonIndex >= 0 && buttonIndex < 5) {
-        return String(BUTTON_NAMES[buttonIndex]);
+void DisplayManager::displayInit() {
+    if (_display) {
+        // Show dashes during initialization
+        _display->displayDashes(true);   // Top display
+        _display->displayDashes(false);  // Bottom display
     }
-    return "NONE";
+}
+
+void DisplayManager::displayError() {
+    if (_display) {
+        // Show "Err" pattern or dashes
+        _display->setCharacter(0, 'E', false);
+        _display->setCharacter(1, 'r', false);
+        _display->setCharacter(2, 'r', false);
+        _display->setCharacter(3, ' ', false);
+        _display->displayDashes(false);
+    }
+}
+
+void DisplayManager::setBrightness(uint8_t brightness) {
+    if (_display) {
+        _display->setBrightness(brightness);
+    }
 }
 
 void DisplayManager::displayFreeState() {
-    lcd.clear();
-    displayCentered("MAQUINA LIBRE", 0);
-    lcd.setCursor(0, 1);
-    lcd.print("Para cargar fichas:");
-    lcd.setCursor(0, 2);
-    lcd.print("1. Usa la APP");
-    lcd.setCursor(0, 3);
-    lcd.print("2. Inserte fichas");
+    if (!_display) return;
+    
+    // Clear displays when machine is free
+    // Show "----" to indicate ready state or blank
+    _display->displayDashes(true);   // Top: "----"
+    _display->displayDashes(false);  // Bottom: "----"
 }
 
-void DisplayManager::displayIdleState(CarWashController* controller, bool stateChanged) {
-    // Get current values
-    int tokens = controller->getTokensLeft();
-    unsigned long tokenSecondsLeft = controller->getSecondsLeft();
+void DisplayManager::displayIdleState(CarWashController* controller) {
+    if (!_display || !controller) return;
+    
+    // Get time and tokens info
+    unsigned long secondsLeft = controller->getSecondsLeft();
+    int tokensLeft = controller->getTokensLeft();
     unsigned long gracePeriodSeconds = controller->getGracePeriodSecondsLeft();
-    int activeButton = controller->getActiveButton();
     
-    // If grace period is active, no token has been consumed yet, so show total available time
-    // Also, if no token has been consumed yet (tokenSecondsLeft == 0 and activeButton == -1),
-    // calculate total available time from tokens
-    if (gracePeriodSeconds > 0 || (tokenSecondsLeft == 0 && activeButton == -1 && tokens > 0)) {
-        // Calculate total time: tokens * TOKEN_TIME (in milliseconds) / 1000 to get seconds
-        tokenSecondsLeft = (tokens * TOKEN_TIME) / 1000;
+    // If grace period is active and no token has been consumed yet,
+    // show total time available from all tokens
+    if (gracePeriodSeconds > 0 || secondsLeft == 0) {
+        // Calculate total time from tokens (TOKEN_TIME is in milliseconds)
+        secondsLeft = (tokensLeft * TOKEN_TIME) / 1000;
     }
     
-    // Clear and redraw entire screen
-    lcd.clear();
+    // Update time display (top display) - shows seconds remaining
+    updateTimeDisplay(secondsLeft);
     
-    // Line 1: State with grace period countdown if active
-    lcd.setCursor(0, 0);
+    // Update tokens display (bottom display) - shows token fraction
+    // In IDLE state with grace period, no token has been consumed yet
+    // So we show full tokens
     if (gracePeriodSeconds > 0) {
-        String line1 = "INICIADA - " + formatTime(gracePeriodSeconds);
-        lcd.print(line1);
+        // Grace period active - show full tokens (no consumption yet)
+        updateTokensDisplay(tokensLeft, 0, TOKEN_TIME / 1000);
     } else {
-        lcd.print("INICIADA");
+        // Grace period expired - token is being consumed in IDLE
+        unsigned long tokenTimeSeconds = TOKEN_TIME / 1000;
+        unsigned long secondsInCurrentToken = (secondsLeft > 0) ? (secondsLeft % tokenTimeSeconds) : 0;
+        if (secondsInCurrentToken == 0 && secondsLeft > 0) {
+            secondsInCurrentToken = tokenTimeSeconds;
+        }
+        updateTokensDisplay(tokensLeft, secondsInCurrentToken, tokenTimeSeconds);
     }
-    
-    // Line 2: Instruction
-    lcd.setCursor(0, 1);
-    lcd.print("Presiona un Boton");
-    
-    // Line 3: Tokens
-    lcd.setCursor(0, 2);
-    lcd.print("Fichas: ");
-    lcd.print(tokens);
-    
-    // Line 4: Time left
-    lcd.setCursor(0, 3);
-    lcd.print("Tiempo: ");
-    lcd.print(formatTime(tokenSecondsLeft));
 }
 
 void DisplayManager::displayRunningState(CarWashController* controller) {
+    if (!_display || !controller) return;
+    
     // Get current values
-    int tokens = controller->getTokensLeft();
     unsigned long secondsLeft = controller->getSecondsLeft();
-    int activeButton = controller->getActiveButton();
+    int tokensLeft = controller->getTokensLeft();
     
-    // Clear and redraw entire screen
-    lcd.clear();
+    // Update time display (top display) - shows seconds remaining
+    updateTimeDisplay(secondsLeft);
     
-    // Line 1: State
-    lcd.setCursor(0, 0);
-    lcd.print("LAVANDO");
+    // Update tokens display (bottom display) - shows token fraction
+    // When running, we need to calculate the fraction based on time used
+    unsigned long tokenTimeSeconds = TOKEN_TIME / 1000;  // Convert ms to seconds
     
-    // Line 2: Active button name
-    lcd.setCursor(0, 1);
-    String buttonName = getButtonName(activeButton);
-    lcd.print(buttonName);
-    
-    // Line 3: Tokens
-    lcd.setCursor(0, 2);
-    lcd.print("Fichas: ");
-    lcd.print(tokens);
-    
-    // Line 4: Time left
-    lcd.setCursor(0, 3);
-    lcd.print("Tiempo: ");
-    lcd.print(formatTime(secondsLeft));
-}
-
-void DisplayManager::displayPausedState(CarWashController* controller, MachineState previousState) {
-    // Get current values
-    int tokens = controller->getTokensLeft();
-    unsigned long secondsLeft = controller->getSecondsLeft();
-    unsigned long gracePeriodSeconds = controller->getGracePeriodSecondsLeft();
-    int activeButton = controller->getActiveButton();
-    
-    // Clear and redraw entire screen
-    lcd.clear();
-    
-    // Line 1: State with grace period countdown if active
-    lcd.setCursor(0, 0);
-    if (gracePeriodSeconds > 0) {
-        String line1 = "PAUSADA - " + formatTime(gracePeriodSeconds);
-        lcd.print(line1);
-    } else {
-        lcd.print("PAUSADA");
+    // secondsLeft includes time from current token + future tokens
+    // We need to extract how much is left in the current token
+    unsigned long secondsInCurrentToken = 0;
+    if (secondsLeft > 0) {
+        // Calculate remaining time in current token
+        // If secondsLeft > tokensLeft * tokenTime, there's a current token being consumed
+        unsigned long futureTokensTime = tokensLeft * tokenTimeSeconds;
+        if (secondsLeft > futureTokensTime) {
+            secondsInCurrentToken = secondsLeft - futureTokensTime;
+        }
     }
     
-    // Line 2: Active button name
-    lcd.setCursor(0, 1);
-    String buttonName = getButtonName(activeButton);
-    lcd.print(buttonName);
+    updateTokensDisplay(tokensLeft, secondsInCurrentToken, tokenTimeSeconds);
+}
+
+void DisplayManager::displayPausedState(CarWashController* controller) {
+    if (!_display || !controller) return;
     
-    // Line 3: Tokens
-    lcd.setCursor(0, 2);
-    lcd.print("Fichas: ");
-    lcd.print(tokens);
+    // Get current values
+    unsigned long secondsLeft = controller->getSecondsLeft();
+    int tokensLeft = controller->getTokensLeft();
+    unsigned long gracePeriodSeconds = controller->getGracePeriodSecondsLeft();
     
-    // Line 4: Time left
-    lcd.setCursor(0, 3);
-    lcd.print("Tiempo: ");
-    lcd.print(formatTime(secondsLeft));
+    // Update time display (top display) - shows seconds remaining
+    updateTimeDisplay(secondsLeft);
+    
+    // Update tokens display (bottom display) - shows token fraction
+    unsigned long tokenTimeSeconds = TOKEN_TIME / 1000;
+    
+    // Calculate remaining time in current token
+    unsigned long secondsInCurrentToken = 0;
+    if (secondsLeft > 0) {
+        unsigned long futureTokensTime = tokensLeft * tokenTimeSeconds;
+        if (secondsLeft > futureTokensTime) {
+            secondsInCurrentToken = secondsLeft - futureTokensTime;
+        }
+    }
+    
+    updateTokensDisplay(tokensLeft, secondsInCurrentToken, tokenTimeSeconds);
+}
+
+void DisplayManager::updateTimeDisplay(unsigned long seconds) {
+    if (!_display) return;
+    
+    // Limit to 9999 seconds (about 166 minutes)
+    if (seconds > 9999) seconds = 9999;
+    
+    // Only update if value changed
+    if (seconds != _lastSecondsLeft) {
+        _display->displayTopNumber((uint16_t)seconds, false);
+        _lastSecondsLeft = seconds;
+    }
+}
+
+void DisplayManager::updateTokensDisplay(int tokensRemaining, unsigned long secondsLeftInCurrentToken, unsigned long tokenTimeSeconds) {
+    if (!_display) return;
+    
+    // Calculate token fraction
+    float tokenFraction = calculateTokenFraction(tokensRemaining, secondsLeftInCurrentToken, tokenTimeSeconds);
+    
+    // Only update if value changed significantly (to avoid flicker)
+    if (abs(tokenFraction - _lastTokensLeft) > 0.05f) {
+        _display->displayBottomDecimal(tokenFraction, 1);
+        _lastTokensLeft = tokenFraction;
+    }
+}
+
+float DisplayManager::calculateTokenFraction(int tokensRemaining, unsigned long secondsLeftInCurrentToken, unsigned long tokenTimeSeconds) {
+    // Total tokens = whole tokens remaining + fraction of current token
+    // 
+    // Example: User inserted 2 tokens (each token = 120 seconds)
+    // - At start: 2.0 tokens (240 seconds)
+    // - After 60 seconds: 1.5 tokens (180 seconds left = 1 token + 60/120 = 1.5)
+    // - After 120 seconds: 1.0 tokens (120 seconds left)
+    // - After 180 seconds: 0.5 tokens (60 seconds left)
+    // - After 240 seconds: 0.0 tokens (0 seconds left)
+    
+    float fraction = (float)tokensRemaining;
+    
+    if (secondsLeftInCurrentToken > 0 && tokenTimeSeconds > 0) {
+        // Add the fraction of the current token being consumed
+        fraction += (float)secondsLeftInCurrentToken / (float)tokenTimeSeconds;
+    }
+    
+    return fraction;
 }

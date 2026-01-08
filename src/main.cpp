@@ -1072,16 +1072,16 @@ void setup() {
     LOG_INFO("=== READY FOR COIN DETECTION ===");
     LOG_INFO("Insert coins to test detection...");
   }
-  // Initialize Wire1 for the LCD display
-  LOG_INFO("Initializing Wire1 (I2C) for LCD...");
-  Wire1.begin(LCD_SDA_PIN, LCD_SCL_PIN);
+  // Initialize Wire1 for the 7-segment display
+  LOG_INFO("Initializing Wire1 (I2C) for 7-segment display...");
+  Wire1.begin(DISPLAY_SDA_PIN, DISPLAY_SCL_PIN);
   Wire1.setClock(100000); // Set I2C clock to 100kHz (standard mode)
   
   // Initialize the controller
   controller = new CarWashController(mqttClient);
   
-  // Initialize the display with correct LCD pins
-  display = new DisplayManager(LCD_ADDR, LCD_COLS, LCD_ROWS, LCD_SDA_PIN, LCD_SCL_PIN);
+  // Initialize the 7-segment display
+  display = new DisplayManager(DISPLAY_SDA_PIN, DISPLAY_SCL_PIN);
   // Set I2C mutex for display manager
   display->setI2CMutex(xI2CMutex);
   

@@ -5,57 +5,128 @@
 #include <Wire.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
-#include "lcd_i2c_custom.h"
+#include "ch453s_driver.h"
 #include "car_wash_controller.h"
 #include "domain.h"
 #include "logger.h"
 
+/**
+ * Display Manager for dual 4-digit 7-segment LED displays
+ * 
+ * Hardware:
+ * - 2x 4-digit 7-segment LED displays (SR440801N/32)
+ * - CH453S LED driver IC (I2C controlled)
+ * 
+ * Display Layout:
+ * - Top display (digits 0-3): Time left in seconds (e.g., "0120" for 120 seconds)
+ * - Bottom display (digits 4-7): Tokens left as decimal (e.g., "1.5" for 1.5 tokens)
+ * 
+ * Token Display Logic:
+ * - Tokens are displayed as fractions based on time consumed
+ * - Example: 2 tokens loaded, each token = 2 minutes (120 seconds)
+ *   - After 1 minute used: 1.5 tokens remaining
+ *   - After 2 minutes used: 1.0 tokens remaining
+ */
 class DisplayManager {
 public:
-    // Initialize the LCD display
-    DisplayManager(uint8_t address, uint8_t columns, uint8_t rows, uint8_t sdaPin, uint8_t sclPin);
+    /**
+     * Initialize the 7-segment display manager
+     * @param sdaPin I2C SDA pin
+     * @param sclPin I2C SCL pin
+     */
+    DisplayManager(uint8_t sdaPin, uint8_t sclPin);
     
-    // Set I2C mutex for thread-safe access to Wire1
+    /**
+     * Set I2C mutex for thread-safe access to Wire1
+     * @param mutex FreeRTOS semaphore handle
+     */
     void setI2CMutex(SemaphoreHandle_t mutex);
     
-    // Update display based on machine state
+    /**
+     * Update display based on machine state
+     * @param controller Pointer to car wash controller
+     */
     void update(CarWashController* controller);
     
-    // Clear specific line
-    void clearLine(uint8_t line);
+    /**
+     * Clear all displays
+     */
+    void clearAll();
     
-    // Display centered text on specific line
-    void displayCentered(const String& text, uint8_t line);
+    /**
+     * Display initialization message
+     */
+    void displayInit();
     
-    // Format seconds into MM:SS
-    String formatTime(unsigned long seconds);
+    /**
+     * Display error state
+     */
+    void displayError();
     
-    // Get button name from button index
-    String getButtonName(int buttonIndex);
+    /**
+     * Set display brightness
+     * @param brightness Brightness level 0-15
+     */
+    void setBrightness(uint8_t brightness);
 
 private:
-    // Display specific screens based on machine state
-    void displayFreeState();
-    void displayIdleState(CarWashController* controller, bool stateChanged);
-    void displayRunningState(CarWashController* controller);
-    // void displayPausedState(CarWashController* controller);
-    void displayPausedState(CarWashController* controller, MachineState previousState);
-    
-    LcdI2cCustom lcd;
-    uint8_t _columns;
-    uint8_t _rows;
+    CH453SDriver* _display;
     TwoWire* _wire;
-    SemaphoreHandle_t _i2cMutex;  // Mutex for Wire1 access
+    SemaphoreHandle_t _i2cMutex;
     
-    // Track the last state to avoid unnecessary redraw
-    MachineState lastState;
-    String lastUserName;
-    int lastTokens;
-    unsigned long lastSecondsLeft;
-    unsigned long lastUpdateTime;
+    // Track last values to avoid unnecessary redraws
+    MachineState _lastState;
+    unsigned long _lastSecondsLeft;
+    float _lastTokensLeft;
+    unsigned long _lastUpdateTime;
     
-    // Button name mapping
-    static const char* BUTTON_NAMES[5];
+    /**
+     * Display FREE state (machine available)
+     * Shows "----" on both displays or blank
+     */
+    void displayFreeState();
+    
+    /**
+     * Display IDLE state (loaded, waiting for button)
+     * @param controller Pointer to controller for getting state
+     */
+    void displayIdleState(CarWashController* controller);
+    
+    /**
+     * Display RUNNING state (actively washing)
+     * @param controller Pointer to controller for getting state
+     */
+    void displayRunningState(CarWashController* controller);
+    
+    /**
+     * Display PAUSED state (temporarily stopped)
+     * @param controller Pointer to controller for getting state
+     */
+    void displayPausedState(CarWashController* controller);
+    
+    /**
+     * Update time display (top display)
+     * @param seconds Time remaining in seconds
+     */
+    void updateTimeDisplay(unsigned long seconds);
+    
+    /**
+     * Update tokens display (bottom display)
+     * Shows tokens as a decimal fraction
+     * @param tokensRemaining Integer tokens remaining (not yet started)
+     * @param secondsLeftInCurrentToken Seconds remaining in current token (0 if none)
+     * @param tokenTimeSeconds Total seconds per token
+     */
+    void updateTokensDisplay(int tokensRemaining, unsigned long secondsLeftInCurrentToken, unsigned long tokenTimeSeconds);
+    
+    /**
+     * Calculate token fraction from time
+     * @param tokensRemaining Whole tokens not yet consumed
+     * @param secondsLeftInCurrentToken Seconds remaining in current token
+     * @param tokenTimeSeconds Total seconds per token
+     * @return Tokens as a decimal (e.g., 1.5)
+     */
+    float calculateTokenFraction(int tokensRemaining, unsigned long secondsLeftInCurrentToken, unsigned long tokenTimeSeconds);
 };
 
 #endif // DISPLAY_MANAGER_H
