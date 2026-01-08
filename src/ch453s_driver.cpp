@@ -116,12 +116,29 @@ static bool ch453_send(uint8_t cmdByte, uint8_t dataByte) {
     return ack1 && ack2;
 }
 
-// Send a CH453 command (single byte, no data)
-static bool ch453_send_cmd(uint8_t cmdByte) {
-    i2c_start();
-    bool ack = i2c_write_byte(cmdByte);
-    i2c_stop();
-    return ack;
+// CH453 "System Parameter" command is always 2 bytes:
+// byte1 = 0x48, byte2 = [SLEEP][INTENS]0[X_INT]0[KEYB][DISP]
+// See datasheet section 6.1. "Setting of System Parameter Commands"
+static uint8_t ch453_build_sys_param(bool disp, uint8_t intens2bits, bool keyb, bool x_int, bool sleep) {
+    intens2bits &= 0x03;
+    return (sleep ? 0x80 : 0x00) |
+           ((intens2bits & 0x03) << 5) |
+           (x_int ? 0x08 : 0x00) |
+           (keyb ? 0x02 : 0x00) |
+           (disp ? 0x01 : 0x00);
+}
+
+static uint8_t ch453_intensity_from_brightness(uint8_t brightness0_15) {
+    // CH453 only supports 2-bit intensity selection (plus a "no limiter" mode),
+    // so we map the 0-15 UI brightness into a reasonable default.
+    // INTENS:
+    // - 00: duty 4/4 with internal current limiter enabled (brightest, recommended)
+    // - 01: duty 1/4 with limiter enabled
+    // - 10: duty 2/4 with limiter enabled
+    // - 11: duty 4/4 but limiter disabled (needs external resistors)
+    if (brightness0_15 <= 5) return 0x01;   // 1/4
+    if (brightness0_15 <= 10) return 0x02;  // 2/4
+    return 0x00;                            // 4/4 (limiter enabled)
 }
 
 // ============ End Software I2C ============
@@ -142,30 +159,25 @@ bool CH453SDriver::begin(uint8_t brightness) {
     
     LOG_INFO("I2C pins: SDA=%d, SCL=%d", _sdaPin, _sclPin);
     
-    // Send system command to turn on display
-    // Command 0x49 = 0100_1001 = Display ON, 8-segment mode
-    LOG_INFO("Step 1: Turn on display (cmd 0x49)...");
-    bool success = ch453_send_cmd(0x49);
-    LOG_INFO("  System cmd 0x49: %s", success ? "ACK" : "NACK");
+    // Proper system parameter setup: byte1 = 0x48, byte2 = config bits
+    // We keep KEYB=0 (no keyboard scan), X_INT=0 (support DIG0-DIG15), SLEEP=0.
+    uint8_t intens = ch453_intensity_from_brightness(_brightness);
+    uint8_t sysParam = ch453_build_sys_param(true /*disp*/, intens, false /*keyb*/, false /*x_int*/, false /*sleep*/);
+
+    LOG_INFO("Step 1: Configure system params (cmd 0x48, param 0x%02X)...", sysParam);
+    bool success = ch453_send(0x48, sysParam);
+    LOG_INFO("  System cmd 0x48: %s", success ? "ACK" : "NACK");
     delay(10);
     
-    // Try alternative if first fails
-    if (!success) {
-        LOG_INFO("  Trying cmd 0x48 then 0x49...");
-        ch453_send_cmd(0x48);
-        delay(5);
-        success = ch453_send_cmd(0x49);
-        delay(5);
-    }
-    
-    // Step 2: Test write to each digit
-    LOG_INFO("Step 2: Testing all 8 digits...");
+    // Step 2: Test write to each digit register (0-15)
+    // Datasheet: "Word-data loading command" byte1 is 0x60,0x62,...,0x7E (even only)
+    LOG_INFO("Step 2: Testing digit registers 0-15...");
     uint8_t pattern8 = SEGMENTS[8];  // '8' shows all segments
     
-    for (uint8_t digit = 0; digit < 8; digit++) {
-        uint8_t cmdByte = 0x60 + digit;  // 0x60-0x67 for digits 0-7
+    for (uint8_t digit = 0; digit < 16; digit++) {
+        uint8_t cmdByte = 0x60 + (digit << 1);  // 0x60,0x62,...0x7E
         bool ack = ch453_send(cmdByte, pattern8);
-        LOG_INFO("  Digit %d (cmd 0x%02X): %s", digit, cmdByte, ack ? "ACK" : "NACK");
+        LOG_INFO("  DIG%u (cmd 0x%02X): %s", digit, cmdByte, ack ? "ACK" : "NACK");
         delay(10);
     }
     
@@ -173,10 +185,10 @@ bool CH453SDriver::begin(uint8_t brightness) {
     LOG_INFO("Test pattern displayed for 1 second...");
     delay(1000);
     
-    // Clear all digits
+    // Clear all digit registers (0-15)
     LOG_INFO("Step 3: Clearing display...");
-    for (uint8_t digit = 0; digit < 8; digit++) {
-        ch453_send(0x60 + digit, 0x00);
+    for (uint8_t digit = 0; digit < 16; digit++) {
+        ch453_send(0x60 + (digit << 1), 0x00);
         delay(5);
     }
     
@@ -213,7 +225,8 @@ bool CH453SDriver::sendSystemCommand(uint8_t cmd) {
         }
     }
     
-    bool result = ch453_send_cmd(cmd);
+    // 'cmd' here is the system parameter byte2 (config bits).
+    bool result = ch453_send(0x48, cmd);
     
     if (hasMutex) {
         xSemaphoreGive(_i2cMutex);
@@ -225,12 +238,8 @@ bool CH453SDriver::sendSystemCommand(uint8_t cmd) {
 bool CH453SDriver::writeDigitData(uint8_t digit, uint8_t segmentData) {
     if (digit > 15) return false;
     
-    uint8_t cmdByte;
-    if (digit < 8) {
-        cmdByte = 0x60 + digit;  // DIG0-DIG7: 0x60-0x67
-    } else {
-        cmdByte = 0x70 + (digit - 8);  // DIG8-DIG15: 0x70-0x77
-    }
+    // Datasheet section 6.2: byte1 is 011[DIG_ADDR]0B => 0x60,0x62,...,0x7E
+    uint8_t cmdByte = 0x60 + (digit << 1);
     
     bool hasMutex = false;
     if (_i2cMutex != NULL) {
@@ -257,9 +266,10 @@ void CH453SDriver::setI2CMutex(SemaphoreHandle_t mutex) {
 void CH453SDriver::setBrightness(uint8_t brightness) {
     if (brightness > 15) brightness = 15;
     _brightness = brightness;
-    // CH453 brightness is limited - try different system commands
-    // For now, just ensure display is on
-    sendSystemCommand(0x49);
+    // Re-apply system params with updated intensity.
+    uint8_t intens = ch453_intensity_from_brightness(_brightness);
+    uint8_t sysParam = ch453_build_sys_param(true /*disp*/, intens, false /*keyb*/, false /*x_int*/, false /*sleep*/);
+    sendSystemCommand(sysParam);
 }
 
 bool CH453SDriver::sendCommand(uint16_t cmd) {
@@ -343,61 +353,71 @@ void CH453SDriver::clearBottom() {
 }
 
 void CH453SDriver::displayTopNumber(uint16_t value, bool leadingZeros) {
-    if (value > 9999) value = 9999;
+    // Display time in MM.SS format (Minutes:Seconds)
+    // value is in seconds (e.g., 120 seconds = 02:00 = 2 minutes, 0 seconds)
     
-    // Extract digits
-    uint8_t thousands = (value / 1000) % 10;
-    uint8_t hundreds = (value / 100) % 10;
-    uint8_t tens = (value / 10) % 10;
-    uint8_t ones = value % 10;
+    if (value > 5999) value = 5999;  // Max 99:59 (99 minutes 59 seconds)
     
-    // Determine first non-zero for leading zero suppression
-    int firstNonZero = 3;
-    if (thousands > 0) firstNonZero = 0;
-    else if (hundreds > 0) firstNonZero = 1;
-    else if (tens > 0) firstNonZero = 2;
+    // Convert seconds to MM.SS
+    uint8_t minutes = value / 60;
+    uint8_t seconds = value % 60;
     
-    // Top display mapping - adjust based on physical wiring
-    // Try: DIG0=rightmost (ones), DIG3=leftmost (thousands)
-    if (leadingZeros || firstNonZero <= 0)
-        setDigit(3, SEGMENTS[thousands]);
-    else
-        setDigit(3, 0x00);
-        
-    if (leadingZeros || firstNonZero <= 1)
-        setDigit(2, SEGMENTS[hundreds]);
-    else
-        setDigit(2, 0x00);
-        
-    if (leadingZeros || firstNonZero <= 2)
-        setDigit(1, SEGMENTS[tens]);
-    else
-        setDigit(1, 0x00);
-        
-    setDigit(0, SEGMENTS[ones]);  // Always show ones
+    // Extract individual digits
+    uint8_t minuteTens = minutes / 10;      // Tens of minutes (0-9)
+    uint8_t minuteOnes = minutes % 10;      // Ones of minutes (0-9)
+    uint8_t secondTens = seconds / 10;      // Tens of seconds (0-5)
+    uint8_t secondOnes = seconds % 10;      // Ones of seconds (0-9)
+    
+    // Physical digit order (per observed behavior):
+    // left-to-right on the TOP module corresponds to DIG0, DIG1, DIG2, DIG3.
+    // We want: [minute tens][minute ones].[second tens][second ones]
+    //
+    // So:
+    // - DIG0: minute tens (blank if !leadingZeros and minutes < 10)
+    // - DIG1: minute ones + decimal point
+    // - DIG2: second tens
+    // - DIG3: second ones
+    if (!leadingZeros && minuteTens == 0) {
+        setDigit(0, 0x00);
+    } else {
+        setDigit(0, SEGMENTS[minuteTens]);
+    }
+    setDigit(1, SEGMENTS[minuteOnes] | 0x80);
+    setDigit(2, SEGMENTS[secondTens]);
+    setDigit(3, SEGMENTS[secondOnes]);
 }
 
 void CH453SDriver::displayBottomDecimal(float value, uint8_t decimalPlaces) {
+    // Display token count as decimal (e.g., 1.00 tokens)
+    // Format: "TT.UU" (two digits, decimal point, two digits)
+    // Examples:
+    // - 1.00 -> "01.00"
+    // - 0.99 -> "00.99"
+    
     if (value < 0) value = 0;
-    if (value > 99.9f) value = 99.9f;
-    
-    uint16_t scaledValue = (uint16_t)(value * 10 + 0.5f);
-    
-    uint8_t tens = (scaledValue / 100) % 10;
-    uint8_t ones = (scaledValue / 10) % 10;
-    uint8_t tenths = scaledValue % 10;
-    
-    // Bottom display: DIG4-DIG7
-    // DIG7=leftmost, DIG4=rightmost (reversed)
-    if (tens > 0) {
-        setDigit(7, SEGMENTS[tens]);
-    } else {
-        setDigit(7, 0x00);  // Blank
-    }
-    
-    setDigit(6, SEGMENTS[ones] | 0x80);  // Ones with decimal point
-    setDigit(5, SEGMENTS[tenths]);        // Tenths
-    setDigit(4, 0x00);                    // Blank (rightmost)
+    // Clamp to what fits in TT.UU (00.00 to 99.99)
+    if (value > 99.99f) value = 99.99f;
+
+    // Respect decimalPlaces if caller passes it, but default behavior is 2dp.
+    // (In practice we want 2dp for tokens on a 4-digit module.)
+    uint8_t dp = (decimalPlaces >= 2) ? 2 : 2;
+
+    // Scale to integer representation (e.g., 1.00 -> 100, 0.99 -> 99)
+    uint16_t scaledValue = (uint16_t)(value * 100.0f + 0.5f);
+    uint8_t intPart = (scaledValue / 100) % 100;     // 0-99
+    uint8_t fracPart = scaledValue % 100;            // 0-99
+
+    uint8_t tens = intPart / 10;
+    uint8_t ones = intPart % 10;
+    uint8_t tenths = fracPart / 10;
+    uint8_t hundredths = fracPart % 10;
+
+    // Physical digit order (mirrors TOP): left-to-right on the BOTTOM module corresponds to DIG4, DIG5, DIG6, DIG7.
+    // We want: [tens][ones].[tenths][hundredths]
+    setDigit(4, SEGMENTS[tens]);
+    setDigit(5, SEGMENTS[ones] | 0x80);  // decimal point after ones
+    setDigit(6, SEGMENTS[tenths]);
+    setDigit(7, SEGMENTS[hundredths]);
 }
 
 void CH453SDriver::displayDashes(bool top) {
@@ -415,10 +435,28 @@ void CH453SDriver::displayDashes(bool top) {
 }
 
 void CH453SDriver::setDisplayOn(bool on) {
-    if (on) {
-        sendSystemCommand(0x49);  // Display ON
-    } else {
-        sendSystemCommand(0x48);  // Display OFF
-    }
+    uint8_t intens = ch453_intensity_from_brightness(_brightness);
+    uint8_t sysParam = ch453_build_sys_param(on /*disp*/, intens, false /*keyb*/, false /*x_int*/, false /*sleep*/);
+    sendSystemCommand(sysParam);
     _displayOn = on;
+}
+
+void CH453SDriver::testDigitOrder() {
+    // Test function to verify digit order
+    // Displays "0123" on top and "4567" on bottom
+    LOG_INFO("Testing digit order - Top: 0123, Bottom: 4567");
+    
+    // Top display
+    // With current mapping, TOP left-to-right is DIG0..DIG3
+    setDigit(0, SEGMENTS[0]);  // leftmost
+    setDigit(1, SEGMENTS[1]);
+    setDigit(2, SEGMENTS[2]);
+    setDigit(3, SEGMENTS[3]);  // rightmost
+    
+    // Bottom display
+    // BOTTOM left-to-right is DIG4..DIG7
+    setDigit(4, SEGMENTS[4]);  // leftmost
+    setDigit(5, SEGMENTS[5]);
+    setDigit(6, SEGMENTS[6]);
+    setDigit(7, SEGMENTS[7]);  // rightmost
 }

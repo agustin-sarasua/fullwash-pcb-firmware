@@ -1,0 +1,241 @@
+    1                                                                                                   2                                      3                                                                                                    4
+
+
+
+
+A                                                                                                                                                                                                                                                                  A
+
+
+
+
+                                                                                                                                              SEG5                                                                    DIG1
+                                                                                                                                              SEG0                                                                    DIG2
+                                                                                                                                              DIG0                                                                    SEG1
+
+                                                                                                                                                      PILED102 PILED10 PILED10 PILED109 PILED108 PILED107
+
+
+
+
+                                                                                                                                                   12
+                                                                                                                                                           11
+                                                                                                                                                                    10
+                                                                                                                                                                              9
+                                                                                                                                                                                         8
+                                                                                                                                                                                                   7
+                                                                                                 VCC                                                                                                                           COLED1
+                                                                                                                                                                                                                               LED1
+
+
+
+
+                                                                                                                                                      G1
+
+
+
+                                                                                                                                                                                  G2
+                                                                                                                                                                                            G3
+                                                                                                                                                                                                      b
+                                                                                                                                                              a
+                                                                                                                                                                        f
+                                                   COU1
+                                                   U1
+
+        NLSEG5
+        SEG5               COR8
+                           R8       270Ω 1                                                   28         COR5
+                                                                                                        R5       270Ω    NLSEG4
+                                                                                                                         SEG4      a                   a                                a                      a
+                          PIR802   PIR801
+                                    270Ω 2
+                                           PIU101
+                                                  SEG5                       SEG4       PIU1028        PIR502   PIR501
+                                                                                                                                  fgb                 fgb                              fgb                    fgb
+        NLSEG6
+        SEG6               COR7
+                           R7                                                                27         COR4
+                                                                                                        R4       270Ω    NLSEG3
+                                                                                                                         SEG3
+                          PIR702   PIR701  PIU102
+                                                  SEG6                       SEG3       PIU1027        PIR402   PIR401
+        NLSEG7
+        SEG7               COR6
+                           R6       270Ω  3PIU103       SEG7                 SEG2            26         COR3
+                                                                                                        R3       270Ω    NLSEG2
+                                                                                                                         SEG2
+B       NLDIG0
+        DIG0
+                          PIR602   PIR601
+                                             4PIU104
+                                                                                        PIU1026
+                                                                                             25
+                                                                                                       PIR302   PIR301
+                                                                                                                                  e       c           e        c                      e         c             e       c                                            B
+                                                        DIG0                  VCC       PIU1025                                       d       dp          d            dp                   d            dp       d       dp
+        NLDIG1
+        DIG1                                 5PIU105                                         24         COR2
+                                                                                                        R2       270Ω    NLSEG1
+                                                                                                                         SEG1
+        NLDIG2
+        DIG2                                 6PIU106    DIG1                 SEG1       PIU1024
+                                                                                             23
+                                                                                                       PIR202
+                                                                                                        COR1
+                                                                                                        R1
+                                                                                                                PIR201
+                                                                                                                 270Ω    NLSEG0
+                                                                                                                         SEG0
+
+
+
+
+                                                                                                                                                                        dp
+
+
+
+                                                                                                                                                                                                      G4
+                                                        DIG2                 SEG0       PIU1023        PIR102   PIR101
+
+
+
+
+                                                                                                                                                      e
+                                                                                                                                                              d
+
+
+                                                                                                                                                                                  c
+                                                                                                                                                                                            g
+        NLDIG3
+        DIG3                                 7PIU107                                         22
+                                                        DIG3                DIG15       PIU1022
+        NLDIG4
+        DIG4                                 8PIU108    DIG4                DIG14            21
+                                                                                                                                                      PILED10 PILED102 PILED103 PILED104 PILED105 PILED106
+
+
+
+
+                                                                                                                                                   1
+                                                                                                                                                           2
+                                                                                                                                                                    3
+
+
+                                                                                                                                                                                         5
+                                                                                                                                                                                                   6
+                                                                                                                                                                              4
+                                                                                        PIU1021
+        NLSCL
+        SCL                                  9PIU109    SCL                 DIG13            20
+                                                                                        PIU1020
+        NLSDA
+        SDA                                 10PIU1010   SDA                 DIG12            19
+                                                                                        PIU1019
+                                                                                                                                              SEG4                                                                    DIG3
+                                            11PIU1011                                        18                                               SEG3                                                                    SEG6
+                                                        GND                 DIG11       PIU1018
+        NLDIG5
+        DIG5                                12PIU1012   DIG5                DIG10            17
+                                                                                        PIU1017
+                                                                                                                                              SEG7                                                                    SEG2
+        NLDIG6
+        DIG6                                13PIU1013                                        16
+        NLDIG7
+        DIG7                                14PIU1014   DIG6                 DIG9       PIU1016
+                                                                                             15
+                                                        DIG7                 DIG8       PIU1015
+
+
+
+
+                                                                                                                                              SEG5                                                                    DIG5
+                                        GND                                                                                                   SEG0                                                                    DIG6
+                                                                                                                                              DIG4                                                                    SEG1
+
+                           VCC
+                                                                                                                                                      PILED201 PILED201 PILED201 PILED209 PILED208 PILED207
+
+
+
+
+                                                                                                                                                   12
+                                                                                                                                                           11
+                                                                                                                                                                    10
+                                                                                                                                                                              9
+                                                                                                                                                                                         8
+                                                                                                                                                                                                   7
+C       COCN1
+        CN1                                                             VCC                                                                                                                                                                                        C
+           1         1                  SCL                                                                                                                                                                                    COLED2
+                                                                                                                                                                                                                               LED2
+
+
+
+
+                                                                                                                                                      G1
+
+
+
+                                                                                                                                                                                  G2
+                                                                                                                                                                                            G3
+                                                                                                                                                                                                      b
+                                                                                                                                                              a
+                                                                                                                                                                        f
+                PICN101
+
+           2
+                     2
+                PICN102
+                                        SDA               PIC302        PIC102               PIC20
+                     3                                             COC3
+                                                                   C3            COC1
+                                                                                 C1                   COC2
+                                                                                                      C2
+           3    PICN103
+                                                          PIC301   100nFPIC10                PIC201                                a                   a                                a                      a
+           4         4
+                PICN104
+                                                                                 100nF                10uF
+                                                                                                                                  fgb                 fgb                              fgb                    fgb
+        WJ15EDGRC-3.5-4P
+                                                                        GND                                                       e       c           e        c                      e         c             e       c
+                                                                                                                                      d       dp          d            dp                   d            dp       d       dp
+                           GND
+
+
+
+
+                                                                                                                                                                        dp
+
+
+
+                                                                                                                                                                                                      G4
+                                                                                                                                                      e
+                                                                                                                                                              d
+
+
+                                                                                                                                                                                  c
+                                                                                                                                                                                            g
+                                                                                                                                                      PILED201 PILED20 PILED203 PILED204 PILED205 PILED206
+                                                                                                                                                   1
+                                                                                                                                                           2
+                                                                                                                                                                    3
+
+
+                                                                                                                                                                                         5
+                                                                                                                                                                                                   6
+                                                                                                                                                                              4
+                                                                                                                                              SEG4                                                                    DIG7
+                                                                                                                                              SEG3                                                                    SEG6
+                                                                                                                                              SEG7                                                                    SEG2
+
+
+
+D                                                                                                                                             Title                                                                                                                D
+
+
+                                                                                                                                              Size                      Number                                                                          Revision
+                                                                                                                                               A
+                                                                                                                                              Date:                 12/12/2025                                                          Sheet of
+                                                                                                                                              File:                 C:\Users\..\Sheet1.SchDoc                                           Drawn By:
+    1                                                                                                   2                                      3                                                                                                    4
+

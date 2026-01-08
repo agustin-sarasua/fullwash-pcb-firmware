@@ -221,8 +221,8 @@ void DisplayManager::updateTokensDisplay(int tokensRemaining, unsigned long seco
     float tokenFraction = calculateTokenFraction(tokensRemaining, secondsLeftInCurrentToken, tokenTimeSeconds);
     
     // Only update if value changed significantly (to avoid flicker)
-    if (abs(tokenFraction - _lastTokensLeft) > 0.05f) {
-        _display->displayBottomDecimal(tokenFraction, 1);
+    if (abs(tokenFraction - _lastTokensLeft) > 0.01f) {
+        _display->displayBottomDecimal(tokenFraction, 2);
         _lastTokensLeft = tokenFraction;
     }
 }

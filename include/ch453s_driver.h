@@ -14,23 +14,14 @@
  * dual 4-digit displays (8 digits total).
  * 
  * Display Layout:
- * - Top display (digits 0-3): Shows time left in seconds
- * - Bottom display (digits 4-7): Shows tokens left as decimal (e.g., 1.5)
+ * - Top display (digits 0-3): Shows time in MM.SS format (e.g., "02.00" = 2:00 minutes)
+ * - Bottom display (digits 4-7): Shows tokens as decimal (e.g., "  1.5" = 1.5 tokens)
  */
 class CH453SDriver {
 public:
-    // I2C base address for CH453S (uses command-based protocol)
-    static const uint8_t BASE_ADDR = 0x40;
-    
-    // System command codes
-    static const uint16_t CMD_SYS_OFF = 0x0400;    // Turn off display
-    static const uint16_t CMD_SYS_ON = 0x0401;     // Turn on display, normal mode
-    static const uint16_t CMD_DUTY_MASK = 0x0410;  // Brightness control (add duty value 0-15)
-    static const uint16_t CMD_7SEG_ON = 0x0480;    // 7-segment decode enable
-    static const uint16_t CMD_8SEG_ON = 0x04C0;    // 8-segment mode (no decode)
-    
-    // Display data command (add digit address 0-7)
-    static const uint16_t CMD_DISP_DATA = 0x1000;  // Base for display data
+    // NOTE: CH453 uses a *2-wire serial protocol compatible with I²C timing*,
+    // but it does NOT use a normal I²C 7-bit slave address. The first transmitted
+    // byte is an 8-bit command (e.g. 0x48, 0x60, 0x62...) and must be sent verbatim.
     
     // Segment patterns for 7-segment display (common cathode, active high)
     // Bit order: DP G F E D C B A
@@ -62,16 +53,16 @@ public:
     void setBrightness(uint8_t brightness);
     
     /**
-     * Display a 4-digit number on the top display (time in seconds)
-     * @param value Number to display (0-9999)
-     * @param leadingZeros Show leading zeros if true
+     * Display time on the top display in MM.SS format
+     * @param value Time in seconds (0-5999, max 99:59)
+     * @param leadingZeros Unused (kept for compatibility)
      */
     void displayTopNumber(uint16_t value, bool leadingZeros = false);
     
     /**
-     * Display a decimal number on the bottom display (tokens with fraction)
-     * @param value Number to display (e.g., 1.5 tokens)
-     * @param decimalPlaces Number of decimal places (1 for tokens display)
+     * Display token count on the bottom display with one decimal place
+     * @param value Token count to display (0.00-99.99, e.g., 1.00 tokens)
+     * @param decimalPlaces Number of decimal places (use 2 for TT.UU formatting)
      */
     void displayBottomDecimal(float value, uint8_t decimalPlaces = 1);
     
@@ -123,6 +114,12 @@ public:
      */
     void scanI2CBus();
     
+    /**
+     * Test digit order by displaying "0123" on top and "4567" on bottom
+     * Use this to verify physical digit mapping
+     */
+    void testDigitOrder();
+    
 private:
     TwoWire& _wire;
     SemaphoreHandle_t _i2cMutex;
@@ -143,8 +140,8 @@ private:
     bool sendCH453Command(uint16_t cmd);
     
     /**
-     * Send system command (0x48-0x4F range)
-     * @param cmd System command byte
+     * Send system parameter configuration (CH453 system command 0x48 + param byte)
+     * @param cmd System parameter byte2: [SLEEP][INTENS]0[X_INT]0[KEYB][DISP]
      */
     bool sendSystemCommand(uint8_t cmd);
     
