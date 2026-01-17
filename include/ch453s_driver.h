@@ -14,8 +14,8 @@
  * dual 4-digit displays (8 digits total).
  * 
  * Display Layout:
- * - Top display (digits 0-3): Shows time in MM.SS format (e.g., "02.00" = 2:00 minutes)
- * - Bottom display (digits 4-7): Shows tokens as decimal (e.g., "  1.5" = 1.5 tokens)
+ * - Top display (digits 0-3): Shows tokens as decimal (e.g., "01.50" = 1.5 tokens)
+ * - Bottom display (digits 4-7): Shows time in MM.SS format (e.g., "02.00" = 2:00 minutes)
  */
 class CH453SDriver {
 public:
@@ -53,14 +53,16 @@ public:
     void setBrightness(uint8_t brightness);
     
     /**
-     * Display time on the top display in MM.SS format
+     * Display time in MM.SS format
+     * NOTE: Despite the name, this now displays on the BOTTOM display (digits 4-7)
      * @param value Time in seconds (0-5999, max 99:59)
      * @param leadingZeros Unused (kept for compatibility)
      */
     void displayTopNumber(uint16_t value, bool leadingZeros = false);
     
     /**
-     * Display token count on the bottom display with one decimal place
+     * Display token count with decimal places
+     * NOTE: Despite the name, this now displays on the TOP display (digits 0-3)
      * @param value Token count to display (0.00-99.99, e.g., 1.00 tokens)
      * @param decimalPlaces Number of decimal places (use 2 for TT.UU formatting)
      */

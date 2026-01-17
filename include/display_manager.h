@@ -18,8 +18,8 @@
  * - CH453S LED driver IC (I2C controlled)
  * 
  * Display Layout:
- * - Top display (digits 0-3): Time left in seconds (e.g., "0120" for 120 seconds)
- * - Bottom display (digits 4-7): Tokens left as decimal (e.g., "1.5" for 1.5 tokens)
+ * - Top display (digits 0-3): Tokens left as decimal (e.g., "01.50" for 1.5 tokens)
+ * - Bottom display (digits 4-7): Time left in MM.SS format (e.g., "02.00" for 2:00)
  * 
  * Token Display Logic:
  * - Tokens are displayed as fractions based on time consumed

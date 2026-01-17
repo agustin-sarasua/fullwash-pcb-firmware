@@ -67,46 +67,106 @@ SemaphoreHandle_t xI2CMutex = NULL;  // For Wire1 (LCD)
 QueueHandle_t xMqttPublishQueue = NULL;
 
 /**
- * FreeRTOS Task: Coin Detector (Simplified Working Version)
+ * FreeRTOS Task: Coin Detector (Improved Version with Mutex Protection)
  * 
  * This task monitors the coin acceptor signal pin (COIN_SIG) for state changes.
- * Uses a simple state machine to detect HIGH->LOW transitions (coin insertion).
+ * Uses mutex-protected polling with multi-read validation to prevent false triggers.
  * 
  * Detection Logic:
- * - Polls INT_PIN every 50ms
- * - When INT_PIN is LOW, reads PORT0 register
- * - Detects HIGH->LOW transition on COIN_SIG bit
+ * - Polls PORT0 register every COIN_POLL_INTERVAL_MS with mutex protection
+ * - Requires COIN_STABLE_READS_REQUIRED consecutive reads showing same state change
+ * - Detects HIGH->LOW transitions on COIN_SIG bit (coin insertion)
  * - Sets coin signal flag for controller to process
+ * 
+ * Fixes for false coin detection:
+ * - Removed INT_PIN dependency (was triggering on button presses too)
+ * - Added mutex protection for thread-safe IO expander access
+ * - Added multi-read validation to filter electrical noise
  */
 void TaskCoinDetector(void *pvParameters) {
-  const TickType_t xDelay = 50 / portTICK_PERIOD_MS; // 50ms转换为FreeRTOS ticks
-  uint8_t coins_sig_state = (1 << COIN_SIG);
-  uint8_t _portVal = 0;
+  const TickType_t xDelay = COIN_POLL_INTERVAL_MS / portTICK_PERIOD_MS;
+  
+  // State tracking variables (minimized to reduce stack usage)
+  uint8_t lastCoinBit = (1 << COIN_SIG);   // Start assuming HIGH (no coin)
+  uint8_t stableState = (1 << COIN_SIG);   // Confirmed stable state
+  uint8_t stableCount = 0;                  // Consecutive reads with same state
+  unsigned long lastTransition = 0;         // For cooldown validation
+  unsigned long startTime = millis();       // Track startup for delay
+  bool started = false;
+  
+  // Wait for IO expander to be initialized
+  vTaskDelay(1000 / portTICK_PERIOD_MS);
+  
+  LOG_INFO("Coin detector task started");
+  
   for(;;) {
-    // 任务A的工作代码
-    if (digitalRead(INT_PIN) == LOW)
-    {
-        _portVal = ioExpander.readRegister(INPUT_PORT0);
-        if(coins_sig_state != (_portVal & (1 << COIN_SIG)))
-        {
-            // 1--->0 硬币型号产生
-            if(coins_sig_state == (1 << COIN_SIG))
-            {
-                ioExpander.setCoinSignal(1);
-                ioExpander._intCnt++;
-                LOG_INFO("COIN DETECTED! Port 0 Value: 0x%02X, coin count: %d", _portVal, ioExpander._intCnt);
-                
-                // Additional debug info
-                bool coin_bit = (_portVal & (1 << COIN_SIG)) ? 1 : 0;
-                LOG_INFO("COIN_SIG (bit %d) = %d", COIN_SIG, coin_bit);
-                LOG_INFO("Coin transition: HIGH->LOW (coin inserted)");
-            }
-
-            coins_sig_state = (_portVal & (1 << COIN_SIG));
+    unsigned long now = millis();
+    
+    // Skip coin detection during startup period to prevent false triggers
+    if (!started) {
+      if (now - startTime >= COIN_STARTUP_DELAY) {
+        started = true;
+        LOG_INFO("Coin detector active");
+        
+        // Read initial state with mutex protection
+        if (xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+          uint8_t pv = ioExpander.readRegister(INPUT_PORT0);
+          lastCoinBit = pv & (1 << COIN_SIG);
+          stableState = lastCoinBit;
+          xSemaphoreGive(xIoExpanderMutex);
         }
+      }
+      vTaskDelay(xDelay);
+      continue;
     }
     
-    vTaskDelay(xDelay); // 延迟50ms
+    // Read port value with mutex protection
+    uint8_t portVal = 0;
+    if (xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+      portVal = ioExpander.readRegister(INPUT_PORT0);
+      xSemaphoreGive(xIoExpanderMutex);
+    } else {
+      vTaskDelay(xDelay);
+      continue;
+    }
+    
+    // Extract coin signal bit
+    uint8_t coinBit = portVal & (1 << COIN_SIG);
+    
+    // Check if state matches our expected stable state
+    if (coinBit == stableState) {
+      stableCount = 0;  // State is stable, reset counter
+    } else {
+      // State has changed from stable state
+      if (coinBit == lastCoinBit) {
+        stableCount++;  // Same as last read, increment stable counter
+        
+        // Check if we have enough stable reads to confirm state change
+        if (stableCount >= COIN_STABLE_READS_REQUIRED) {
+          uint8_t oldState = stableState;
+          stableState = coinBit;
+          stableCount = 0;
+          
+          // Check for HIGH->LOW transition (coin insertion)
+          if (oldState != 0 && coinBit == 0) {
+            unsigned long elapsed = now - lastTransition;
+            
+            // Validate this is a real coin (not noise) by checking cooldown
+            if (lastTransition == 0 || elapsed > COIN_COOLDOWN_MS) {
+              ioExpander.setCoinSignal(1);
+              ioExpander._intCnt++;
+              lastTransition = now;
+              LOG_INFO("COIN DETECTED #%d", ioExpander._intCnt);
+            }
+          }
+        }
+      } else {
+        stableCount = 1;  // State changed from last read - reset counter
+      }
+      lastCoinBit = coinBit;
+    }
+    
+    vTaskDelay(xDelay);
   }
 }
 
@@ -1053,7 +1113,7 @@ void setup() {
     xTaskCreate(
         TaskCoinDetector,           // Task function
         "CoinDetection",            // Task name
-        2048,                       // Stack size
+        4096,                       // Stack size (increased from 2048 to prevent overflow)
         NULL,                       // Task parameters
         1,                          // Priority
         &TaskCoinDetectorHandle     // Task handle

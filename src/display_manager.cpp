@@ -107,8 +107,15 @@ void DisplayManager::displayFreeState() {
     
     // Clear displays when machine is free
     // Show "----" to indicate ready state or blank
-    _display->displayDashes(true);   // Top: "----"
-    _display->displayDashes(false);  // Bottom: "----"
+    // Top display: Coins, Bottom display: Time
+    _display->displayDashes(true);   // Top: "----" (coins)
+    _display->displayDashes(false);  // Bottom: "----" (time)
+
+    // IMPORTANT: reset cached values so that when a new session starts right after a timeout,
+    // the next IDLE update forces a redraw even if the numeric value matches the previous one
+    // (e.g., 1 token -> 120s could be the same value as just before timing out).
+    _lastSecondsLeft = 0xFFFFFFFFUL;
+    _lastTokensLeft = -10000.0f;
 }
 
 void DisplayManager::displayIdleState(CarWashController* controller) {

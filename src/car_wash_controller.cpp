@@ -57,16 +57,16 @@ CarWashController::CarWashController(MqttLteClient& client)
     
     LOG_INFO("COIN INIT: initialCoinSignal (active when LOW) = %s", initialCoinSignal ? "ACTIVE (LOW/0)" : "INACTIVE (HIGH/1)");
     LOG_INFO("COIN INIT: lastCoinState initialized to = %s (for edge detection)", lastCoinState == LOW ? "LOW" : "HIGH");
-    LOG_INFO("COIN INIT: COIN_PROCESS_COOLDOWN = %lu ms", COIN_PROCESS_COOLDOWN);
-    LOG_INFO("COIN INIT: COIN_EDGE_WINDOW = %lu ms", COIN_EDGE_WINDOW);
-    LOG_INFO("COIN INIT: COIN_MIN_EDGES = %d", COIN_MIN_EDGES);
+    LOG_INFO("COIN INIT: COIN_COOLDOWN_MS = %lu ms", COIN_COOLDOWN_MS);
+    LOG_INFO("COIN INIT: COIN_STARTUP_DELAY = %lu ms", COIN_STARTUP_DELAY);
+    LOG_INFO("COIN INIT: COIN_STABLE_READS_REQUIRED = %d", COIN_STABLE_READS_REQUIRED);
     
     // IMPORTANT: Initialize these static variables to prevent false triggers at startup
-    // We'll skip any coin signals that happen in the first 2 seconds after boot
+    // We'll skip any coin signals that happen in the first few seconds after boot
     unsigned long initTime = millis();
     lastCoinProcessedTime = initTime;
     lastCoinDebounceTime = initTime;
-    LOG_INFO("COIN INIT: Timers initialized at %lu ms (will ignore coins for first 3 seconds)", initTime);
+    LOG_INFO("COIN INIT: Timers initialized at %lu ms (will ignore coins for first %lu ms)", initTime, COIN_STARTUP_DELAY);
     LOG_INFO("=== END COIN DETECTOR INITIALIZATION ===");
 
     // Initialize LED pins - using built-in LED
@@ -672,21 +672,26 @@ void CarWashController::pauseMachine() {
             return;
         }
     }
+    
+    unsigned long currentTime = millis();
     currentState = STATE_PAUSED;
-    lastActionTime = millis();
-    pauseStartTime = millis();
+    lastActionTime = currentTime;
+    pauseStartTime = currentTime;
     
     // CRITICAL FIX: Update lastPauseResumeTime to prevent the button flag that caused this pause
     // from immediately triggering a resume when processed
-    lastPauseResumeTime = millis();
+    lastPauseResumeTime = currentTime;
     
-    // Start the 30-second grace period when pausing
-    gracePeriodStartTime = millis();
+    // NEW SESSION TIMEOUT LOGIC:
+    // Start the 30-second grace period when pausing.
+    // After grace period, a fresh 2-minute countdown begins.
+    // Total inactivity timeout: 30s grace + 2min = 2:30
+    gracePeriodStartTime = currentTime;
     gracePeriodActive = true;
-    LOG_INFO("Machine paused - 30-second grace period started");
     
-    // CRITICAL FIX: Only accumulate elapsed time if tokenStartTime is valid (not 0)
-    // Also handle millis() overflow correctly
+    // Store accumulated token time from RUNNING state
+    // This will be reset to 0 if grace period expires (fresh 2-min countdown)
+    // But if user resumes before grace period, they continue from where they left off
     if (tokenStartTime != 0) {
         unsigned long elapsedSinceStart;
         if (pauseStartTime >= tokenStartTime) {
@@ -696,10 +701,10 @@ void CarWashController::pauseMachine() {
             elapsedSinceStart = (0xFFFFFFFFUL - tokenStartTime) + pauseStartTime + 1;
         }
         tokenTimeElapsed += elapsedSinceStart;
-    } else {
-        // If tokenStartTime is 0, something went wrong - log warning but don't corrupt tokenTimeElapsed
-        LOG_WARNING("pauseMachine() called with tokenStartTime=0, skipping time accumulation");
     }
+    
+    LOG_INFO("Machine paused - 30-second grace period started");
+    LOG_INFO("User has 30s to resume, then 2-minute inactivity countdown begins (2:30 total to session end)");
    
     // Publish pause event
     // publishActionEvent(activeButton, ACTION_PAUSE, MANUAL);
@@ -750,14 +755,20 @@ void CarWashController::resumeMachine(int buttonIndex) {
         return;
     }
     
+    unsigned long currentTime = millis();
     currentState = STATE_RUNNING;
-    lastActionTime = millis();
-    tokenStartTime = millis();
+    lastActionTime = currentTime;
+    tokenStartTime = currentTime;
     
-    // Clear grace period when resuming
+    // Clear grace period when resuming - user is actively using the machine
     gracePeriodActive = false;
     gracePeriodStartTime = 0;
-    LOG_INFO("Machine resumed - grace period cleared");
+    
+    // NOTE: tokenTimeElapsed is preserved from before pause
+    // This allows the current token to continue from where it was
+    // The user's action of resuming "uses" the current token time
+    
+    LOG_INFO("Machine resumed - grace period cleared, token continues from %lu ms elapsed", tokenTimeElapsed);
     
     // Publish resume event
     // publishActionEvent(buttonIndex, ACTION_RESUME, MANUAL);
@@ -907,14 +918,42 @@ void CarWashController::activateButton(int buttonIndex, TriggerType triggerType)
 void CarWashController::tokenExpired() {
     LOG_INFO("Token expired - tokens remaining: %d, currentState: %d", config.tokens, currentState);
     
-    // Check if we have more tokens to automatically consume
-    if (config.tokens > 0) {
-        LOG_INFO("Auto-consuming next token (%d tokens remaining)", config.tokens);
-        consumeNextToken();
+    // NEW SESSION TIMEOUT LOGIC:
+    // When in IDLE or PAUSED state (not actively running), token expiration means
+    // the inactivity timeout has been reached - end the session immediately.
+    // User loses all remaining tokens as penalty for inactivity.
+    //
+    // Only auto-consume next token when machine is RUNNING (user is actively using it)
+    if (currentState == STATE_RUNNING) {
+        // User is actively using the machine - auto-consume next token
+        if (config.tokens > 0) {
+            LOG_INFO("Auto-consuming next token while RUNNING (%d tokens remaining)", config.tokens);
+            consumeNextToken();
+            return;
+        }
+    } else if (currentState == STATE_IDLE || currentState == STATE_PAUSED) {
+        // User is NOT actively using the machine (IDLE or PAUSED)
+        // Session timeout reached - end session and user loses remaining tokens
+        LOG_INFO("Token expired in %s state - session timeout reached!", 
+                 currentState == STATE_IDLE ? "IDLE" : "PAUSED");
+        LOG_INFO("User loses %d remaining tokens due to inactivity", config.tokens);
+        
+        // Turn off relay if any was active
+        if (activeButton >= 0) {
+            extern IoExpander ioExpander;
+            if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                ioExpander.setRelay(RELAY_INDICES[activeButton], false);
+                xSemaphoreGive(xIoExpanderMutex);
+            }
+        }
+        activeButton = -1;
+        
+        LOG_INFO("Session ended due to inactivity timeout");
+        stopMachine(AUTOMATIC);
         return;
     }
     
-    // No more tokens - turn off relay and finish
+    // No more tokens while RUNNING - turn off relay and finish
     if (activeButton >= 0) {
         extern IoExpander ioExpander;
         if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -938,15 +977,16 @@ void CarWashController::handleCoinAcceptor() {
     unsigned long currentTime = millis();
     
     // Skip startup period to avoid false triggers
+    // Use the configurable constant from constants.h
     static bool startupPeriod = true;
     static unsigned long startupBeginTime = 0;
     if (startupPeriod) {
         if (startupBeginTime == 0) {
             startupBeginTime = currentTime;
-            LOG_INFO("COIN: Startup period started at %lu ms (will monitor after 3000ms)", currentTime);
+            LOG_INFO("COIN: Startup period started at %lu ms (will monitor after %lu ms)", 
+                    currentTime, COIN_STARTUP_DELAY);
         }
-        // CRITICAL FIX: Check elapsed time since startup, not absolute time
-        // This ensures we always wait 3 seconds after first call, regardless of when it's called
+        // Check elapsed time since startup
         unsigned long elapsedSinceStartup;
         if (currentTime >= startupBeginTime) {
             elapsedSinceStartup = currentTime - startupBeginTime;
@@ -955,211 +995,49 @@ void CarWashController::handleCoinAcceptor() {
             elapsedSinceStartup = (0xFFFFFFFFUL - startupBeginTime) + currentTime + 1;
         }
         
-        if (elapsedSinceStartup < 3000) { // Skip first 3 seconds after initialization
-            static unsigned long lastStartupLog = 0;
-            if (currentTime - lastStartupLog > 1000) {
-                lastStartupLog = currentTime;
-                LOG_DEBUG("COIN: Still in startup period (%lu ms remaining)", 3000 - elapsedSinceStartup);
-            }
-            return;
+        if (elapsedSinceStartup < COIN_STARTUP_DELAY) {
+            return;  // Silently skip during startup
         }
         startupPeriod = false;
-        LOG_INFO("COIN: Startup period over at %lu ms (elapsed: %lu ms), now actively monitoring", 
-                currentTime, elapsedSinceStartup);
+        LOG_INFO("COIN: Startup period over, now actively monitoring");
     }
     
-    // FIXED: Check if the interrupt handler detected a coin signal
+    // PRIMARY: Check if the TaskCoinDetector detected a validated coin signal
+    // The TaskCoinDetector now does all the heavy lifting with mutex protection
+    // and multi-read validation, so we only need to process the flag here
     if (ioExpander.isCoinSignalDetected()) {
-        LOG_INFO("COIN: *** Interrupt-based coin signal detected! *** (time: %lu ms)", currentTime);
+        LOG_INFO("COIN: *** Validated coin signal detected! *** (time: %lu ms)", currentTime);
         
-        // Read the current state to get more details
-        uint8_t rawPortValue0 = 0;
-        if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
-            LOG_INFO("COIN: Interrupt detected - Port0=0x%02X, COIN_SIG bit=%d", 
-                    rawPortValue0, (rawPortValue0 & (1 << COIN_SIG)) ? 1 : 0);
+        // Clear the flag first to prevent re-processing
+        if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             ioExpander.clearCoinSignalFlag();
-            LOG_DEBUG("COIN: Cleared coin signal flag");
             xSemaphoreGive(xIoExpanderMutex);
         } else {
-            LOG_WARNING("COIN: Failed to acquire IO expander mutex in handleCoinAcceptor()");
-            return;
+            // If we can't get the mutex, still clear the flag directly
+            // This is safe because clearCoinSignalFlag only writes to a volatile bool
+            ioExpander.clearCoinSignalFlag();
         }
         
-        // For your hardware configuration, 3.3V = active coin, 0.05V = no coin
-        // When a coin passes (3.3V), the TCA9535 reads LOW (bit=0)
-        // When no coin is present (0.05V), the TCA9535 reads HIGH (bit=1)
-        bool coinSignalActive = ((rawPortValue0 & (1 << COIN_SIG)) == 0);
-        
-        LOG_INFO("COIN: Interrupt - Coin signal state: %s (raw bit: %d)", 
-                coinSignalActive ? "ACTIVE (LOW/0 - coin present)" : "INACTIVE (HIGH/1 - no coin)",
-                (rawPortValue0 & (1 << COIN_SIG)) ? 1 : 0);
-        
+        // Additional cooldown check in case TaskCoinDetector's cooldown wasn't enough
         unsigned long timeSinceLastCoin = currentTime - lastCoinProcessedTime;
-        LOG_INFO("COIN: Time since last coin: %lu ms (cooldown: %lu ms)", 
-                timeSinceLastCoin, COIN_PROCESS_COOLDOWN);
-        
-        // Only process the coin if it's been long enough since the last coin
-        if (timeSinceLastCoin > COIN_PROCESS_COOLDOWN) {
-            LOG_INFO("COIN: *** Processing coin from interrupt detection ***");
+        if (timeSinceLastCoin > COIN_COOLDOWN_MS) {
+            LOG_INFO("COIN: *** Processing validated coin insertion ***");
             processCoinInsertion(currentTime);
         } else {
-            LOG_WARNING("COIN: Ignoring coin signal - too soon after last coin (%lu ms < %lu ms cooldown)",
-                    timeSinceLastCoin, COIN_PROCESS_COOLDOWN);
+            LOG_WARNING("COIN: Ignoring - within controller cooldown (%lu ms < %lu ms)",
+                    timeSinceLastCoin, COIN_COOLDOWN_MS);
         }
         
         return;
     }
     
-    // FALLBACK: Still include polling method as a backup
-    // This is especially important during development or if interrupts aren't reliable
-    
-    // Read raw port value
-    uint8_t rawPortValue0 = 0;
-    if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
-        xSemaphoreGive(xIoExpanderMutex);
-    } else {
-        static unsigned long lastMutexWarning = 0;
-        if (currentTime - lastMutexWarning > 5000) {
-            LOG_WARNING("COIN: Failed to acquire IO expander mutex in handleCoinAcceptor() fallback");
-            lastMutexWarning = currentTime;
-        }
-        return;
-    }
-    
-    // Get current state of coin signal pin with correct logic
-    // When coin is present: Pin is LOW (bit=0) = ACTIVE
-    // When no coin: Pin is HIGH (bit=1) = INACTIVE
-    bool coinSignalActive = ((rawPortValue0 & (1 << COIN_SIG)) == 0);
-    
-    // Periodic detailed state logging
-    static unsigned long lastStateLog = 0;
-    static uint8_t lastLoggedPortValue = 0xFF;
-    if (currentTime - lastStateLog > 2000 || rawPortValue0 != lastLoggedPortValue) {
-        if (rawPortValue0 != lastLoggedPortValue) {
-            LOG_INFO("COIN: Polling - Port0 changed: 0x%02X -> 0x%02X", lastLoggedPortValue, rawPortValue0);
-            lastLoggedPortValue = rawPortValue0;
-        }
-        LOG_DEBUG("COIN: Polling - Port0=0x%02X, COIN_SIG bit=%d, Signal=%s, lastCoinState=%s", 
-                rawPortValue0,
-                (rawPortValue0 & (1 << COIN_SIG)) ? 1 : 0,
-                coinSignalActive ? "ACTIVE (LOW/0)" : "INACTIVE (HIGH/1)",
-                lastCoinState == LOW ? "LOW" : "HIGH");
-        lastStateLog = currentTime;
-    }
-    
-    // Static variables to track edges and timing patterns
-    static unsigned long lastEdgeTime = 0;
-    static int edgeCount = 0;
-    static unsigned long edgeWindowStart = 0;
-    
-    // Signal-based edge detection (COIN_SIG pin only)
-    // Convert lastCoinState from HIGH/LOW to boolean for comparison
-    bool lastCoinStateBool = (lastCoinState == LOW);
-    
-    if (coinSignalActive != lastCoinStateBool) {
-        unsigned long timeSinceLastEdge = (lastEdgeTime > 0) ? (currentTime - lastEdgeTime) : 0;
-        lastEdgeTime = currentTime;
-        
-        LOG_INFO("COIN: *** EDGE DETECTED *** %s -> %s (time: %lu ms, since last edge: %lu ms)", 
-                lastCoinStateBool ? "ACTIVE (coin present, LOW/0)" : "INACTIVE (no coin, HIGH/1)", 
-                coinSignalActive ? "ACTIVE (coin present, LOW/0)" : "INACTIVE (no coin, HIGH/1)",
-                currentTime, timeSinceLastEdge);
-        
-        // Multi-edge detection logic for coins that generate multiple pulses
-        // Track ALL edges (both rising and falling) to detect coin patterns
-        if (edgeCount == 0 || currentTime - edgeWindowStart > 1000) {
-            if (edgeCount > 0) {
-                LOG_DEBUG("COIN: Starting new edge window (previous had %d edges)", edgeCount);
-            }
-            edgeWindowStart = currentTime;
-            edgeCount = 1;
-            LOG_DEBUG("COIN: Edge window started, edgeCount=1");
-        } else {
-            edgeCount++;
-            unsigned long windowDuration = currentTime - edgeWindowStart;
-            
-            LOG_DEBUG("COIN: Edge #%d in window (duration: %lu ms, window limit: %lu ms)", 
-                    edgeCount, windowDuration, COIN_EDGE_WINDOW);
-            
-            unsigned long timeSinceLastCoin = currentTime - lastCoinProcessedTime;
-            bool meetsMinEdges = (edgeCount >= COIN_MIN_EDGES);
-            bool withinWindow = (windowDuration < COIN_EDGE_WINDOW);
-            bool pastCooldown = (timeSinceLastCoin > COIN_PROCESS_COOLDOWN);
-            
-            LOG_DEBUG("COIN: Pattern check - edges: %d/%d, window: %lu/%lu ms, cooldown: %lu/%lu ms", 
-                    edgeCount, COIN_MIN_EDGES, windowDuration, COIN_EDGE_WINDOW, 
-                    timeSinceLastCoin, COIN_PROCESS_COOLDOWN);
-            
-            if (meetsMinEdges && withinWindow && pastCooldown) {
-                LOG_INFO("COIN: *** Detected coin pattern: %d edges in %lu ms window ***", 
-                        edgeCount, windowDuration);
-                processCoinInsertion(currentTime);
-                edgeCount = 0;
-                edgeWindowStart = 0;
-            } else {
-                if (!meetsMinEdges) LOG_DEBUG("COIN: Pattern rejected - not enough edges");
-                if (!withinWindow) LOG_DEBUG("COIN: Pattern rejected - window too long");
-                if (!pastCooldown) LOG_DEBUG("COIN: Pattern rejected - cooldown not met");
-            }
-            
-            if (edgeCount > 10) {
-                LOG_WARNING("COIN: Too many edges (%d), resetting edge counter", edgeCount);
-                edgeCount = 0;
-                edgeWindowStart = 0;
-            }
-        }
-        
-        // With pull-up resistor:
-        // Default state (no coin): Pin is pulled HIGH (bit=1) = INACTIVE
-        // When coin is inserted: Pin is connected to ground/LOW (bit=0) = ACTIVE
-        // We detect when the pin goes from INACTIVE (HIGH) to ACTIVE (LOW)
-        // This is the primary detection method - single falling edge
-        if (coinSignalActive && !lastCoinStateBool) {
-            unsigned long timeSinceLastCoin = currentTime - lastCoinProcessedTime;
-            LOG_INFO("COIN: *** FALLING EDGE DETECTED - Pin went from INACTIVE (HIGH/1) to ACTIVE (LOW/0) ***");
-            LOG_INFO("COIN: Time since last coin: %lu ms (cooldown: %lu ms)", 
-                    timeSinceLastCoin, COIN_PROCESS_COOLDOWN);
-            
-            if (timeSinceLastCoin > COIN_PROCESS_COOLDOWN) {
-                LOG_INFO("COIN: *** Processing coin insertion from falling edge ***");
-                processCoinInsertion(currentTime);
-                edgeCount = 0; // Reset edge count after valid coin
-                edgeWindowStart = 0; // Reset window
-            } else {
-                LOG_WARNING("COIN: Ignoring coin signal - too soon after last coin (%lu ms < %lu ms cooldown)",
-                        timeSinceLastCoin, COIN_PROCESS_COOLDOWN);
-            }
-        }
-        
-        // Update lastCoinState (store as HIGH/LOW)
-        uint8_t oldLastCoinState = lastCoinState;
-        lastCoinState = coinSignalActive ? LOW : HIGH;
-        LOG_DEBUG("COIN: Updated lastCoinState: %s -> %s", 
-                oldLastCoinState == LOW ? "LOW" : "HIGH",
-                lastCoinState == LOW ? "LOW" : "HIGH");
-    }
-    
-    // Reset edge detection if it's been too long
-    if (edgeCount > 0 && currentTime - edgeWindowStart > 1000) {
-        LOG_WARNING("COIN: Resetting incomplete edge pattern after timeout (had %d edges, window: %lu ms)", 
-                edgeCount, currentTime - edgeWindowStart);
-        edgeCount = 0;
-        edgeWindowStart = 0;
-    }
-    
-    // Periodic debug logging
+    // Periodic debug logging (reduced frequency)
     static unsigned long lastDebugTime = 0;
-    if (currentTime - lastDebugTime > 5000) {
+    if (currentTime - lastDebugTime > 10000) {  // Every 10 seconds
         lastDebugTime = currentTime;
         unsigned long timeSinceLastCoin = currentTime - lastCoinProcessedTime;
-        LOG_INFO("COIN: Status - Signal=%s, EdgeCount=%d, LastCoin=%lu ms ago, Cooldown=%lu ms, InterruptFlag=%s", 
-                coinSignalActive ? "ACTIVE (LOW/0)" : "INACTIVE (HIGH/1)",
-                edgeCount,
-                timeSinceLastCoin,
-                COIN_PROCESS_COOLDOWN,
-                ioExpander.isCoinSignalDetected() ? "SET" : "CLEAR");
+        LOG_DEBUG("COIN: Status - LastCoin=%lu ms ago, Cooldown=%lu ms", 
+                timeSinceLastCoin, COIN_COOLDOWN_MS);
     }
 }
 
@@ -1182,11 +1060,18 @@ void CarWashController::processCoinInsertion(unsigned long currentTime) {
                 config.tokens, config.tokens + 1);
         config.physicalTokens++;
         config.tokens++;
-        // Reset grace period when token is added
+        // If we're IDLE *before* starting (no active token yet), refresh the 30s grace period.
+        // If we're IDLE because grace already expired and we are in the 2-minute inactivity countdown,
+        // do NOT re-enable gracePeriodActive, or the display/time math will ignore the partial token
+        // and "flatten" the fraction (e.g., 7.74 -> 8.00).
         if (currentState == STATE_IDLE) {
-            gracePeriodStartTime = currentTime;
-            gracePeriodActive = true;
-            LOG_INFO("COIN: Reset grace period - 30 seconds to press button");
+            if (tokenStartTime == 0) {
+                gracePeriodStartTime = currentTime;
+                gracePeriodActive = true;
+                LOG_INFO("COIN: Reset grace period - 30 seconds to press button");
+            } else {
+                LOG_INFO("COIN: Token added during inactivity countdown - preserving countdown (no grace reset)");
+            }
         }
     } else {
         LOG_INFO("COIN: Creating new anonymous session from coin insertion");
@@ -1217,34 +1102,34 @@ void CarWashController::processCoinInsertion(unsigned long currentTime) {
 
 void CarWashController::autoConsumeToken() {
     if (config.tokens <= 0) {
-        LOG_WARNING("autoConsumeToken called but no tokens available");
+        LOG_WARNING("autoConsumeToken called but no tokens available - ending session");
+        stopMachine(AUTOMATIC);
         return;
     }
     
-    LOG_INFO("Auto-consuming token after 30-second grace period expired in IDLE state");
-    LOG_INFO("Tokens before: %d, staying in IDLE and starting token consumption", config.tokens);
+    LOG_INFO("Grace period expired in IDLE - starting 2-minute inactivity countdown");
+    LOG_INFO("Tokens before: %d, staying in IDLE and starting fresh 2-minute countdown", config.tokens);
     
-    // Consume a token
+    // Consume ONE token for the 2-minute inactivity countdown
     if (config.physicalTokens > 0) {
         config.physicalTokens--;
     }
     config.tokens--;
     tokensConsumedCount++;
     
-    // Stay in IDLE state, but start token timer
-    // Grace period is over, start consuming token time while remaining in IDLE
-    currentState = STATE_IDLE; // Explicitly set to IDLE (though we're already there)
+    // Stay in IDLE state with fresh 2-minute countdown
+    // NEW SESSION TIMEOUT: Start a fresh 2-minute countdown (not based on previous token usage)
+    // After this 2 minutes, tokenExpired() will end the session
+    currentState = STATE_IDLE;
     tokenStartTime = millis();
-    tokenTimeElapsed = 0;
-    gracePeriodActive = false; // Grace period is over, start consuming token time
+    tokenTimeElapsed = 0;  // Fresh start - full 2 minutes
+    gracePeriodActive = false;
     gracePeriodStartTime = 0;
-    activeButton = -1; // No button active yet
-    lastActionTime = millis();
+    activeButton = -1;
+    // Note: Don't update lastActionTime here - we want the inactivity timeout to continue
     
-    LOG_INFO("Token auto-consumed: tokens_left=%d, state=IDLE, consuming token time", config.tokens);
-    
-    // Don't publish pause event since we're staying in IDLE
-    // No relay state change, so no action event needed
+    LOG_INFO("1 token consumed for inactivity countdown: tokens_left=%d", config.tokens);
+    LOG_INFO("Session will end in 2 minutes if user remains inactive (2:30 total from pause)");
 }
 
 void CarWashController::consumeNextToken() {
@@ -1331,22 +1216,20 @@ void CarWashController::switchFunction(int newButtonIndex) {
 }
 
 unsigned long CarWashController::getInactivityTimeout() const {
-    // Total timeout = 30 seconds + tokens_remaining * 2 minutes
-    // But if we're in RUNNING or PAUSED, we use tokens consumed + current token in progress
-    unsigned long timeout = BASE_INACTIVE_TIMEOUT; // 30 seconds base
+    // NEW SESSION TIMEOUT LOGIC:
+    // Total timeout = 30 seconds grace + 2 minutes (1 token) = 2:30 total
+    // After this time, the session ends and user loses ALL remaining tokens
+    // This is a fixed timeout regardless of how many tokens are loaded
+    //
+    // The timeout only applies when the machine is PAUSED or IDLE (not RUNNING)
+    // When RUNNING, the user is actively using the machine so no inactivity timeout
     
-    if (config.isLoaded) {
-        // Add time for remaining tokens (tokens not yet consumed)
-        timeout += config.tokens * TOKEN_TIME;
-        
-        // If currently consuming a token (RUNNING or PAUSED), add time for that token
-        // Note: The token is already decremented from config.tokens when we start using it
-        if (currentState == STATE_RUNNING || currentState == STATE_PAUSED) {
-            timeout += TOKEN_TIME;
-        }
+    if (!config.isLoaded) {
+        return BASE_INACTIVE_TIMEOUT; // 30 seconds if not loaded
     }
     
-    return timeout;
+    // Fixed timeout: 30s grace + 2min token consumption = 150 seconds
+    return SESSION_END_TIMEOUT;
 }
 
 void CarWashController::update() {
@@ -1408,9 +1291,13 @@ void CarWashController::update() {
     }
     
     // PRIORITY 0: Check grace period expiration
+    // NEW SESSION TIMEOUT LOGIC:
+    // Grace period (30 seconds) is followed by a fresh 2-minute token consumption period.
+    // After 2:30 total inactivity, session ends and user loses ALL remaining tokens.
+    //
     // Grace period is active in two states:
-    // 1. IDLE: After 30 seconds, auto-consume token and start counting token time (stay in IDLE)
-    // 2. PAUSED: After 30 seconds, end grace period and continue consuming token time
+    // 1. IDLE: After 30 seconds, start consuming a FRESH 2-minute token (stay in IDLE)
+    // 2. PAUSED: After 30 seconds, start consuming a FRESH 2-minute token (stay in PAUSED)
     if (gracePeriodActive && gracePeriodStartTime != 0) {
         unsigned long gracePeriodElapsed;
         if (currentTime >= gracePeriodStartTime) {
@@ -1421,28 +1308,51 @@ void CarWashController::update() {
         
         if (gracePeriodElapsed >= GRACE_PERIOD_TIMEOUT) {
             if (currentState == STATE_IDLE && config.isLoaded && config.tokens > 0) {
-                LOG_INFO("Grace period expired in IDLE (%lu ms >= %lu ms), auto-consuming token", 
+                LOG_INFO("Grace period expired in IDLE (%lu ms >= %lu ms), starting 2-minute inactivity countdown", 
                          gracePeriodElapsed, GRACE_PERIOD_TIMEOUT);
                 autoConsumeToken();
                 // Don't return - continue with normal update cycle
-            } else if (currentState == STATE_PAUSED) {
-                LOG_INFO("Grace period expired in PAUSED (%lu ms >= %lu ms), resuming token consumption", 
+            } else if (currentState == STATE_PAUSED && config.isLoaded) {
+                LOG_INFO("Grace period expired in PAUSED (%lu ms >= %lu ms), starting 2-minute inactivity countdown", 
                          gracePeriodElapsed, GRACE_PERIOD_TIMEOUT);
                 gracePeriodActive = false;
                 gracePeriodStartTime = 0;
-                // Token time will now start counting down since grace period is over
-                // We need to reset tokenStartTime to current time so the elapsed time calculation is correct
-                tokenStartTime = currentTime;
-                LOG_INFO("Token consumption resumed - timer reset");
+                
+                // NEW: Start a FRESH 2-minute countdown, not continue partial token
+                // This ensures the user always has exactly 2:30 total (30s grace + 2min)
+                // before session ends, regardless of how much token time was used before pause
+                tokenTimeElapsed = 0;  // Reset accumulated time
+                tokenStartTime = currentTime;  // Start fresh countdown
+                
+                // If user has tokens, consume one for this 2-minute countdown
+                if (config.tokens > 0) {
+                    if (config.physicalTokens > 0) {
+                        config.physicalTokens--;
+                    }
+                    config.tokens--;
+                    tokensConsumedCount++;
+                    LOG_INFO("Consumed 1 token for inactivity countdown - %d tokens remaining", config.tokens);
+                }
+                
+                LOG_INFO("2-minute inactivity countdown started - session will end at 2:30 total inactivity");
+            } else if (currentState == STATE_PAUSED && config.isLoaded && config.tokens == 0) {
+                // No tokens left while paused - end session immediately
+                LOG_INFO("Grace period expired in PAUSED with no tokens remaining - ending session");
+                stopMachine(AUTOMATIC);
+                return;
             }
         }
     }
     
-    // PRIORITY 1: Check inactivity timeout (dynamic based on tokens)
-    // This ensures logout happens as soon as timeout is reached, before any other operations
-    // CRITICAL: Check this before anything else to prevent delays from blocking operations
-    // CRITICAL: Use consistent currentTime to avoid timing discrepancies
-    if (currentState != STATE_FREE && config.isLoaded) {
+    // PRIORITY 1: Check inactivity timeout (safety net)
+    // NEW SESSION TIMEOUT LOGIC:
+    // Inactivity timeout only applies when machine is IDLE or PAUSED (not actively RUNNING)
+    // The primary timeout mechanism is: 30s grace period + 2min token expiration
+    // This inactivity check is a safety net that ensures session ends even if token logic fails
+    //
+    // When RUNNING, user is actively using the machine - no inactivity timeout
+    // When IDLE or PAUSED, user has 30s grace + 2min before session ends
+    if ((currentState == STATE_IDLE || currentState == STATE_PAUSED) && config.isLoaded) {
         // Handle potential millis() overflow (wraps every ~50 days)
         unsigned long elapsedTime;
         if (currentTime >= lastActionTime) {
@@ -1452,12 +1362,12 @@ void CarWashController::update() {
             elapsedTime = (0xFFFFFFFFUL - lastActionTime) + currentTime + 1;
         }
         
-        unsigned long inactivityTimeout = getInactivityTimeout();
+        unsigned long inactivityTimeout = getInactivityTimeout();  // Returns SESSION_END_TIMEOUT (150s)
         if (elapsedTime >= inactivityTimeout) {
-            LOG_INFO("Inactivity timeout reached (%lu ms >= %lu ms), logging out user", elapsedTime, inactivityTimeout);
+            LOG_INFO("Inactivity timeout reached (%lu ms >= %lu ms), ending session", elapsedTime, inactivityTimeout);
+            LOG_INFO("User loses %d remaining tokens due to inactivity", config.tokens);
             stopMachine(AUTOMATIC);
             // Return immediately after logout to ensure state change is processed
-            // This prevents any blocking operations (like network I/O) from delaying the logout
             return;
         }
     }

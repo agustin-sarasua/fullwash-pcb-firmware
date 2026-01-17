@@ -355,6 +355,8 @@ void CH453SDriver::clearBottom() {
 void CH453SDriver::displayTopNumber(uint16_t value, bool leadingZeros) {
     // Display time in MM.SS format (Minutes:Seconds)
     // value is in seconds (e.g., 120 seconds = 02:00 = 2 minutes, 0 seconds)
+    // 
+    // SWAPPED: Now displays on BOTTOM display (digits 4-7) to show TIME on bottom
     
     if (value > 5999) value = 5999;  // Max 99:59 (99 minutes 59 seconds)
     
@@ -368,23 +370,23 @@ void CH453SDriver::displayTopNumber(uint16_t value, bool leadingZeros) {
     uint8_t secondTens = seconds / 10;      // Tens of seconds (0-5)
     uint8_t secondOnes = seconds % 10;      // Ones of seconds (0-9)
     
-    // Physical digit order (per observed behavior):
-    // left-to-right on the TOP module corresponds to DIG0, DIG1, DIG2, DIG3.
+    // Physical digit order:
+    // BOTTOM display: DIG4, DIG5, DIG6, DIG7 (left to right)
     // We want: [minute tens][minute ones].[second tens][second ones]
     //
     // So:
-    // - DIG0: minute tens (blank if !leadingZeros and minutes < 10)
-    // - DIG1: minute ones + decimal point
-    // - DIG2: second tens
-    // - DIG3: second ones
+    // - DIG4: minute tens (blank if !leadingZeros and minutes < 10)
+    // - DIG5: minute ones + decimal point
+    // - DIG6: second tens
+    // - DIG7: second ones
     if (!leadingZeros && minuteTens == 0) {
-        setDigit(0, 0x00);
+        setDigit(4, 0x00);
     } else {
-        setDigit(0, SEGMENTS[minuteTens]);
+        setDigit(4, SEGMENTS[minuteTens]);
     }
-    setDigit(1, SEGMENTS[minuteOnes] | 0x80);
-    setDigit(2, SEGMENTS[secondTens]);
-    setDigit(3, SEGMENTS[secondOnes]);
+    setDigit(5, SEGMENTS[minuteOnes] | 0x80);
+    setDigit(6, SEGMENTS[secondTens]);
+    setDigit(7, SEGMENTS[secondOnes]);
 }
 
 void CH453SDriver::displayBottomDecimal(float value, uint8_t decimalPlaces) {
@@ -393,6 +395,8 @@ void CH453SDriver::displayBottomDecimal(float value, uint8_t decimalPlaces) {
     // Examples:
     // - 1.00 -> "01.00"
     // - 0.99 -> "00.99"
+    //
+    // SWAPPED: Now displays on TOP display (digits 0-3) to show COINS on top
     
     if (value < 0) value = 0;
     // Clamp to what fits in TT.UU (00.00 to 99.99)
@@ -412,12 +416,12 @@ void CH453SDriver::displayBottomDecimal(float value, uint8_t decimalPlaces) {
     uint8_t tenths = fracPart / 10;
     uint8_t hundredths = fracPart % 10;
 
-    // Physical digit order (mirrors TOP): left-to-right on the BOTTOM module corresponds to DIG4, DIG5, DIG6, DIG7.
+    // Physical digit order: TOP display is DIG0, DIG1, DIG2, DIG3 (left to right)
     // We want: [tens][ones].[tenths][hundredths]
-    setDigit(4, SEGMENTS[tens]);
-    setDigit(5, SEGMENTS[ones] | 0x80);  // decimal point after ones
-    setDigit(6, SEGMENTS[tenths]);
-    setDigit(7, SEGMENTS[hundredths]);
+    setDigit(0, SEGMENTS[tens]);
+    setDigit(1, SEGMENTS[ones] | 0x80);  // decimal point after ones
+    setDigit(2, SEGMENTS[tenths]);
+    setDigit(3, SEGMENTS[hundredths]);
 }
 
 void CH453SDriver::displayDashes(bool top) {
