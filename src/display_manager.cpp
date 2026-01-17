@@ -126,31 +126,38 @@ void DisplayManager::displayIdleState(CarWashController* controller) {
     int tokensLeft = controller->getTokensLeft();
     unsigned long gracePeriodSeconds = controller->getGracePeriodSecondsLeft();
     
-    // If grace period is active and no token has been consumed yet,
-    // show total time available from all tokens
-    if (gracePeriodSeconds > 0 || secondsLeft == 0) {
-        // Calculate total time from tokens (TOKEN_TIME is in milliseconds)
-        secondsLeft = (tokensLeft * TOKEN_TIME) / 1000;
-    }
-    
-    // Update time display (top display) - shows seconds remaining
-    updateTimeDisplay(secondsLeft);
-    
-    // Update tokens display (bottom display) - shows token fraction
-    // In IDLE state with grace period, no token has been consumed yet
-    // So we show full tokens
+    // Grace period active:
+    // - No token countdown is running yet (controller tokenStartTime is 0),
+    // - Display should show full tokens and full time.
     if (gracePeriodSeconds > 0) {
-        // Grace period active - show full tokens (no consumption yet)
+        secondsLeft = (tokensLeft * TOKEN_TIME) / 1000;
+        updateTimeDisplay(secondsLeft);
         updateTokensDisplay(tokensLeft, 0, TOKEN_TIME / 1000);
-    } else {
-        // Grace period expired - token is being consumed in IDLE
-        unsigned long tokenTimeSeconds = TOKEN_TIME / 1000;
-        unsigned long secondsInCurrentToken = (secondsLeft > 0) ? (secondsLeft % tokenTimeSeconds) : 0;
-        if (secondsInCurrentToken == 0 && secondsLeft > 0) {
-            secondsInCurrentToken = tokenTimeSeconds;
-        }
-        updateTokensDisplay(tokensLeft, secondsInCurrentToken, tokenTimeSeconds);
+        return;
     }
+
+    // Grace period JUST expired but controller hasn't started the 2-minute countdown yet.
+    // In that brief window, getSecondsLeft() returns 0, and the previous logic could
+    // momentarily show an incorrect token value (e.g., 2.00) due to double-counting.
+    // Holding the previous display for a cycle avoids the visible glitch.
+    if (secondsLeft == 0) {
+        return;
+    }
+
+    // Grace period expired - token is being consumed in IDLE.
+    updateTimeDisplay(secondsLeft);
+
+    // Calculate remaining time in the current token consistently with RUNNING/PAUSED:
+    // secondsLeft = currentTokenRemaining + (tokensLeft * tokenTimeSeconds)
+    unsigned long tokenTimeSeconds = TOKEN_TIME / 1000;
+    unsigned long secondsInCurrentToken = 0;
+    if (secondsLeft > 0) {
+        unsigned long futureTokensTime = tokensLeft * tokenTimeSeconds;
+        if (secondsLeft > futureTokensTime) {
+            secondsInCurrentToken = secondsLeft - futureTokensTime;
+        }
+    }
+    updateTokensDisplay(tokensLeft, secondsInCurrentToken, tokenTimeSeconds);
 }
 
 void DisplayManager::displayRunningState(CarWashController* controller) {
