@@ -1097,7 +1097,8 @@ void CarWashController::processCoinInsertion(unsigned long currentTime) {
         LOG_INFO("COIN: Grace period started - 30 seconds to press button");
     }
     
-    publishCoinInsertedEvent();
+    // DISABLED - BLE ONLY MODE (no MQTT)
+    // publishCoinInsertedEvent();
 }
 
 void CarWashController::autoConsumeToken() {
@@ -1467,17 +1468,9 @@ void CarWashController::update() {
 }
 
 void CarWashController::publishMachineSetupActionEvent() {
-
-    StaticJsonDocument<512> doc;
-    doc["machine_id"] = MACHINE_ID;
-    doc["action"] = getMachineActionString(ACTION_SETUP);
-    doc["timestamp"] = getTimestamp();
-    
-    String jsonString;
-    serializeJson(doc, jsonString);
-    
-    // Queue message for publishing (critical - machine setup event)
-    queueMqttMessage(ACTION_TOPIC.c_str(), jsonString.c_str(), QOS1_AT_LEAST_ONCE, true);
+    // DISABLED - BLE ONLY MODE (no MQTT)
+    // This function is kept for API compatibility but does nothing
+    LOG_DEBUG("publishMachineSetupActionEvent called but MQTT is disabled");
 }
 
 unsigned long CarWashController::getSecondsLeft() {
@@ -1555,25 +1548,9 @@ String CarWashController::getTimestamp() {
 }
 
 void CarWashController::publishCoinInsertedEvent() {
-    if (!config.isLoaded) return;
-
-    StaticJsonDocument<512> doc;
-
-    doc["machine_id"] = MACHINE_ID;
-    doc["timestamp"] = getTimestamp();
-    doc["action"] = getMachineActionString(ACTION_TOKEN_INSERTED);
-    doc["trigger_type"] = "MANUAL";
-    doc["session_id"] = config.sessionId;
-    doc["user_id"] = config.userId;
-    doc["token_channel"] = "PHYSICAL";
-    doc["tokens_left"] = config.tokens;
-    doc["physical_tokens"] = config.physicalTokens;
-
-    String jsonString;
-    serializeJson(doc, jsonString);
-
-    // Queue message for publishing (critical - coin/token event)
-    queueMqttMessage(ACTION_TOPIC.c_str(), jsonString.c_str(), QOS1_AT_LEAST_ONCE, true);
+    // DISABLED - BLE ONLY MODE (no MQTT)
+    // This function is kept for API compatibility but does nothing
+    LOG_DEBUG("publishCoinInsertedEvent called but MQTT is disabled");
 }
 
 // Debug method to directly simulate a coin insertion
@@ -1717,49 +1694,15 @@ unsigned long CarWashController::getGracePeriodSecondsLeft() const {
 
 /**
  * Helper method to queue MQTT messages for the dedicated publisher task
- * This prevents blocking the controller when MQTT operations are slow or connection is down
  * 
- * @param topic The MQTT topic to publish to
- * @param payload The message payload (JSON string)
- * @param qos Quality of Service (0 or 1)
- * @param isCritical Whether this message should be buffered and retried when disconnected
- * @return true if message was queued successfully, false if queue is full
+ * DISABLED - BLE ONLY MODE (no MQTT)
+ * This function is kept for API compatibility but does nothing
  */
 bool CarWashController::queueMqttMessage(const char* topic, const char* payload, uint8_t qos, bool isCritical) {
-    // Check if queue exists
-    if (xMqttPublishQueue == NULL) {
-        LOG_ERROR("MQTT publish queue not initialized!");
-        return false;
-    }
-    
-    // Create message structure
-    MqttMessage msg;
-    
-    // Copy topic (ensure null termination)
-    strncpy(msg.topic, topic, sizeof(msg.topic) - 1);
-    msg.topic[sizeof(msg.topic) - 1] = '\0';
-    
-    // Copy payload (ensure null termination)
-    strncpy(msg.payload, payload, sizeof(msg.payload) - 1);
-    msg.payload[sizeof(msg.payload) - 1] = '\0';
-    
-    // Set QoS and priority
-    msg.qos = qos;
-    msg.isCritical = isCritical;
-    msg.timestamp = millis();
-    
-    // Check if payload was truncated
-    if (strlen(payload) >= sizeof(msg.payload)) {
-        LOG_WARNING("MQTT payload truncated (max size: %d bytes)", sizeof(msg.payload) - 1);
-    }
-    
-    // Try to queue the message (non-blocking)
-    if (xQueueSend(xMqttPublishQueue, &msg, 0) == pdTRUE) {
-        LOG_DEBUG("Queued MQTT message: topic=%s, qos=%d, critical=%d", topic, qos, isCritical);
-        return true;
-    } else {
-        LOG_WARNING("MQTT queue full, cannot queue message to %s (queue: %d/%d)", 
-                   topic, uxQueueMessagesWaiting(xMqttPublishQueue), MQTT_QUEUE_SIZE);
-        return false;
-    }
+    // MQTT is disabled - BLE only mode
+    (void)topic;
+    (void)payload;
+    (void)qos;
+    (void)isCritical;
+    return false;
 }

@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include <Preferences.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include "mqtt_lte_client.h"
@@ -953,10 +954,126 @@ void mqtt_callback(char *topic, byte *payload, unsigned int len) {
 }
 */ // END DISABLED - BLE ONLY MODE
 
+// =============================================================================
+// DOUBLE-TAP RESET DETECTION FOR FACTORY RESET
+// =============================================================================
+// Press the reset button twice within 3 seconds to trigger a factory reset.
+// This will reset the machine_id to "99" (installation mode).
+// =============================================================================
+
+#define DOUBLE_RESET_NAMESPACE "dblreset"
+#define DOUBLE_RESET_FLAG_KEY "flag"
+#define DOUBLE_RESET_WINDOW_MS 3000  // 3 seconds window for double-tap detection
+
+/**
+ * Perform factory reset - resets machine to installation mode (machine_id = 99)
+ * This clears all configuration and reboots the device.
+ */
+void performFactoryReset() {
+  Serial.println("\n");
+  Serial.println("==============================================");
+  Serial.println("  FACTORY RESET TRIGGERED (DOUBLE-TAP RESET)");
+  Serial.println("==============================================");
+  Serial.println("Resetting machine to installation mode...");
+  
+  // Clear the double-reset flag first
+  Preferences resetPrefs;
+  resetPrefs.begin(DOUBLE_RESET_NAMESPACE, false);
+  resetPrefs.putBool(DOUBLE_RESET_FLAG_KEY, false);
+  resetPrefs.end();
+  
+  // Reset configuration to defaults
+  Preferences configPrefs;
+  configPrefs.begin(PREFS_NAMESPACE, false);
+  configPrefs.clear();  // Clear all keys in the namespace
+  configPrefs.putString(PREFS_MACHINE_NUM, "99");
+  configPrefs.putString(PREFS_ENVIRONMENT, "prod");
+  configPrefs.putString(PREFS_BLE_PASSWORD, DEFAULT_MASTER_PASSWORD);
+  configPrefs.end();
+  
+  Serial.println("Configuration reset complete!");
+  Serial.println("Machine ID set to: 99 (installation mode)");
+  Serial.println("Environment set to: prod");
+  Serial.println("BLE password reset to default");
+  Serial.println("==============================================");
+  Serial.println("Rebooting in 2 seconds...");
+  Serial.println("==============================================\n");
+  
+  // Blink LED rapidly to indicate factory reset
+  pinMode(LED_PIN, OUTPUT);
+  for (int i = 0; i < 20; i++) {
+    digitalWrite(LED_PIN, i % 2);
+    delay(100);
+  }
+  
+  // Reboot the device
+  ESP.restart();
+}
+
+/**
+ * Check for double-tap reset and handle the reset window.
+ * Must be called at the very beginning of setup().
+ * 
+ * @return true if normal boot should continue, false if factory reset was triggered
+ */
+bool checkDoubleResetAndWait() {
+  Preferences resetPrefs;
+  resetPrefs.begin(DOUBLE_RESET_NAMESPACE, false);
+  
+  // Check if the double-reset flag is already set (from previous boot)
+  bool flagWasSet = resetPrefs.getBool(DOUBLE_RESET_FLAG_KEY, false);
+  
+  if (flagWasSet) {
+    // Double-reset detected! This is the second reset within the window
+    Serial.println("\n*** DOUBLE-RESET DETECTED! ***");
+    resetPrefs.end();
+    performFactoryReset();
+    return false;  // Will never reach here due to ESP.restart()
+  }
+  
+  // First reset - set the flag
+  resetPrefs.putBool(DOUBLE_RESET_FLAG_KEY, true);
+  resetPrefs.end();
+  
+  // Visual feedback: fast blink during reset window
+  pinMode(LED_PIN, OUTPUT);
+  Serial.println("Double-reset window active (press RESET again within 3s for factory reset)...");
+  
+  // Wait for the reset window with LED blinking
+  unsigned long startTime = millis();
+  bool ledState = true;
+  while (millis() - startTime < DOUBLE_RESET_WINDOW_MS) {
+    digitalWrite(LED_PIN, ledState);
+    ledState = !ledState;
+    delay(150);  // Fast blink to indicate reset window is active
+  }
+  
+  // Window passed without second reset - clear the flag
+  resetPrefs.begin(DOUBLE_RESET_NAMESPACE, false);
+  resetPrefs.putBool(DOUBLE_RESET_FLAG_KEY, false);
+  resetPrefs.end();
+  
+  // Turn LED back on to show normal boot
+  digitalWrite(LED_PIN, HIGH);
+  Serial.println("Double-reset window closed. Continuing normal boot...");
+  
+  return true;  // Continue with normal setup
+}
+
 void setup() {
-  // Initialize Logger with default log level
+  // Initialize serial FIRST for debug output during double-reset detection
+  Serial.begin(115200);
+  delay(100);  // Brief delay for serial to stabilize
+  
+  // =========================================================================
+  // DOUBLE-TAP RESET DETECTION - Must be FIRST thing in setup!
+  // Press reset twice within 3 seconds to trigger factory reset
+  // =========================================================================
+  checkDoubleResetAndWait();
+  
+  // Initialize Logger with default log level (after double-reset check)
   Logger::init(DEFAULT_LOG_LEVEL, 115200);
-  delay(1000); // Give time for serial to initialize
+  delay(500); // Brief delay after logger init
   
   LOG_INFO("Starting fullwash-pcb-firmware...");
   
