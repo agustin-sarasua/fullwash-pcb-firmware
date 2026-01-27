@@ -1,0 +1,413 @@
+CH453 Datasheet                                      1                                         http://wch.cn
+
+
+16-Bit LED Nixie tube Driver and Keyboard Control Chip CH453
+                                                 Datasheet
+                                               Version: 2A
+                                               http://wch.cn
+
+1. Overview
+CH453 is a 16-bit LED Nixie tube display driver and keyboard scan control chip. CH453 has a built-in clock
+oscillation circuit, which can dynamically drive 16-bit LED Nixie tubes or 128 LEDs and can also scan the
+keyboard with 64 keys. CH453 exchanges data with a MCU through a 2-wire serial interface.
+
+
+                                                                SEG7~SEG0
+                       SCL
+                                                                                             16-bit
+                       SDA                                                                   LED
+                                                                 8×8 matrix
+       MCU,                              CH453                     64-key                    Nixie
+        etc.                                                      keyboard                    tube
+                                                                                               or
+                         INT#                                                                 128
+                         DIG15                                 DIG15~DIG0                    LEDs
+
+
+
+
+2. Features
+    ● Built-in display current driving stage, segment current not less than 15mA, word current not less
+      than 100mA.
+    ● Dynamic display scanning control, direct drive of 16-bit LED Nixie tubes or 128 LEDs.
+    ● Internal current limiting, provide 3-level brightness control through duty ratio setting.
+    ● Built-in 64-key keyboard controller, based on 8×8 matrix keyboard scan.
+    ● Provide active low keyboard interrupt, key release flag bit for query key to be pressed down and
+      released.
+    ● High speed two-wire serial interface, clock speed from 0 to 2MHz, compatible with 2-line I2C bus,
+      saving pins.
+    ● Built-in clock oscillator circuit, no need to provide external clock or external oscillator components,
+      more anti-interference.
+    ● Support low-power sleep, save power, can be waked up by key or command operation.
+    ● Package: DIP28S and SOP28, lead-free package, and compatible with RoHS.
+
+
+3. Package
+CH453 Datasheet                                       2                                          http://wch.cn
+
+
+
+
+                                                                         Instruction of          Ordering
+    Package               Width                 Pitch of Pin
+                                                                            Package            information
+    DIP28S                                                  Narrow 28-pin dual
+                  7.62mm      300mil         2.54mm       100mil                    CH453A
+   SK-DIP28                                                   in-line package
+                                                            Standard 28-pin pin
+     SOP28       7.62mm   300mil     1.27mm        50mil                            CH453S
+                                                                    patch
+Note: CH453D with SDIP28 package (with pin spacing of 1.78mm) has been discontinued. Use the chip
+with patch package first.
+
+
+4. Pins
+   Pin No.     Pin Name           Type                                 Description
+                                                 Positive power supply, continuous current not less than
+     25            VCC            Power
+                                                                        120mA
+     11            GND            Power        Common ground, continuous current not less than 120mA
+   23~24,                     Three-status      Segment drive of LED Nixie tube, active at high level
+                   SEG0
+   26~28,                       output        Keyboard scan input, active at high level, built-in pull-down
+                  ~SEG7
+    1~3                        and input                                resistor
+     4~8,          DIG0                            Word drive of LED Nixie tube, active at low level
+                                  Output
+    12~14         ~DIG7                               Keyboard scan input, active at high level
+                   DIG8
+    15~21                         Output           Word drive of LED Nixie tube, active at low level
+                  ~DIG14
+                                                    Word drive of LED Nixie tube, active at low level
+     22           DIG15           Output
+                                               It can be set as keyboard interrupt output, the same as INT#
+                                Built-in
+                                pull-up
+     10            SDA        Open-drain              two-wire serial interface data input and output
+                                output
+                               and input
+                                                  Clock input of 2-wire serial interface, built-in pull-up
+      9            SCL            Input
+                                                                         resistor
+CH453 Datasheet                                       3                                          http://wch.cn
+
+ Internal pin                    Built-in
+   Has not                       pull-up
+                    INT#                               Keyboard interrupt output, active at low level
+ been led out                   Open-drain
+      yet                         output
+
+
+
+
+5. Functional Specification
+5.1. General Specification
+For data in this manual, those ending with B are binary numbers and those ending with H are hexadecimal
+numbers. Otherwise, they are decimal numbers. The bit marked as x indicates that the bit can be any value.
+
+5.2. Display Driver
+CH453 uses dynamic scanning driver for the LED Nixie tube and LED. The order is from DIG0 to DIG15.
+When one pin sinks the current, the other pins do not sink the current. CH453 has internal current driving
+stage, which can directly drive 0.5-inch to 1-inch common cathode LED Nixie tube. The segment drive pins
+SEG6-SEG0 correspond to the segments G-A, the segment drive pin SEG7 corresponds to the decimal point
+of the LED Nixie tube, and the word drive pins DIG15~DIG0 are respectively connected to the cathodes of
+16 LED Nixie tubes. CH453 can also be connected to an 8×16 matrix LED array or 128 independent LEDs,
+or connected to an external inverse phase driver to support a common anode LED Nixie tube, or connected
+to a high-power tube to support a large-size LED Nixie tube.
+
+CH453 has 16 8-bit data registers, which are used to store 16-word data, corresponding to 16 LED Nixie
+tubes or 16 groups of LEDs driven by CH453, 8 LEDs in each group. The bits 7-0 of the word data in the
+data register correspond to the decimal points and segments G-A of 8 LED Nixie tubes respectively. For
+LED array, the data bit of each word data uniquely correspond to an LED. When the data bit is 1, the
+segment of the corresponding LED Nixie tube or LED will be on. When the data bit is 0, the segment of the
+corresponding LED Nixie tube or LED will be off. For example, the bit 0 of the third data register is 1, so the
+segment A of the corresponding third LED Nixie tube is on.
+
+The following diagram shows the segment name of the LED Nixie tube.
+
+
+
+
+5.3. Keyboard Scan
+CH453 keyboard scan feature supports an 8×8 matrix 64-key keyboard. During keyboard scan, pins
+DIG7~DIG0 are used for the column scan output, and SEG7~SEG0 pins have internal pull-down resistors
+for the line scan input.
+
+CH453 periodically inserts keyboard scan during the display driver scan. During keyboard scan, the pins
+DIG7~DIG0 output high level in sequence from DIG0 to DIG7, and the remaining pins output low level.
+The outputs of the pins SEG7-SEG0 are disabled. When no key is pressed, SEG7-SEG0 are pulled down to
+low level. When a key is pressed, for example, the key connecting DIG3 and SEG4 is pressed, SEG4 detects
+high level when DIG3 outputs high level. In order to avoid error code caused by key jitter or external
+interference, CH453 performs two scans. Only when the results of two keyboard scans are the same, the key
+will be confirmed to be valid. If CH453 detects a valid key, the key code will be recorded, and active low
+keyboard interrupt will be generated through INT# pin. At this time, the MCU can read the key code through
+the serial interface. CH453 does not generate any keyboard interrupt until a new valid key is detected.
+CH453 Datasheet                                         4                                          http://wch.cn
+
+CH453 does not support combination key, that is, two or more keys cannot be pressed at the same time. If
+multiple keys are pressed at the same time, the key with the smaller key code will take precedence.
+
+The key code provided by CH453 is 7-bit, bits 2-0 are column scan codes, bits 5-3 are line scan codes, and
+bit 6 is status code (1 when the key is pressed, 0 when the key is released). For example, when the key
+connecting DIG3 and SEG4 is pressed, the key code is 1100011B or 63H. After the key is released, the key
+code is usually 0100011B or 23H (or other values, but certainly less than 40H), where the column scan code
+corresponding to DIG3 is 011B, and the line scan code corresponding to SEG4 is 100B. The MCU can read
+the key code at any time, but it generally reads the key code when CH453 detects a valid key and produces
+keyboard interrupt. At this time, the bit 6 of the key code is always 1. In addition, if you need to know when
+the key is released, the MCU can read the key code regularly by inquiry until the bit 6 of the key code is 0.
+
+The following table shows 8×8 matrix key addresses between DIG7-DIG0 and SEG7-SEG0, which are also
+the sequence addresses of the segments for the LED Nixie tube and LED arrays. As the key code is 7-bit, the
+bit 6 is always 1 when the key is pressed. When the key is pressed, the actual key code provided by CH453
+is the key address in the table plus 40H, that is, the key code should be 40H-7FH.
+
+   Addressing      DIG7        DIG6        DIG5        DIG4        DIG3        DIG2        DIG1        DIG0
+      SEG0         07H         06H         05H         04H         03H         02H         01H         00H
+      SEG1         0FH         0EH         0DH         0CH         0BH         0AH         09H         08H
+      SEG2         17H         16H         15H         14H         13H         12H         11H         10H
+      SEG3         1FH         1EH         1DH         1CH         1BH         1AH         19H         18H
+      SEG4         27H         26H         25H         24H         23H         22H         21H         20H
+      SEG5         2FH         2EH         2DH         2CH         2BH         2AH         29H         28H
+      SEG6         37H         36H         35H         34H         33H         32H         31H         30H
+      SEG7         3FH         3EH         3DH         3CH         3BH         3AH         39H         38H
+
+5.4. Serial Interface
+CH453 has a two-wire serial interface realized by hardware, including two main signal lines: serial data
+clock input line SCL, serial data input and output line SDA. And an auxiliary signal line: interrupt output
+line INT#. Wherein, SCL is the input signal line with a pull-up resistor and at high level by default. SDA is a
+semi-bidirectional signal line with a pull-up resistor and at high level by default. INT# is an open-drain
+output with a pull-up resistor. When the keyboard scan function is enabled, it acts as a keyboard interrupt
+output line and at high level by default.
+
+SDA is used for serial data input and output. The high level represents bit data 1, and the low level represents
+bit data 0. The sequence of serial data input is that the high bit is at the front and the low bit is at the back.
+
+SCL is used to provide a serial clock, CH453 inputs data from SDA on its rising edge and outputs data from
+SDA on its falling edge.
+
+SDA falling edge occurring during the SCL high level period is defined as the start signal of the serial
+interface, and SDA rising edge occurring during the SCL high level period is defined as the stop signal of the
+serial interface. CH453 receives and analyzes the command only after detecting the start signal. Therefore,
+when I/O pin resources of the MCU are short, SCL pin can be shared with other interface circuits while SDA
+pin state is unchanged. Both SCL and SDA pins can be shared with other interface circuits if it is possible to
+ensure that SDA pin changes only when SCL pin is at low level.
+
+INT# is used for keyboard interrupt output and is at high level by default. INT# outputs keyboard interrupt
+active at low level when CH453 detects a valid key. After the MCU is interrupted, it performs a read
+operation to CH453, and CH453 recovers the INT# to high level and outputs the key code from SDA. The
+MCU gets a byte of data from SDA, among which the lower 7 bits are the key code.
+CH453 Datasheet                                        5                                         http://wch.cn
+
+The communication process between the MCU and CH453 is always divided into six steps. According to the
+operation direction of MCU, it is divided into two types: write operation for output data and read operation
+for input data. For the specific process, please refer to Example Program.
+
+Write operation consists of six steps: output start signal, output byte 1, response 1, output byte 2, response 2
+and output stop signal. Among them, the start signal and the stop signal are as mentioned above, response 1
+and response 2 are always fixed to 1, output byte 1 and output byte 2 respectively contain 8 data bits, namely,
+one byte of data.
+
+Read operation consists of six steps: output start signal, output byte 1, response 1, output byte 2, response 2
+and output stop signal. Among them, the start signal and the stop signal are as mentioned above, response 1
+and response 2 are always fixed to 1, output byte 1 and output byte 2 respectively contain 8 data bits, namely,
+one byte of data.
+
+The following figure shows an example of write operation. The byte 1 is 01001000B, namely, 48H. The byte
+2 is 00000001B, namely, 01H.
+
+
+
+
+6. Operation Commands
+The operation commands of CH453 are divided into 4 groups. Start signal, stop signal, response 1 and
+response 2 are the same for each command, except that the data of output bytes 1 and byte 2 are different and
+that byte 2 is transmitted in different direction.
+
+6.1. Setting of System Parameter Commands
+The byte 1 of this command is                       01001000B,       namely     48H.     The    byte    2    is
+[SLEEP][INTENS]0[X_INT]0[KEYB][DISP]B.
+
+This command is used to set system-level parameters of CH453: display driver enable DISP, keyboard
+scanning enable KEYB, DIG15 interrupt output enable X_INT, display driver brightness control INTENS,
+low-power sleep control SLEEP.
+
+The output is allowed to be displayed when DISP bit is 1, and the display driver is closed when DISP bit is 0.
+
+The keyboard scan is enabled when KEYB bit is 1, and the keyboard scan is closed when KEYB bit is 0.
+
+When the X_INT bit is 1, up to 15-bit LED Nixie tubes are supported. DIG15 pins are used for keyboard
+interrupt output, whose functions are the same as the INT# pin. When X_INT bit is 0, it supports up to 16-bit
+LED Nixie tubes. DIG15 are similar to DIG8~DIG14 as word drive.
+
+INTENS is used to control the brightness of the display driver, which contains two-bit data and has 4
+combinations: data 00B, 01B and 10B respectively set the duty cycle of the display driver to 4/4, 1/4 and 2/4,
+and enable the internal segment drive current limiter. Data 11B sets the display drive duty cycle to 4/4, but
+the internal segment drive current limiter is disabled, so the external segment pin is required to be connected
+with the current limit resistor R0 in series.
+
+SLEEP is used to make CH453 into a low-power sleep state, so as to save power. CH453 in low-power sleep
+state can be waked up by any of the following two events. The first event is the detection of keys on
+SEG3-SEG0, and the valid key code is from 40H to 5FH. The second event is the reception of next operation
+command sent by the MCU. When CH453 is waken up, SLEEP bit is automatically cleared to 0. Sleep and
+Wake Up operations do not affect other working states of CH453. If KEYB bit is 1, key interrupt will occur
+CH453 Datasheet                                         6                                         http://wch.cn
+
+after waking up. If KEYB bit is 0, key interrupt will not occur after waking up.
+
+This command does not affect the data in the internal data buffer.
+
+6.2. Word-data loading command
+The byte 1 of the command is 011[DIG_ADDR]0B, i.e. 60H, 62H, 64H, 66H, 68H, 6AH, 6CH, 6EH, 70H,
+72H, 74H, 76H, 78H, 7AH, 7CH and 7EH. Byte 2 is [DIG_DATA]B, i.e. the value between 00H and 0FFH.
+
+"Word-data loading command" is used to write the word data DIG_DATA to the data register at the specified
+address DIG_ADDR. DIG_ADDR specifies the address of the data register through 4-bit data. Data
+0000B-1111B specify the addresses 0-15 respectively, corresponding to 16 LED Nixie tubes driven by the
+pins DIG0~DIG15. DIG_DATA is 8-bit word data. For example, command data 01100000B and 01111001B
+means that word data 79H is written into the first data register so that the LED Nixie tube driven by the pin
+DIG0 will display E.
+
+The data in CH453 internal data register is uncertain after power on reset, so the data in the data register
+should be cleared or the data to be displayed should be directly loaded before the display is started. The reset
+process does not affect the data in the data register.
+
+6.3. Read Key Code Commands
+The output byte 1 of this command is 01001111B, namely, 4FH. The lower 7 bits of the input byte 2 are the
+key code.
+
+"Read Key Code Commands" is used to get the code for the valid key that CH453 recently detects. The
+command is read operation, a command with data return. The MCU must first release SDA pin (three-state
+output is disabled or pulled up to the high level), and then CH453 outputs the key code from SDA pin, the
+valid data of the key code is bit 6-0 data, the bit 6 is a status code, the bits 5-0 are scan codes and key
+addresses.
+
+6.4. Read Segment Pin State Command
+The output byte 1 of this command is 01001101B, namely, 4DH. The input byte 2 is the current state of the
+segment pins SEG7~SEG0.
+
+"Read Segment Pin State Command" is used to obtain the current state of SEG7 ~ SEG0 pins. The command
+is a read operation, it is a command with data return. The MCU must first release SDA pin (three-state output
+is disabled or pulled up to the high level), and then CH453 outputs the current pin state from SDA pin.
+
+
+7. Parameters
+7.1. Absolute Maximum Value
+Critical value or exceeding the absolute maximum value may cause the chip to work abnormally or even be
+damaged.
+    Name                        Parameter description                         Min.         Max.        Unit
+     TA                 Ambient temperature during operation                   -40           85         ℃
+     TS                  Ambient temperature during storage                    -55          125         ℃
+               Supply voltage (VCC is connected to the power supply,
+    VCC                                                                        -0.5         6.0         V
+                                GND is grounded)
+     VIO                  Voltage on the input or output pins                  -0.5      VCC+0.5        V
+    IMdig            Continuous drive current of single DIG pin                 0           120        mA
+    IMseg            Continuous drive current of single SEG pin                 0            25        mA
+CH453 Datasheet                                        7                                       http://wch.cn
+
+    IMall          Total continuous drive current of all SEG pins            0           130        mA
+
+
+7.2. Electrical Parameters
+Test Conditions: TA=25℃, VCC=5V
+    Name                 Parameter description                 Min.         Typ.        Max.       Unit
+    VCC                  Power supply voltage                   3.0          5           5.3         V
+     ICC               Current of power supply                               80          120        mA
+               Static current (SCL and SDA are at high
+    ICCs                                                                    0.5           1         mA
+                                  level)
+               Low level input voltage of SCL and SDA
+     VIL                                                       -0.5                      0.8         V
+                                   pins
+               High level input voltage of SCL and SDA
+    VIH                                                         2.0                   VCC+0.5        V
+                                   pins
+                 Low level output voltage of DIG pin
+  VOLdig                                                                                 0.8         V
+                                (-80mA)
+  VOHdig      High level output voltage of DIG pin (8mA)        4.5                                  V
+                 Low level output voltage of SEG pins
+  VOLseg                                                                                 0.5         V
+                               (-15mA)
+                 High level output voltage of SEG pin
+  VOHseg                                                        4.5                                  V
+                               (15mA)
+    IUP1           Input pull-up current of SCL pin                         100          300        uA
+    IUP2           Input pull-up current of SDA pin                         250          400        uA
+    IUP3          Output pull-up current of INT# pin                        500         5000        uA
+     VR       Default voltage threshold of power on reset       2.3         2.6          2.9         V
+
+
+7.3. Internal Timing Parameters
+Test Conditions: TA=25℃, VCC=5V
+(Note: The timing parameters in this table are multiples of the built-in clock periods, and the frequency of
+the built-in clock decreases with the decrease of the supply voltage)
+    Name                 Parameter description                 Min.         Typ.        Max.       Unit
+                 Reset time generated during power on
+    TPR                                                         8            20          60         mS
+                               detection
+    TDP                   Display scan period                                8                      mS
+    TKS        Key response time (two keyboard scans)           20           50                     mS
+
+
+7.4. Interface Timing Parameters
+Test Conditions: TA=25℃, VCC=5V, refer to the attached figure
+(Note: The unit of measurement in this table is nanosecond, namely, 10-9 seconds. If the maximum value is
+not indicated, the theoretical value can be infinite.)
+CH453 Datasheet                                       8                                       http://wch.cn
+
+    Name                 Parameter description                Min.         Typ.        Max.       Unit
+   TSSTA      Setup time of SDA falling edge start signal      100                                 nS
+   THSTA       Hold time of SDA falling edge start signal      100                                 nS
+   TSSTO       Setup time of SDA rising edge stop signal       100                                 nS
+   THSTO       Hold time of SDA rising edge stop signal        100                                 nS
+  TCLOW           Low level width of SCL clock signal          100                                 nS
+   TCHIG          High level width of SCL clock signal         100                                 nS
+              Setup time of SDA input data to SCL rising
+   TSDA                                                        30                                  nS
+                                edge
+              Hold time of SDA input data to SCL rising
+   THDA                                                        10                                  nS
+                                edge
+    Rate             Average data transmission rate             0                       2M         bps
+
+
+8. Application
+8.1. Application Circuit
+CH453 is connected to the external MCU through two-wire serial interfaces SCL and SDA. Capacitors C1
+and C2 are arranged near the power pins of CH453 to decouple the power supply and reduce the interference
+caused by driving high current.
+
+CH453 can drive 16 common cathode LED Nixie tubes dynamically. After the pins on the same segments of
+all LED Nixie tubes are connected in parallel (segments A-G and decimal point), they are connected with the
+segment drive pins SEG0-SEG7 of CH453 through a series current limiting resistors R1~R8. The common
+cathodes of the LED Nixie tubes are driven by the pins DIG0~DIG15 of CH453 respectively. The resistors
+R1~R8 connected with the segment pins in series are used to limit and balance the segment drive current. At
+the supply voltage of 5V, the series resistance 270Ω often corresponds to the segment current 10mA. Since
+CH453 can internally limit the segment drive current, R1~R8 resistors can be eliminated.
+
+If a common anode LED Nixie tube is required to be driven, refer to the methods in the data manual for
+CH452 chip.
+CH453 Datasheet                                      9                                        http://wch.cn
+
+
+
+
+8.2. Anti-interference
+As CH453 drives LED Nixie tube or LED has high current, high glitch voltage will be generated on the
+power supply. Therefore, if the PCB wiring of the power line or ground wire is not reasonable, it may affect
+the stability of the MCU or CH453. It is recommended to use a thicker power line and ground wire, and
+connect the power supply decoupling capacitor in parallel between the positive and negative power supplies
+close to CH453.
+
+For the application environment with strong interference, the MCU can refresh CH453 every a few seconds,
+including reloading the data register of each LED Nixie tube and restarting the display.
+
+In addition, if CH453 is driven remotely by the I/O pin of the standard MCS-51 MCU, the pull-up capacity
+of the I/O pin for MCS-51 MCU should be strengthened, so as to maintain a good digital signal waveform
+during remote transmission. The resistance of the pull-up resistor can be 1KΩ to 10KΩ, and no pull-up
+resistor is required at short range.
+
+8.3. MCU Interface Program
+The website provides part of C program language and ASM assembly interface program for the MCU.
+

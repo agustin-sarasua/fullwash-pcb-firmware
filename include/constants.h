@@ -25,6 +25,20 @@ const unsigned long TOKEN_TIME = 120000;         // 2 minutes per token
 const unsigned long GRACE_PERIOD_TIMEOUT = 30000; // 30 seconds
 // Base inactivity timeout (used as minimum, actual timeout is calculated dynamically based on tokens)
 const unsigned long BASE_INACTIVE_TIMEOUT = 30000; // 30 seconds base
+// Session timeout in paused/idle state: 30s grace + 2min (1 token) = 150 seconds total
+const unsigned long SESSION_END_TIMEOUT = 150000; // 2 minutes 30 seconds
+
+// Coin Detection Constants
+// Startup delay before coin detection is active (prevents false triggers at boot)
+const unsigned long COIN_STARTUP_DELAY = 3000;    // 3 seconds
+// Minimum time between valid coin insertions
+const unsigned long COIN_COOLDOWN_MS = 2000;      // 2 seconds
+// Number of consecutive stable reads required to validate coin state change
+const int COIN_STABLE_READS_REQUIRED = 3;
+// Interval between coin signal polling reads
+const unsigned long COIN_POLL_INTERVAL_MS = 20;   // 20ms polling interval
+// Minimum pulse width for a valid coin signal (filters out noise spikes)
+const unsigned long COIN_MIN_PULSE_WIDTH_MS = 30; // 30ms minimum pulse
 
 // MQTT Topics
 extern String MACHINE_ID;  // Changed to String to allow dynamic loading

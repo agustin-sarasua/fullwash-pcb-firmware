@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include <Preferences.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include "mqtt_lte_client.h"
@@ -67,46 +68,106 @@ SemaphoreHandle_t xI2CMutex = NULL;  // For Wire1 (LCD)
 QueueHandle_t xMqttPublishQueue = NULL;
 
 /**
- * FreeRTOS Task: Coin Detector (Simplified Working Version)
+ * FreeRTOS Task: Coin Detector (Improved Version with Mutex Protection)
  * 
  * This task monitors the coin acceptor signal pin (COIN_SIG) for state changes.
- * Uses a simple state machine to detect HIGH->LOW transitions (coin insertion).
+ * Uses mutex-protected polling with multi-read validation to prevent false triggers.
  * 
  * Detection Logic:
- * - Polls INT_PIN every 50ms
- * - When INT_PIN is LOW, reads PORT0 register
- * - Detects HIGH->LOW transition on COIN_SIG bit
+ * - Polls PORT0 register every COIN_POLL_INTERVAL_MS with mutex protection
+ * - Requires COIN_STABLE_READS_REQUIRED consecutive reads showing same state change
+ * - Detects HIGH->LOW transitions on COIN_SIG bit (coin insertion)
  * - Sets coin signal flag for controller to process
+ * 
+ * Fixes for false coin detection:
+ * - Removed INT_PIN dependency (was triggering on button presses too)
+ * - Added mutex protection for thread-safe IO expander access
+ * - Added multi-read validation to filter electrical noise
  */
 void TaskCoinDetector(void *pvParameters) {
-  const TickType_t xDelay = 50 / portTICK_PERIOD_MS; // 50ms转换为FreeRTOS ticks
-  uint8_t coins_sig_state = (1 << COIN_SIG);
-  uint8_t _portVal = 0;
+  const TickType_t xDelay = COIN_POLL_INTERVAL_MS / portTICK_PERIOD_MS;
+  
+  // State tracking variables (minimized to reduce stack usage)
+  uint8_t lastCoinBit = (1 << COIN_SIG);   // Start assuming HIGH (no coin)
+  uint8_t stableState = (1 << COIN_SIG);   // Confirmed stable state
+  uint8_t stableCount = 0;                  // Consecutive reads with same state
+  unsigned long lastTransition = 0;         // For cooldown validation
+  unsigned long startTime = millis();       // Track startup for delay
+  bool started = false;
+  
+  // Wait for IO expander to be initialized
+  vTaskDelay(1000 / portTICK_PERIOD_MS);
+  
+  LOG_INFO("Coin detector task started");
+  
   for(;;) {
-    // 任务A的工作代码
-    if (digitalRead(INT_PIN) == LOW)
-    {
-        _portVal = ioExpander.readRegister(INPUT_PORT0);
-        if(coins_sig_state != (_portVal & (1 << COIN_SIG)))
-        {
-            // 1--->0 硬币型号产生
-            if(coins_sig_state == (1 << COIN_SIG))
-            {
-                ioExpander.setCoinSignal(1);
-                ioExpander._intCnt++;
-                LOG_INFO("COIN DETECTED! Port 0 Value: 0x%02X, coin count: %d", _portVal, ioExpander._intCnt);
-                
-                // Additional debug info
-                bool coin_bit = (_portVal & (1 << COIN_SIG)) ? 1 : 0;
-                LOG_INFO("COIN_SIG (bit %d) = %d", COIN_SIG, coin_bit);
-                LOG_INFO("Coin transition: HIGH->LOW (coin inserted)");
-            }
-
-            coins_sig_state = (_portVal & (1 << COIN_SIG));
+    unsigned long now = millis();
+    
+    // Skip coin detection during startup period to prevent false triggers
+    if (!started) {
+      if (now - startTime >= COIN_STARTUP_DELAY) {
+        started = true;
+        LOG_INFO("Coin detector active");
+        
+        // Read initial state with mutex protection
+        if (xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+          uint8_t pv = ioExpander.readRegister(INPUT_PORT0);
+          lastCoinBit = pv & (1 << COIN_SIG);
+          stableState = lastCoinBit;
+          xSemaphoreGive(xIoExpanderMutex);
         }
+      }
+      vTaskDelay(xDelay);
+      continue;
     }
     
-    vTaskDelay(xDelay); // 延迟50ms
+    // Read port value with mutex protection
+    uint8_t portVal = 0;
+    if (xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+      portVal = ioExpander.readRegister(INPUT_PORT0);
+      xSemaphoreGive(xIoExpanderMutex);
+    } else {
+      vTaskDelay(xDelay);
+      continue;
+    }
+    
+    // Extract coin signal bit
+    uint8_t coinBit = portVal & (1 << COIN_SIG);
+    
+    // Check if state matches our expected stable state
+    if (coinBit == stableState) {
+      stableCount = 0;  // State is stable, reset counter
+    } else {
+      // State has changed from stable state
+      if (coinBit == lastCoinBit) {
+        stableCount++;  // Same as last read, increment stable counter
+        
+        // Check if we have enough stable reads to confirm state change
+        if (stableCount >= COIN_STABLE_READS_REQUIRED) {
+          uint8_t oldState = stableState;
+          stableState = coinBit;
+          stableCount = 0;
+          
+          // Check for HIGH->LOW transition (coin insertion)
+          if (oldState != 0 && coinBit == 0) {
+            unsigned long elapsed = now - lastTransition;
+            
+            // Validate this is a real coin (not noise) by checking cooldown
+            if (lastTransition == 0 || elapsed > COIN_COOLDOWN_MS) {
+              ioExpander.setCoinSignal(1);
+              ioExpander._intCnt++;
+              lastTransition = now;
+              LOG_INFO("COIN DETECTED #%d", ioExpander._intCnt);
+            }
+          }
+        }
+      } else {
+        stableCount = 1;  // State changed from last read - reset counter
+      }
+      lastCoinBit = coinBit;
+    }
+    
+    vTaskDelay(xDelay);
   }
 }
 
@@ -893,10 +954,126 @@ void mqtt_callback(char *topic, byte *payload, unsigned int len) {
 }
 */ // END DISABLED - BLE ONLY MODE
 
+// =============================================================================
+// DOUBLE-TAP RESET DETECTION FOR FACTORY RESET
+// =============================================================================
+// Press the reset button twice within 3 seconds to trigger a factory reset.
+// This will reset the machine_id to "99" (installation mode).
+// =============================================================================
+
+#define DOUBLE_RESET_NAMESPACE "dblreset"
+#define DOUBLE_RESET_FLAG_KEY "flag"
+#define DOUBLE_RESET_WINDOW_MS 3000  // 3 seconds window for double-tap detection
+
+/**
+ * Perform factory reset - resets machine to installation mode (machine_id = 99)
+ * This clears all configuration and reboots the device.
+ */
+void performFactoryReset() {
+  Serial.println("\n");
+  Serial.println("==============================================");
+  Serial.println("  FACTORY RESET TRIGGERED (DOUBLE-TAP RESET)");
+  Serial.println("==============================================");
+  Serial.println("Resetting machine to installation mode...");
+  
+  // Clear the double-reset flag first
+  Preferences resetPrefs;
+  resetPrefs.begin(DOUBLE_RESET_NAMESPACE, false);
+  resetPrefs.putBool(DOUBLE_RESET_FLAG_KEY, false);
+  resetPrefs.end();
+  
+  // Reset configuration to defaults
+  Preferences configPrefs;
+  configPrefs.begin(PREFS_NAMESPACE, false);
+  configPrefs.clear();  // Clear all keys in the namespace
+  configPrefs.putString(PREFS_MACHINE_NUM, "99");
+  configPrefs.putString(PREFS_ENVIRONMENT, "prod");
+  configPrefs.putString(PREFS_BLE_PASSWORD, DEFAULT_MASTER_PASSWORD);
+  configPrefs.end();
+  
+  Serial.println("Configuration reset complete!");
+  Serial.println("Machine ID set to: 99 (installation mode)");
+  Serial.println("Environment set to: prod");
+  Serial.println("BLE password reset to default");
+  Serial.println("==============================================");
+  Serial.println("Rebooting in 2 seconds...");
+  Serial.println("==============================================\n");
+  
+  // Blink LED rapidly to indicate factory reset
+  pinMode(LED_PIN, OUTPUT);
+  for (int i = 0; i < 20; i++) {
+    digitalWrite(LED_PIN, i % 2);
+    delay(100);
+  }
+  
+  // Reboot the device
+  ESP.restart();
+}
+
+/**
+ * Check for double-tap reset and handle the reset window.
+ * Must be called at the very beginning of setup().
+ * 
+ * @return true if normal boot should continue, false if factory reset was triggered
+ */
+bool checkDoubleResetAndWait() {
+  Preferences resetPrefs;
+  resetPrefs.begin(DOUBLE_RESET_NAMESPACE, false);
+  
+  // Check if the double-reset flag is already set (from previous boot)
+  bool flagWasSet = resetPrefs.getBool(DOUBLE_RESET_FLAG_KEY, false);
+  
+  if (flagWasSet) {
+    // Double-reset detected! This is the second reset within the window
+    Serial.println("\n*** DOUBLE-RESET DETECTED! ***");
+    resetPrefs.end();
+    performFactoryReset();
+    return false;  // Will never reach here due to ESP.restart()
+  }
+  
+  // First reset - set the flag
+  resetPrefs.putBool(DOUBLE_RESET_FLAG_KEY, true);
+  resetPrefs.end();
+  
+  // Visual feedback: fast blink during reset window
+  pinMode(LED_PIN, OUTPUT);
+  Serial.println("Double-reset window active (press RESET again within 3s for factory reset)...");
+  
+  // Wait for the reset window with LED blinking
+  unsigned long startTime = millis();
+  bool ledState = true;
+  while (millis() - startTime < DOUBLE_RESET_WINDOW_MS) {
+    digitalWrite(LED_PIN, ledState);
+    ledState = !ledState;
+    delay(150);  // Fast blink to indicate reset window is active
+  }
+  
+  // Window passed without second reset - clear the flag
+  resetPrefs.begin(DOUBLE_RESET_NAMESPACE, false);
+  resetPrefs.putBool(DOUBLE_RESET_FLAG_KEY, false);
+  resetPrefs.end();
+  
+  // Turn LED back on to show normal boot
+  digitalWrite(LED_PIN, HIGH);
+  Serial.println("Double-reset window closed. Continuing normal boot...");
+  
+  return true;  // Continue with normal setup
+}
+
 void setup() {
-  // Initialize Logger with default log level
+  // Initialize serial FIRST for debug output during double-reset detection
+  Serial.begin(115200);
+  delay(100);  // Brief delay for serial to stabilize
+  
+  // =========================================================================
+  // DOUBLE-TAP RESET DETECTION - Must be FIRST thing in setup!
+  // Press reset twice within 3 seconds to trigger factory reset
+  // =========================================================================
+  checkDoubleResetAndWait();
+  
+  // Initialize Logger with default log level (after double-reset check)
   Logger::init(DEFAULT_LOG_LEVEL, 115200);
-  delay(1000); // Give time for serial to initialize
+  delay(500); // Brief delay after logger init
   
   LOG_INFO("Starting fullwash-pcb-firmware...");
   
@@ -1053,7 +1230,7 @@ void setup() {
     xTaskCreate(
         TaskCoinDetector,           // Task function
         "CoinDetection",            // Task name
-        2048,                       // Stack size
+        4096,                       // Stack size (increased from 2048 to prevent overflow)
         NULL,                       // Task parameters
         1,                          // Priority
         &TaskCoinDetectorHandle     // Task handle
@@ -1072,16 +1249,16 @@ void setup() {
     LOG_INFO("=== READY FOR COIN DETECTION ===");
     LOG_INFO("Insert coins to test detection...");
   }
-  // Initialize Wire1 for the LCD display
-  LOG_INFO("Initializing Wire1 (I2C) for LCD...");
-  Wire1.begin(LCD_SDA_PIN, LCD_SCL_PIN);
+  // Initialize Wire1 for the 7-segment display
+  LOG_INFO("Initializing Wire1 (I2C) for 7-segment display...");
+  Wire1.begin(DISPLAY_SDA_PIN, DISPLAY_SCL_PIN);
   Wire1.setClock(100000); // Set I2C clock to 100kHz (standard mode)
   
   // Initialize the controller
   controller = new CarWashController(mqttClient);
   
-  // Initialize the display with correct LCD pins
-  display = new DisplayManager(LCD_ADDR, LCD_COLS, LCD_ROWS, LCD_SDA_PIN, LCD_SCL_PIN);
+  // Initialize the 7-segment display
+  display = new DisplayManager(DISPLAY_SDA_PIN, DISPLAY_SCL_PIN);
   // Set I2C mutex for display manager
   display->setI2CMutex(xI2CMutex);
   

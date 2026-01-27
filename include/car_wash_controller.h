@@ -69,11 +69,7 @@ private:
     static const unsigned long DEBOUNCE_DELAY = 100;
     static const unsigned long PAUSE_RESUME_COOLDOWN = 500; // Minimum time between pause/resume (500ms)
     static const unsigned long FUNCTION_SWITCH_COOLDOWN = 500; // Minimum time after function switch before same button can pause (500ms)
-    static const unsigned long COIN_DEBOUNCE_DELAY = 50;
-    static const unsigned long COIN_PROCESS_COOLDOWN = 2000; // 1000ms (1 second) between accepted coins
-    static const unsigned long COIN_EDGE_WINDOW = 500;      // Maximum window for detecting multiple edges as one coin
-    static const int COIN_MIN_EDGES = 2;                    // Minimum number of edges to detect a coin
-    static const unsigned long COUNTER_ACTIVE_DURATION = 120; // How long counter signal is typically active
+    // Note: Coin detection constants moved to constants.h (COIN_STARTUP_DELAY, COIN_COOLDOWN_MS, etc.)
     unsigned long lastDebounceTime[NUM_BUTTONS + 1];
     int lastButtonState[NUM_BUTTONS + 1];
     unsigned long lastCoinDebounceTime;

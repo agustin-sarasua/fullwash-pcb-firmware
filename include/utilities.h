@@ -64,14 +64,14 @@
 
 #define GSM_PIN          "3846"
 
-// LCD Configuration
-#define LCD_ADDR         0x27 // Default I2C address for most PCF8574 LCD adapters
-#define LCD_COLS         20   // 20 characters per line
-#define LCD_ROWS         4    // 4 lines display
-#define LCD_SDA_PIN      21   // Separate I2C pins for LCD
-#define LCD_SCL_PIN      22   // Separate I2C pins for LCD
+// 7-Segment Display Configuration (CH453S driver)
+// The CH453S uses a command-based protocol; base address is 0x40
+// Connected to Wire1 (same bus as old LCD was)
+#define CH453S_ADDR      0x40 // CH453S base I2C address
+#define DISPLAY_SDA_PIN  21   // I2C SDA pin for display
+#define DISPLAY_SCL_PIN  22   // I2C SCL pin for display
 
 // RTC Configuration
-#define RTC_DS1340_ADDR  0x68 // DS1340Z RTC I2C address (shared bus with LCD)
+#define RTC_DS1340_ADDR  0x68 // DS1340Z RTC I2C address (shared bus with display)
 
 #endif // UTILITIES_H
