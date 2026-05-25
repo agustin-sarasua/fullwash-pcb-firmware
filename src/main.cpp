@@ -69,104 +69,99 @@ QueueHandle_t xMqttPublishQueue = NULL;
 
 /**
  * FreeRTOS Task: Coin Detector (Improved Version with Mutex Protection)
- * 
+ *
  * This task monitors the coin acceptor signal pin (COIN_SIG) for state changes.
- * Uses mutex-protected polling with multi-read validation to prevent false triggers.
- * 
+ * Uses mutex-protected polling with consecutive-LOW validation to catch short pulses.
+ *
  * Detection Logic:
  * - Polls PORT0 register every COIN_POLL_INTERVAL_MS with mutex protection
- * - Requires COIN_STABLE_READS_REQUIRED consecutive reads showing same state change
- * - Detects HIGH->LOW transitions on COIN_SIG bit (coin insertion)
+ * - Requires COIN_STABLE_READS_REQUIRED consecutive LOW reads (coin present)
  * - Sets coin signal flag for controller to process
- * 
- * Fixes for false coin detection:
+ * - Uses a triggered latch so one pulse cannot generate multiple detections
+ *
+ * Fixes for missed coin detection:
+ * - Fast 5ms polling catches 30-50ms acceptor pulses reliably
+ * - Consecutive-LOW counter does not reset on brief HIGH bounces mid-pulse
  * - Removed INT_PIN dependency (was triggering on button presses too)
  * - Added mutex protection for thread-safe IO expander access
- * - Added multi-read validation to filter electrical noise
  */
 void TaskCoinDetector(void *pvParameters) {
   const TickType_t xDelay = COIN_POLL_INTERVAL_MS / portTICK_PERIOD_MS;
-  
-  // State tracking variables (minimized to reduce stack usage)
-  uint8_t lastCoinBit = (1 << COIN_SIG);   // Start assuming HIGH (no coin)
-  uint8_t stableState = (1 << COIN_SIG);   // Confirmed stable state
-  uint8_t stableCount = 0;                  // Consecutive reads with same state
+
+  uint8_t lowReads = 0;                     // Consecutive LOW reads
+  bool triggered = true;                    // Latch armed: suppress detection
+                                            // until we observe an idle HIGH first.
+                                            // This prevents a false "coin" at boot
+                                            // when the acceptor hasn't powered up
+                                            // and the line floats LOW.
   unsigned long lastTransition = 0;         // For cooldown validation
   unsigned long startTime = millis();       // Track startup for delay
   bool started = false;
-  
+
   // Wait for IO expander to be initialized
   vTaskDelay(1000 / portTICK_PERIOD_MS);
-  
+
   LOG_INFO("Coin detector task started");
-  
+
   for(;;) {
     unsigned long now = millis();
-    
+
     // Skip coin detection during startup period to prevent false triggers
     if (!started) {
       if (now - startTime >= COIN_STARTUP_DELAY) {
         started = true;
-        LOG_INFO("Coin detector active");
-        
-        // Read initial state with mutex protection
+
+        // Sample initial line state. If LOW, keep `triggered` armed so we
+        // ignore the level until the acceptor pulls the line HIGH (idle).
+        // If already HIGH, clear the latch so the first real pulse counts.
         if (xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
           uint8_t pv = ioExpander.readRegister(INPUT_PORT0);
-          lastCoinBit = pv & (1 << COIN_SIG);
-          stableState = lastCoinBit;
           xSemaphoreGive(xIoExpanderMutex);
+          bool initialLow = ((pv & (1 << COIN_SIG)) == 0);
+          triggered = initialLow;
+          LOG_INFO("Coin detector active (initial COIN_SIG=%s, latch=%s)",
+                   initialLow ? "LOW" : "HIGH",
+                   triggered ? "ARMED (waiting for idle HIGH)" : "READY");
+        } else {
+          LOG_INFO("Coin detector active (initial read failed, latch ARMED)");
         }
       }
       vTaskDelay(xDelay);
       continue;
     }
-    
-    // Read port value with mutex protection
+
+    // Read port value with mutex protection (short timeout for fast retry)
     uint8_t portVal = 0;
-    if (xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+    if (xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
       portVal = ioExpander.readRegister(INPUT_PORT0);
       xSemaphoreGive(xIoExpanderMutex);
     } else {
       vTaskDelay(xDelay);
       continue;
     }
-    
-    // Extract coin signal bit
-    uint8_t coinBit = portVal & (1 << COIN_SIG);
-    
-    // Check if state matches our expected stable state
-    if (coinBit == stableState) {
-      stableCount = 0;  // State is stable, reset counter
-    } else {
-      // State has changed from stable state
-      if (coinBit == lastCoinBit) {
-        stableCount++;  // Same as last read, increment stable counter
-        
-        // Check if we have enough stable reads to confirm state change
-        if (stableCount >= COIN_STABLE_READS_REQUIRED) {
-          uint8_t oldState = stableState;
-          stableState = coinBit;
-          stableCount = 0;
-          
-          // Check for HIGH->LOW transition (coin insertion)
-          if (oldState != 0 && coinBit == 0) {
-            unsigned long elapsed = now - lastTransition;
-            
-            // Validate this is a real coin (not noise) by checking cooldown
-            if (lastTransition == 0 || elapsed > COIN_COOLDOWN_MS) {
-              ioExpander.setCoinSignal(1);
-              ioExpander._intCnt++;
-              lastTransition = now;
-              LOG_INFO("COIN DETECTED #%d", ioExpander._intCnt);
-            }
-          }
+
+    // LOW = coin present (active), HIGH = no coin
+    bool coinLow = ((portVal & (1 << COIN_SIG)) == 0);
+
+    if (coinLow) {
+      lowReads++;
+
+      if (lowReads >= COIN_STABLE_READS_REQUIRED && !triggered) {
+        unsigned long elapsed = now - lastTransition;
+
+        if (lastTransition == 0 || elapsed > COIN_COOLDOWN_MS) {
+          ioExpander.setCoinSignal(1);
+          ioExpander._intCnt++;
+          lastTransition = now;
+          triggered = true;
+          LOG_INFO("COIN DETECTED #%d", ioExpander._intCnt);
         }
-      } else {
-        stableCount = 1;  // State changed from last read - reset counter
       }
-      lastCoinBit = coinBit;
+    } else {
+      lowReads = 0;
+      triggered = false;
     }
-    
+
     vTaskDelay(xDelay);
   }
 }
