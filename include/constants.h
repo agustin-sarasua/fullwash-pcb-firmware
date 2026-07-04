@@ -29,10 +29,10 @@ const unsigned long BASE_INACTIVE_TIMEOUT = 30000; // 30 seconds base
 const unsigned long SESSION_END_TIMEOUT = 150000; // 2 minutes 30 seconds
 
 // Coin Detection Constants
-// Hardware contract (see docs/hardware-schematic-description.md): COIN_SIG is
-// ACTIVE-HIGH. R64 (10k) pulls the line LOW at idle; the acceptor switch
-// connects it to 3.3V while a coin passes, producing one HIGH pulse of a few
-// tens of ms (with contact bounce on both edges).
+// Hardware contract (verified with the raw edge logger on real hardware,
+// 2026-07-04): COIN_SIG is ACTIVE-HIGH. R64 (10k) pulls the line LOW at
+// idle; the acceptor drives it to 3.3V while a coin passes, producing one
+// HIGH pulse of ~80-130 ms.
 // Startup delay before coin detection is active (prevents false triggers at boot)
 const unsigned long COIN_STARTUP_DELAY = 3000;    // 3 seconds
 // After the startup delay, the line must be continuously idle (LOW) this long

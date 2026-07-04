@@ -51,8 +51,8 @@
 #define BUTTON6          0   // BT6 is on P00
 
 // Coin acceptor pin on TCA9535 (Port 0)
-// ACTIVE-HIGH: R64 (10k) pulls the line LOW at idle; the acceptor switch
-// feeds 3.3V while a coin passes (see docs/hardware-schematic-description.md)
+// ACTIVE-HIGH (verified on real hardware 2026-07-04): R64 (10k) pulls the
+// line LOW at idle; the acceptor drives it to 3.3V while a coin passes
 #define COIN_SIG         6   // P06 - Coin signal
 
 // Relay pins on TCA9535 (Port 1)

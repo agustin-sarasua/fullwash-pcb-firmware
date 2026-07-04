@@ -25,9 +25,10 @@ CarWashController::CarWashController(MqttLteClient& client)
       tokensConsumedCount(0) {
           
     // Coin detection (polarity, debouncing, startup arming, cooldown) is
-    // owned entirely by TaskCoinDetector in main.cpp. COIN_SIG is ACTIVE-HIGH:
-    // idle LOW (R64 pull-down), 3.3V while a coin passes. Here we only log
-    // the initial line state for field diagnostics.
+    // owned entirely by TaskCoinDetector in main.cpp. COIN_SIG is ACTIVE-HIGH
+    // (verified on real hardware 2026-07-04): idle LOW (R64 pull-down), 3.3V
+    // while a coin passes. Here we only log the initial line state for field
+    // diagnostics.
     extern IoExpander ioExpander;
     uint8_t rawPortValue0 = 0;
     bool coinReadOk = false;

@@ -70,10 +70,9 @@ QueueHandle_t xMqttPublishQueue = NULL;
 /**
  * FreeRTOS Task: Coin Detector
  *
- * Hardware contract (see docs/hardware-schematic-description.md):
- * COIN_SIG (TCA9535 P06) is ACTIVE-HIGH. R64 (10k) pulls the line LOW at
- * idle; the acceptor switch feeds 3.3V while a coin passes, producing one
- * HIGH pulse of a few tens of ms with contact bounce on both edges.
+ * Hardware contract (verified with the raw edge logger on real hardware,
+ * 2026-07-04): COIN_SIG (TCA9535 P06) is ACTIVE-HIGH. The line idles LOW
+ * (R64 pull-down); a coin produces one HIGH pulse of ~80-130 ms.
  *
  * Detection state machine (polls PORT0 every COIN_POLL_INTERVAL_MS):
  * - ARMING:   after COIN_STARTUP_DELAY, the line must be continuously LOW
@@ -96,9 +95,15 @@ void TaskCoinDetector(void *pvParameters) {
   DetectState state = ARMING;
 
   unsigned long quietSince = 0;        // Start of continuous-LOW window (ARMING/REARM), 0 = not started
-  unsigned long pulseStart = 0;        // Rising edge timestamp
+  unsigned long pulseStart = 0;        // Rising edge timestamp (pulse start)
   unsigned long lastCoinTime = 0;      // End of last accepted pulse, for cooldown
   unsigned long skippedSamples = 0;    // Mutex timeouts + I2C errors, for field diagnostics
+
+  // TEMPORARY DIAGNOSTIC: raw edge logger to establish the true polarity and
+  // pulse shape of COIN_SIG on real hardware. Remove once confirmed.
+  bool rawInit = false;
+  bool rawLastHigh = false;
+  unsigned long rawLastEdge = 0;
 
   // Wait for IO expander to be initialized
   vTaskDelay(1000 / portTICK_PERIOD_MS);
@@ -130,11 +135,27 @@ void TaskCoinDetector(void *pvParameters) {
       continue;
     }
 
-    bool coinHigh = (portVal & (1 << COIN_SIG)) != 0;
+    bool lineHigh = (portVal & (1 << COIN_SIG)) != 0;
+
+    // TEMPORARY DIAGNOSTIC: log every raw level change, unfiltered
+    if (!rawInit) {
+      rawInit = true;
+      rawLastHigh = lineHigh;
+      rawLastEdge = now;
+      LOG_INFO("COIN RAW: initial line level %s (Port0=0x%02X)", lineHigh ? "HIGH" : "LOW", portVal);
+    } else if (lineHigh != rawLastHigh) {
+      LOG_INFO("COIN RAW: %s -> %s after %lu ms", rawLastHigh ? "HIGH" : "LOW",
+               lineHigh ? "HIGH" : "LOW", now - rawLastEdge);
+      rawLastHigh = lineHigh;
+      rawLastEdge = now;
+    }
+
+    // Active-HIGH: line idles LOW (R64 pull-down), coin drives it HIGH
+    bool coinActive = lineHigh;
 
     switch (state) {
       case ARMING:
-        if (coinHigh) {
+        if (coinActive) {
           quietSince = 0;  // Line not idle - restart the quiet window
         } else if (quietSince == 0) {
           quietSince = now;
@@ -145,14 +166,14 @@ void TaskCoinDetector(void *pvParameters) {
         break;
 
       case IDLE:
-        if (coinHigh) {
+        if (coinActive) {
           pulseStart = now;
           state = IN_PULSE;
         }
         break;
 
       case IN_PULSE:
-        if (coinHigh) {
+        if (coinActive) {
           if (now - pulseStart > COIN_MAX_PULSE_MS) {
             LOG_WARNING("COIN: signal HIGH for over %lu ms - stuck switch or wiring fault, ignoring",
                         COIN_MAX_PULSE_MS);
@@ -176,7 +197,7 @@ void TaskCoinDetector(void *pvParameters) {
         break;
 
       case REARM:
-        if (coinHigh) {
+        if (coinActive) {
           quietSince = now;  // Break bounce - keep waiting for the line to settle
         } else if (now - quietSince >= COIN_IDLE_REARM_MS) {
           state = IDLE;
@@ -184,7 +205,7 @@ void TaskCoinDetector(void *pvParameters) {
         break;
 
       case FAULT:
-        if (!coinHigh) {
+        if (!coinActive) {
           quietSince = now;
           state = REARM;
           LOG_INFO("COIN: signal released after fault, re-arming");
