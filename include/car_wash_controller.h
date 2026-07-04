@@ -72,14 +72,11 @@ private:
     // Note: Coin detection constants moved to constants.h (COIN_STARTUP_DELAY, COIN_COOLDOWN_MS, etc.)
     unsigned long lastDebounceTime[NUM_BUTTONS + 1];
     int lastButtonState[NUM_BUTTONS + 1];
-    unsigned long lastCoinDebounceTime;
-    unsigned long lastCoinProcessedTime; // Track when a coin was last successfully processed
-    int lastCoinState;
+    unsigned long lastCoinProcessedTime; // Track when a coin was last successfully processed (informational)
 
     unsigned long lastStatePublishTime;
     const unsigned long STATE_PUBLISH_INTERVAL = 10000;
 
-    void diagnosticCoinSignal();
     void processCoinInsertion(unsigned long currentTime);
     void autoConsumeToken(); // Automatically consume a token and transition to PAUSED
     void consumeNextToken(); // Consume next token when current one expires

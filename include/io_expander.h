@@ -4,7 +4,6 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include "logger.h"
-#include <functional>
 
 class IoExpander {
 public:
@@ -16,9 +15,14 @@ public:
     
     // Write to register
     void writeRegister(uint8_t reg, uint8_t value);
-    
-    // Read from register
+
+    // Read from register. Returns 0 on I2C error - callers that must
+    // distinguish an error from a genuine 0x00 should use the overload below.
     uint8_t readRegister(uint8_t reg);
+
+    // Read from register with explicit error reporting. Returns false (and
+    // leaves value untouched) on I2C error, so callers can discard the sample.
+    bool readRegister(uint8_t reg, uint8_t& value);
     
     // Set relay state
     void setRelay(uint8_t relay, bool state);
@@ -36,15 +40,6 @@ public:
     // Toggle relay and return new state
     bool toggleRelay(uint8_t relay);
     
-    // Enable interrupt handler for specific port and pins
-    void enableInterrupt(uint8_t port, uint8_t pinMask);
-    
-    // Set callback function for interrupt
-    void setInterruptCallback(std::function<void(uint8_t)> callback);
-    
-    // Handle interrupt (called from ISR or main loop)
-    void handleInterrupt();
-    
     // Check if a coin signal has been detected
     bool isCoinSignalDetected();
     
@@ -60,7 +55,7 @@ public:
     void setButtonFlag(uint8_t buttonId, bool state);
     void clearButtonFlag();
     
-    // Public interrupt counter for debugging
+    // Public coin counter for debugging
     unsigned int _intCnt;
     uint8_t _portVal;
 
@@ -69,10 +64,8 @@ private:
     int _sdaPin;
     int _sclPin;
     int _intPin;
-    
+
     bool _initialized;
-    std::function<void(uint8_t)> _interruptCallback;
-    unsigned long _lastInterruptTime;
     volatile bool _coinSignalDetected;
     
     // Button detection variables

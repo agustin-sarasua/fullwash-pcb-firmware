@@ -17,57 +17,33 @@ CarWashController::CarWashController(MqttLteClient& client)
       lastStatePublishTime(0),
       tokenTimeElapsed(0),
       pauseStartTime(0),
-      lastCoinDebounceTime(0),
       lastCoinProcessedTime(0),
-      lastCoinState(HIGH),
       lastPauseResumeTime(0),
       lastFunctionSwitchTime(0),
       gracePeriodStartTime(0),
       gracePeriodActive(false),
       tokensConsumedCount(0) {
           
-    // Force a read of the coin signal pin at startup to initialize correctly
+    // Coin detection (polarity, debouncing, startup arming, cooldown) is
+    // owned entirely by TaskCoinDetector in main.cpp. COIN_SIG is ACTIVE-HIGH:
+    // idle LOW (R64 pull-down), 3.3V while a coin passes. Here we only log
+    // the initial line state for field diagnostics.
     extern IoExpander ioExpander;
     uint8_t rawPortValue0 = 0;
+    bool coinReadOk = false;
     if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
+        coinReadOk = ioExpander.readRegister(INPUT_PORT0, rawPortValue0);
         xSemaphoreGive(xIoExpanderMutex);
     } else {
         LOG_ERROR("COIN INIT: Failed to acquire mutex for initial coin state read!");
     }
-    
-    // EXTENSIVE DEBUG: Log the raw values in different formats
-    LOG_INFO("=== COIN DETECTOR INITIALIZATION ===");
-    LOG_INFO("COIN INIT: Raw port value: 0x%02X | Binary: %d%d%d%d%d%d%d%d", 
-           rawPortValue0,
-           (rawPortValue0 & 0x80) ? 1 : 0, (rawPortValue0 & 0x40) ? 1 : 0,
-           (rawPortValue0 & 0x20) ? 1 : 0, (rawPortValue0 & 0x10) ? 1 : 0,
-           (rawPortValue0 & 0x08) ? 1 : 0, (rawPortValue0 & 0x04) ? 1 : 0,
-           (rawPortValue0 & 0x02) ? 1 : 0, (rawPortValue0 & 0x01) ? 1 : 0);
-    LOG_INFO("COIN INIT: COIN_SIG (bit %d) raw bit value = %d", COIN_SIG, (rawPortValue0 & (1 << COIN_SIG)) ? 1 : 0);
-    
-    // Initialize coin signal state correctly
-    // When coin is present: Pin is LOW (bit=0) = ACTIVE
-    // When no coin: Pin is HIGH (bit=1) = INACTIVE
-    bool initialCoinSignal = ((rawPortValue0 & (1 << COIN_SIG)) == 0); // LOW = coin present = ACTIVE
-    // CRITICAL FIX: lastCoinState must match the actual initial signal state
-    // If signal is ACTIVE (LOW), lastCoinState should be LOW
-    // If signal is INACTIVE (HIGH), lastCoinState should be HIGH
-    lastCoinState = initialCoinSignal ? LOW : HIGH; // Store actual state to prevent false edge detection
-    
-    LOG_INFO("COIN INIT: initialCoinSignal (active when LOW) = %s", initialCoinSignal ? "ACTIVE (LOW/0)" : "INACTIVE (HIGH/1)");
-    LOG_INFO("COIN INIT: lastCoinState initialized to = %s (for edge detection)", lastCoinState == LOW ? "LOW" : "HIGH");
-    LOG_INFO("COIN INIT: COIN_COOLDOWN_MS = %lu ms", COIN_COOLDOWN_MS);
-    LOG_INFO("COIN INIT: COIN_STARTUP_DELAY = %lu ms", COIN_STARTUP_DELAY);
-    LOG_INFO("COIN INIT: COIN_STABLE_READS_REQUIRED = %d", COIN_STABLE_READS_REQUIRED);
-    
-    // IMPORTANT: Initialize these static variables to prevent false triggers at startup
-    // We'll skip any coin signals that happen in the first few seconds after boot
-    unsigned long initTime = millis();
-    lastCoinProcessedTime = initTime;
-    lastCoinDebounceTime = initTime;
-    LOG_INFO("COIN INIT: Timers initialized at %lu ms (will ignore coins for first %lu ms)", initTime, COIN_STARTUP_DELAY);
-    LOG_INFO("=== END COIN DETECTOR INITIALIZATION ===");
+    if (coinReadOk) {
+        LOG_INFO("COIN INIT: Port0=0x%02X, COIN_SIG bit=%d (0 = idle, 1 = coin/noise present)",
+                 rawPortValue0, (rawPortValue0 & (1 << COIN_SIG)) ? 1 : 0);
+    } else {
+        LOG_ERROR("COIN INIT: Initial port read failed");
+    }
+    lastCoinProcessedTime = millis();
 
     // Initialize LED pins - using built-in LED
     pinMode(LED_PIN_INIT, OUTPUT);
@@ -970,75 +946,29 @@ void CarWashController::tokenExpired() {
 }
 
 void CarWashController::handleCoinAcceptor() {
-    // Get reference to the IO expander
+    // TaskCoinDetector owns detection: polarity, pulse-width qualification,
+    // startup arming and the cooldown between coins. Here we only consume the
+    // validated flag and run the business logic.
     extern IoExpander ioExpander;
 
-    // Get current time for all timing operations
-    unsigned long currentTime = millis();
-    
-    // Skip startup period to avoid false triggers
-    // Use the configurable constant from constants.h
-    static bool startupPeriod = true;
-    static unsigned long startupBeginTime = 0;
-    if (startupPeriod) {
-        if (startupBeginTime == 0) {
-            startupBeginTime = currentTime;
-            LOG_INFO("COIN: Startup period started at %lu ms (will monitor after %lu ms)", 
-                    currentTime, COIN_STARTUP_DELAY);
-        }
-        // Check elapsed time since startup
-        unsigned long elapsedSinceStartup;
-        if (currentTime >= startupBeginTime) {
-            elapsedSinceStartup = currentTime - startupBeginTime;
-        } else {
-            // Handle millis() overflow
-            elapsedSinceStartup = (0xFFFFFFFFUL - startupBeginTime) + currentTime + 1;
-        }
-        
-        if (elapsedSinceStartup < COIN_STARTUP_DELAY) {
-            return;  // Silently skip during startup
-        }
-        startupPeriod = false;
-        LOG_INFO("COIN: Startup period over, now actively monitoring");
-    }
-    
-    // PRIMARY: Check if the TaskCoinDetector detected a validated coin signal
-    // The TaskCoinDetector now does all the heavy lifting with mutex protection
-    // and multi-read validation, so we only need to process the flag here
-    if (ioExpander.isCoinSignalDetected()) {
-        LOG_INFO("COIN: *** Validated coin signal detected! *** (time: %lu ms)", currentTime);
-        
-        // Clear the flag first to prevent re-processing
-        if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            ioExpander.clearCoinSignalFlag();
-            xSemaphoreGive(xIoExpanderMutex);
-        } else {
-            // If we can't get the mutex, still clear the flag directly
-            // This is safe because clearCoinSignalFlag only writes to a volatile bool
-            ioExpander.clearCoinSignalFlag();
-        }
-        
-        // Additional cooldown check in case TaskCoinDetector's cooldown wasn't enough
-        unsigned long timeSinceLastCoin = currentTime - lastCoinProcessedTime;
-        if (timeSinceLastCoin > COIN_COOLDOWN_MS) {
-            LOG_INFO("COIN: *** Processing validated coin insertion ***");
-            processCoinInsertion(currentTime);
-        } else {
-            LOG_WARNING("COIN: Ignoring - within controller cooldown (%lu ms < %lu ms)",
-                    timeSinceLastCoin, COIN_COOLDOWN_MS);
-        }
-        
+    if (!ioExpander.isCoinSignalDetected()) {
         return;
     }
-    
-    // Periodic debug logging (reduced frequency)
-    static unsigned long lastDebugTime = 0;
-    if (currentTime - lastDebugTime > 10000) {  // Every 10 seconds
-        lastDebugTime = currentTime;
-        unsigned long timeSinceLastCoin = currentTime - lastCoinProcessedTime;
-        LOG_DEBUG("COIN: Status - LastCoin=%lu ms ago, Cooldown=%lu ms", 
-                timeSinceLastCoin, COIN_COOLDOWN_MS);
+
+    unsigned long currentTime = millis();
+    LOG_INFO("COIN: Validated coin signal from detector task (time: %lu ms)", currentTime);
+
+    // Clear the flag first to prevent re-processing
+    if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        ioExpander.clearCoinSignalFlag();
+        xSemaphoreGive(xIoExpanderMutex);
+    } else {
+        // If we can't get the mutex, still clear the flag directly
+        // This is safe because clearCoinSignalFlag only writes to a volatile bool
+        ioExpander.clearCoinSignalFlag();
     }
+
+    processCoinInsertion(currentTime);
 }
 
 // Helper method to handle the business logic of a coin insertion
