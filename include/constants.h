@@ -29,16 +29,26 @@ const unsigned long BASE_INACTIVE_TIMEOUT = 30000; // 30 seconds base
 const unsigned long SESSION_END_TIMEOUT = 150000; // 2 minutes 30 seconds
 
 // Coin Detection Constants
+// Hardware contract (verified with the raw edge logger on real hardware,
+// 2026-07-04): COIN_SIG is ACTIVE-HIGH. R64 (10k) pulls the line LOW at
+// idle; the acceptor drives it to 3.3V while a coin passes, producing one
+// HIGH pulse of ~80-130 ms.
 // Startup delay before coin detection is active (prevents false triggers at boot)
 const unsigned long COIN_STARTUP_DELAY = 3000;    // 3 seconds
+// After the startup delay, the line must be continuously idle (LOW) this long
+// before the detector arms - a single clean sample is not enough at boot
+const unsigned long COIN_STARTUP_QUIET_MS = 1000;
 // Minimum time between valid coin insertions
 const unsigned long COIN_COOLDOWN_MS = 800;       // 800ms - allows rapid successive insertions
-// Number of consecutive stable reads required to validate coin state change
-const int COIN_STABLE_READS_REQUIRED = 2;
 // Interval between coin signal polling reads
 const unsigned long COIN_POLL_INTERVAL_MS = 5;    // 5ms polling interval
-// Minimum pulse width for a valid coin signal (filters out noise spikes)
-const unsigned long COIN_MIN_PULSE_WIDTH_MS = 30; // 30ms minimum pulse
+// Accepted coin pulse width window: shorter = noise spike, longer = stuck
+// switch or wiring fault
+const unsigned long COIN_MIN_PULSE_MS = 20;
+const unsigned long COIN_MAX_PULSE_MS = 500;
+// After a pulse ends, the line must stay idle this long before the next pulse
+// can start (absorbs break bounce of the switch contact)
+const unsigned long COIN_IDLE_REARM_MS = 50;
 
 // MQTT Topics
 extern String MACHINE_ID;  // Changed to String to allow dynamic loading

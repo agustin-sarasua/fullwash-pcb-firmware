@@ -68,101 +68,149 @@ SemaphoreHandle_t xI2CMutex = NULL;  // For Wire1 (LCD)
 QueueHandle_t xMqttPublishQueue = NULL;
 
 /**
- * FreeRTOS Task: Coin Detector (Improved Version with Mutex Protection)
+ * FreeRTOS Task: Coin Detector
  *
- * This task monitors the coin acceptor signal pin (COIN_SIG) for state changes.
- * Uses mutex-protected polling with consecutive-LOW validation to catch short pulses.
+ * Hardware contract (verified with the raw edge logger on real hardware,
+ * 2026-07-04): COIN_SIG (TCA9535 P06) is ACTIVE-HIGH. The line idles LOW
+ * (R64 pull-down); a coin produces one HIGH pulse of ~80-130 ms.
  *
- * Detection Logic:
- * - Polls PORT0 register every COIN_POLL_INTERVAL_MS with mutex protection
- * - Requires COIN_STABLE_READS_REQUIRED consecutive LOW reads (coin present)
- * - Sets coin signal flag for controller to process
- * - Uses a triggered latch so one pulse cannot generate multiple detections
+ * Detection state machine (polls PORT0 every COIN_POLL_INTERVAL_MS):
+ * - ARMING:   after COIN_STARTUP_DELAY, the line must be continuously LOW
+ *             for COIN_STARTUP_QUIET_MS before detection arms - boot-time
+ *             noise can never register as a coin
+ * - IDLE:     armed, waiting for a rising edge
+ * - IN_PULSE: measuring the HIGH pulse. Accepted only if its width lands in
+ *             [COIN_MIN_PULSE_MS, COIN_MAX_PULSE_MS]; shorter = noise spike,
+ *             longer = stuck switch / wiring fault
+ * - REARM:    line must stay LOW for COIN_IDLE_REARM_MS before the next
+ *             pulse may start (absorbs break bounce)
  *
- * Fixes for missed coin detection:
- * - Fast 5ms polling catches 30-50ms acceptor pulses reliably
- * - Consecutive-LOW counter does not reset on brief HIGH bounces mid-pulse
- * - Removed INT_PIN dependency (was triggering on button presses too)
- * - Added mutex protection for thread-safe IO expander access
+ * Failed reads (mutex timeout or I2C error) are discarded without advancing
+ * the state machine, so a bus glitch cannot fabricate or truncate a pulse.
  */
 void TaskCoinDetector(void *pvParameters) {
   const TickType_t xDelay = COIN_POLL_INTERVAL_MS / portTICK_PERIOD_MS;
 
-  uint8_t lowReads = 0;                     // Consecutive LOW reads
-  bool triggered = true;                    // Latch armed: suppress detection
-                                            // until we observe an idle HIGH first.
-                                            // This prevents a false "coin" at boot
-                                            // when the acceptor hasn't powered up
-                                            // and the line floats LOW.
-  unsigned long lastTransition = 0;         // For cooldown validation
-  unsigned long startTime = millis();       // Track startup for delay
-  bool started = false;
+  enum DetectState { ARMING, IDLE, IN_PULSE, REARM, FAULT };
+  DetectState state = ARMING;
+
+  unsigned long quietSince = 0;        // Start of continuous-LOW window (ARMING/REARM), 0 = not started
+  unsigned long pulseStart = 0;        // Rising edge timestamp (pulse start)
+  unsigned long lastCoinTime = 0;      // End of last accepted pulse, for cooldown
+  unsigned long skippedSamples = 0;    // Mutex timeouts + I2C errors, for field diagnostics
+
+  // Raw edge logger: reports every level change on COIN_SIG before any
+  // filtering, so polarity/pulse-shape issues are visible in field logs
+  bool rawInit = false;
+  bool rawLastHigh = false;
+  unsigned long rawLastEdge = 0;
 
   // Wait for IO expander to be initialized
   vTaskDelay(1000 / portTICK_PERIOD_MS);
 
-  LOG_INFO("Coin detector task started");
+  unsigned long startTime = millis();
+  LOG_INFO("Coin detector task started (active-HIGH, pulse window %lu-%lu ms)",
+           COIN_MIN_PULSE_MS, COIN_MAX_PULSE_MS);
 
   for(;;) {
+    vTaskDelay(xDelay);
     unsigned long now = millis();
 
-    // Skip coin detection during startup period to prevent false triggers
-    if (!started) {
-      if (now - startTime >= COIN_STARTUP_DELAY) {
-        started = true;
-
-        // Sample initial line state. If LOW, keep `triggered` armed so we
-        // ignore the level until the acceptor pulls the line HIGH (idle).
-        // If already HIGH, clear the latch so the first real pulse counts.
-        if (xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-          uint8_t pv = ioExpander.readRegister(INPUT_PORT0);
-          xSemaphoreGive(xIoExpanderMutex);
-          bool initialLow = ((pv & (1 << COIN_SIG)) == 0);
-          triggered = initialLow;
-          LOG_INFO("Coin detector active (initial COIN_SIG=%s, latch=%s)",
-                   initialLow ? "LOW" : "HIGH",
-                   triggered ? "ARMED (waiting for idle HIGH)" : "READY");
-        } else {
-          LOG_INFO("Coin detector active (initial read failed, latch ARMED)");
-        }
-      }
-      vTaskDelay(xDelay);
+    // Ignore the line entirely right after boot
+    if (now - startTime < COIN_STARTUP_DELAY) {
       continue;
     }
 
-    // Read port value with mutex protection (short timeout for fast retry)
     uint8_t portVal = 0;
+    bool readOk = false;
     if (xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-      portVal = ioExpander.readRegister(INPUT_PORT0);
+      readOk = ioExpander.readRegister(INPUT_PORT0, portVal);
       xSemaphoreGive(xIoExpanderMutex);
-    } else {
-      vTaskDelay(xDelay);
+    }
+    if (!readOk) {
+      skippedSamples++;
+      if (skippedSamples % 500 == 0) {
+        LOG_WARNING("COIN: %lu samples skipped so far (mutex contention / I2C errors)", skippedSamples);
+      }
       continue;
     }
 
-    // LOW = coin present (active), HIGH = no coin
-    bool coinLow = ((portVal & (1 << COIN_SIG)) == 0);
+    bool lineHigh = (portVal & (1 << COIN_SIG)) != 0;
 
-    if (coinLow) {
-      lowReads++;
-
-      if (lowReads >= COIN_STABLE_READS_REQUIRED && !triggered) {
-        unsigned long elapsed = now - lastTransition;
-
-        if (lastTransition == 0 || elapsed > COIN_COOLDOWN_MS) {
-          ioExpander.setCoinSignal(1);
-          ioExpander._intCnt++;
-          lastTransition = now;
-          triggered = true;
-          LOG_INFO("COIN DETECTED #%d", ioExpander._intCnt);
-        }
-      }
-    } else {
-      lowReads = 0;
-      triggered = false;
+    if (!rawInit) {
+      rawInit = true;
+      rawLastHigh = lineHigh;
+      rawLastEdge = now;
+      LOG_INFO("COIN RAW: initial line level %s (Port0=0x%02X)", lineHigh ? "HIGH" : "LOW", portVal);
+    } else if (lineHigh != rawLastHigh) {
+      LOG_INFO("COIN RAW: %s -> %s after %lu ms", rawLastHigh ? "HIGH" : "LOW",
+               lineHigh ? "HIGH" : "LOW", now - rawLastEdge);
+      rawLastHigh = lineHigh;
+      rawLastEdge = now;
     }
 
-    vTaskDelay(xDelay);
+    // Active-HIGH: line idles LOW (R64 pull-down), coin drives it HIGH
+    bool coinActive = lineHigh;
+
+    switch (state) {
+      case ARMING:
+        if (coinActive) {
+          quietSince = 0;  // Line not idle - restart the quiet window
+        } else if (quietSince == 0) {
+          quietSince = now;
+        } else if (now - quietSince >= COIN_STARTUP_QUIET_MS) {
+          state = IDLE;
+          LOG_INFO("COIN: line idle for %lu ms - detector armed", COIN_STARTUP_QUIET_MS);
+        }
+        break;
+
+      case IDLE:
+        if (coinActive) {
+          pulseStart = now;
+          state = IN_PULSE;
+        }
+        break;
+
+      case IN_PULSE:
+        if (coinActive) {
+          if (now - pulseStart > COIN_MAX_PULSE_MS) {
+            LOG_WARNING("COIN: signal HIGH for over %lu ms - stuck switch or wiring fault, ignoring",
+                        COIN_MAX_PULSE_MS);
+            state = FAULT;
+          }
+        } else {
+          unsigned long width = now - pulseStart;
+          if (width < COIN_MIN_PULSE_MS) {
+            LOG_DEBUG("COIN: %lu ms spike rejected as noise (min %lu ms)", width, COIN_MIN_PULSE_MS);
+          } else if (lastCoinTime != 0 && now - lastCoinTime < COIN_COOLDOWN_MS) {
+            LOG_WARNING("COIN: %lu ms pulse ignored - within %lu ms cooldown", width, COIN_COOLDOWN_MS);
+          } else {
+            ioExpander.setCoinSignal(1);
+            ioExpander._intCnt++;
+            lastCoinTime = now;
+            LOG_INFO("COIN DETECTED #%u (pulse width %lu ms)", ioExpander._intCnt, width);
+          }
+          quietSince = now;
+          state = REARM;
+        }
+        break;
+
+      case REARM:
+        if (coinActive) {
+          quietSince = now;  // Break bounce - keep waiting for the line to settle
+        } else if (now - quietSince >= COIN_IDLE_REARM_MS) {
+          state = IDLE;
+        }
+        break;
+
+      case FAULT:
+        if (!coinActive) {
+          quietSince = now;
+          state = REARM;
+          LOG_INFO("COIN: signal released after fault, re-arming");
+        }
+        break;
+    }
   }
 }
 
@@ -199,14 +247,16 @@ void TaskButtonDetector(void *pvParameters) {
         // The interrupt pin may not fire reliably, so we poll every cycle
         // This ensures button presses are detected immediately
         uint8_t currentPortValue = 0;
-        
+
         // Protect IO expander access with mutex
         // Reduced timeout to 20ms for faster failure and better responsiveness
         if (xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-            currentPortValue = ioExpander.readRegister(INPUT_PORT0);
-            
+            // Discard failed reads: an I2C error must not be interpreted as
+            // 0x00, which would look like all buttons pressed at once
+            bool readOk = ioExpander.readRegister(INPUT_PORT0, currentPortValue);
+
             // Check if any button state changed
-            if (currentPortValue != lastPortValue) {
+            if (readOk && currentPortValue != lastPortValue) {
                 
                 // Check each button for press events (transition from HIGH to LOW)
                 for (int i = 0; i < NUM_BUTTONS; i++) {
@@ -839,19 +889,18 @@ void mqtt_callback(char *topic, byte *payload, unsigned int len) {
                     // Check the COIN_SIG bit specifically
                     bool coin_bit = (rawPortValue0 & (1 << COIN_SIG)) ? 1 : 0;
                     LOG_INFO("COIN_SIG (bit %d) = %d", COIN_SIG, coin_bit);
-                    
-                    // Hardware with 100KOhm pull-up resistor:
-                    // Bit=1 (HIGH): No coin present (default state with pull-up) = INACTIVE
-                    // Bit=0 (LOW): Coin inserted (pull-down when coin connects to ground) = ACTIVE
-                    bool coinActive = ((rawPortValue0 & (1 << COIN_SIG)) == 0);
-                    
-                    LOG_INFO("Current coin state: %s", 
-                            coinActive ? "ACTIVE (coin present, LOW/0)" : "INACTIVE (no coin, HIGH/1)");
-                    
+
+                    // Hardware (see schematic): R64 10k pull-DOWN on COIN_SIG,
+                    // acceptor switch feeds 3.3V while a coin passes
+                    bool coinActive = ((rawPortValue0 & (1 << COIN_SIG)) != 0);
+
+                    LOG_INFO("Current coin state: %s",
+                            coinActive ? "ACTIVE (coin present, HIGH/1)" : "INACTIVE (no coin, LOW/0)");
+
                     // Explain hardware configuration
-                    LOG_INFO("Hardware config: 100KOhm pull-up resistor");
-                    LOG_INFO("- Default state (no coin): Pin pulled HIGH (bit=1) = INACTIVE");
-                    LOG_INFO("- Coin inserted: Pin connected to ground/LOW (bit=0) = ACTIVE");
+                    LOG_INFO("Hardware config: 10kOhm pull-down resistor (R64)");
+                    LOG_INFO("- Default state (no coin): Pin pulled LOW (bit=0) = INACTIVE");
+                    LOG_INFO("- Coin passing: Switch connects 3.3V (bit=1) = ACTIVE");
                 }
             }
             // Add debug command to print IO expander state
@@ -1182,18 +1231,14 @@ void setup() {
     uint8_t initialRelayState = ioExpander.readRegister(OUTPUT_PORT1);
     LOG_INFO("Initial Port 1 Output State: 0x%02X (all relays should be OFF)", initialRelayState);
     
-    // Enable interrupt for coin acceptor pins
-    LOG_INFO("Enabling interrupt for coin acceptor (COIN_SIG on bit %d)...", COIN_SIG);
-    ioExpander.enableInterrupt(0, 0xc0); // Enable interrupt for upper bits including COIN_SIG
-    
-    // Configure interrupt pin
+    // Note: the TCA9535 INT pin is not used - coin and button detection is
+    // done by polling tasks (TaskCoinDetector / TaskButtonDetector)
     pinMode(INT_PIN, INPUT_PULLUP);
-    LOG_INFO("Interrupt pin %d configured with pull-up", INT_PIN);
-    
+
     // Read initial state
     uint8_t initialPortValue = ioExpander.readRegister(INPUT_PORT0);
     LOG_INFO("Initial port value: 0x%02X", initialPortValue);
-    LOG_INFO("Initial COIN_SIG state: %d", (initialPortValue & (1 << COIN_SIG)) ? 1 : 0);
+    LOG_INFO("Initial COIN_SIG state: %d (0 = idle, 1 = coin/noise present)", (initialPortValue & (1 << COIN_SIG)) ? 1 : 0);
     
     LOG_INFO("TCA9535 fully initialized. Ready to control relays and read buttons.");
     
@@ -1227,7 +1272,9 @@ void setup() {
         "CoinDetection",            // Task name
         4096,                       // Stack size (increased from 2048 to prevent overflow)
         NULL,                       // Task parameters
-        1,                          // Priority
+        2,                          // Priority above button task: the coin pulse is the
+                                    // shortest signal on the board and must not lose
+                                    // mutex arbitration to slower pollers
         &TaskCoinDetectorHandle     // Task handle
     );
     
@@ -1410,9 +1457,8 @@ void loop() {
         lastIoDebugCheck = currentTime;
     }
 
-  // NOTE: Interrupt handling is now done by FreeRTOS tasks (TaskCoinDetector and TaskButtonDetector)
-  // The old ioExpander.handleInterrupt() call is no longer needed
-  
+  // NOTE: Coin and button detection is done by FreeRTOS tasks (TaskCoinDetector and TaskButtonDetector)
+
   // Run controller update - now processes flags set by FreeRTOS tasks
   // CRITICAL: Call update() continuously for responsive button handling
   // Removed timing check to ensure update() runs as frequently as possible

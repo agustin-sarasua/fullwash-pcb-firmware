@@ -15,7 +15,7 @@ DisplayManager::DisplayManager(uint8_t sdaPin, uint8_t sclPin)
     _display = new CH453SDriver(*_wire);
     
     // Initialize the display (mutex will be set later via setI2CMutex)
-    if (_display->begin(10)) {  // Medium brightness
+    if (_display->begin(15)) {  // Max brightness: CH453 4/4 duty, current limiter on
         LOG_INFO("CH453S 7-segment display initialized successfully");
         displayInit();
     } else {

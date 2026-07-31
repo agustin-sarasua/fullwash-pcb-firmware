@@ -42,15 +42,17 @@
 
 
 
-// Define button and relay pins on TCA9535
-#define BUTTON1          5   // BT1 is on P00
-#define BUTTON2          4   // BT2 is on P01
-#define BUTTON3          3   // BT3 is on P02
-#define BUTTON4          2   // BT4 is on P03
-#define BUTTON5          1   // BT5 is on P04
-#define BUTTON6          0   // BT6 is on P05
+// Define button and relay pins on TCA9535 (Port 0, active LOW, per schematic)
+#define BUTTON1          5   // BT1 is on P05
+#define BUTTON2          4   // BT2 is on P04
+#define BUTTON3          3   // BT3 is on P03
+#define BUTTON4          2   // BT4 is on P02
+#define BUTTON5          1   // BT5 is on P01
+#define BUTTON6          0   // BT6 is on P00
 
-// Coin acceptor pins on TCA9535 (Port 0)
+// Coin acceptor pin on TCA9535 (Port 0)
+// ACTIVE-HIGH (verified on real hardware 2026-07-04): R64 (10k) pulls the
+// line LOW at idle; the acceptor drives it to 3.3V while a coin passes
 #define COIN_SIG         6   // P06 - Coin signal
 
 // Relay pins on TCA9535 (Port 1)

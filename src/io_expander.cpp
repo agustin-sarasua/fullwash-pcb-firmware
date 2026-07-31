@@ -2,8 +2,8 @@
 #include "utilities.h"
 
 IoExpander::IoExpander(uint8_t address, int sdaPin, int sclPin, int intPin)
-    : _address(address), _sdaPin(sdaPin), _sclPin(sclPin), _intPin(intPin), 
-      _initialized(false), _lastInterruptTime(0), _coinSignalDetected(false),
+    : _address(address), _sdaPin(sdaPin), _sclPin(sclPin), _intPin(intPin),
+      _initialized(false), _coinSignalDetected(false),
       _buttonDetected(false), _detectedButtonId(255), _intCnt(0), _portVal(0) {
     // Initialize button timing arrays
     for (int i = 0; i < 6; i++) {
@@ -14,7 +14,10 @@ IoExpander::IoExpander(uint8_t address, int sdaPin, int sclPin, int intPin)
 bool IoExpander::begin() {
     // Initialize I2C
     Wire.begin(_sdaPin, _sclPin);
-    
+    // 400kHz fast mode (TCA9535 supports it): shorter bus transactions mean
+    // shorter mutex hold times, so the coin poller misses fewer samples
+    Wire.setClock(400000);
+
     // Set INT pin as input with pullup
     pinMode(_intPin, INPUT_PULLUP);
     LOG_DEBUG("INT pin configured");
@@ -54,40 +57,31 @@ void IoExpander::writeRegister(uint8_t reg, uint8_t value) {
 }
 
 uint8_t IoExpander::readRegister(uint8_t reg) {
-    if (!_initialized) return 0;
-    
-    // Add more debugging for INPUT_PORT0 reads
-    bool isInputPortRead = (reg == INPUT_PORT0);
-    // if (isInputPortRead) {
-    //     LOG_DEBUG("Reading INPUT_PORT0...");
-    // }
-    
+    uint8_t value = 0;
+    readRegister(reg, value);
+    return value;
+}
+
+bool IoExpander::readRegister(uint8_t reg, uint8_t& value) {
+    if (!_initialized) return false;
+
     Wire.beginTransmission(_address);
     Wire.write(reg);
     uint8_t error = Wire.endTransmission();
-    
+
     if (error != 0) {
         LOG_ERROR("Error setting register to read 0x%02X: Error code %d", reg, error);
-        return 0;
+        return false;
     }
-    
+
     uint8_t bytesReceived = Wire.requestFrom(_address, 1);
     if (bytesReceived != 1) {
         LOG_ERROR("Error reading from register 0x%02X: Requested 1 byte, received %d", reg, bytesReceived);
-        return 0;
+        return false;
     }
-    
-    uint8_t value = Wire.read();
-    
-    // if (isInputPortRead) {
-    //     LOG_DEBUG("Value: 0x%02X | Binary: %d%d%d%d%d%d%d%d", value,
-    //            (value & 0x80) ? 1 : 0, (value & 0x40) ? 1 : 0,
-    //            (value & 0x20) ? 1 : 0, (value & 0x10) ? 1 : 0,
-    //            (value & 0x08) ? 1 : 0, (value & 0x04) ? 1 : 0,
-    //            (value & 0x02) ? 1 : 0, (value & 0x01) ? 1 : 0);
-    // }
-    
-    return value;
+
+    value = Wire.read();
+    return true;
 }
 
 void IoExpander::setRelay(uint8_t relay, bool state) {
@@ -249,82 +243,6 @@ void IoExpander::printDebugInfo() {
     
     // Check INT pin state
     LOG_DEBUG("INT Pin State: %s", digitalRead(_intPin) ? "HIGH" : "LOW");
-}
-
-void IoExpander::enableInterrupt(uint8_t port, uint8_t pinMask) {
-    if (!_initialized) {
-        LOG_ERROR("Cannot enable interrupt - IO Expander not initialized");
-        return;
-    }
-    
-    // TCA9535 doesn't have explicit interrupt configuration registers
-    // The interrupt is triggered when any input pin changes from the previously read value
-    // Just make sure the pins are configured as inputs
-    uint8_t configReg = (port == 0) ? CONFIG_PORT0 : CONFIG_PORT1;
-    uint8_t currentConfig = readRegister(configReg);
-    
-    // Set the specified pins as inputs (1 = input in config register)
-    uint8_t newConfig = currentConfig | pinMask;
-    writeRegister(configReg, newConfig);
-    
-    LOG_INFO("Enabled interrupt monitoring for port %d with mask: 0x%02X", port, pinMask);
-    
-    // Perform an initial read of the port to establish a baseline
-    // This is crucial for interrupt detection to work properly
-    uint8_t inputReg = (port == 0) ? INPUT_PORT0 : INPUT_PORT1;
-    uint8_t initialValue = readRegister(inputReg);
-    
-    LOG_DEBUG("Initial port %d value: 0x%02X", port, initialValue);
-}
-
-void IoExpander::setInterruptCallback(std::function<void(uint8_t)> callback) {
-    _interruptCallback = callback;
-}
-
-void IoExpander::handleInterrupt() {
-    if (!_initialized) return;
-    
-    unsigned long currentTime = millis();
-    
-    // Simple debounce - ignore interrupts that happen too quickly
-    if (currentTime - _lastInterruptTime < DEBOUNCE_INTERVAL) {
-        return;
-    }
-
-    // The TCA9535 interrupt is active LOW, so we check if the pin is LOW
-    if (digitalRead(_intPin) == LOW) {
-        _intCnt++;
-        // Read the input port to see what changed
-        LOG_DEBUG("IntPin:%d, cnt:%d", digitalRead(_intPin), _intCnt);
-        uint8_t portValue = readRegister(INPUT_PORT0);
-        
-        // LOG_DEBUG("Interrupt detected! Port 0 Value: 0x%02X", portValue);
-        
-        uint8_t coinSigBit = (portValue & (1 << COIN_SIG));
-        bool coinSigActive = (coinSigBit != 0);
-        
-        LOG_DEBUG("IO EXP: Interrupt handler - Port0=0x%02X, COIN_SIG bit=%d, active=%s", 
-                portValue, coinSigBit ? 1 : 0, coinSigActive ? "YES" : "NO");
-        
-        // If coin signal is active (3.3V), set the flag
-        if (coinSigActive) {
-            bool wasSet = _coinSignalDetected;
-            _coinSignalDetected = true;
-            if (!wasSet) {
-                LOG_INFO("IO EXP: Coin signal detected in interrupt handler! SIG=ACTIVE (3.3V), flag SET");
-            }
-        } else {
-            LOG_DEBUG("IO EXP: Coin signal not active in interrupt (bit=0, LOW)");
-        }
-        
-        // If we have a callback registered, call it with the port value
-        if (_interruptCallback) {
-            _interruptCallback(portValue);
-        }
-        
-        // Update last interrupt time
-        _lastInterruptTime = currentTime;
-    }
 }
 
 bool IoExpander::isCoinSignalDetected() {
