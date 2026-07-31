@@ -48,7 +48,7 @@ The board is a car-wash controller built around an **ESP32-WROVER-E-N16R8** modu
 
 **Port 1 (outputs):** P10 = clear water, P11 = foam, P12 = vacuum, P13 = handwashing, P14 = inflatable, P15 = disinfect, P16 = lighting, P17 unused. Each drives a relay transistor.
 
-> Note: `include/utilities.h` bit numbers match this table (BUTTON1 = bit 5 = P05, COIN_SIG = bit 6 = P06), but some source comments ("BT1 is on P00") are stale.
+> Note: `include/utilities.h` bit numbers and comments match this table (BUTTON1 = bit 5 = P05, COIN_SIG = bit 6 = P06).
 
 ### Buttons (BT1–BT6)
 Each of the 6 buttons is identical:
@@ -63,7 +63,7 @@ Each of the 6 buttons is identical:
   - **Pin 2 → COIN_SIG** net → TCA9535 P06.
 - **R64 = 10 kΩ pull-DOWN** from COIN_SIG to GND.
 - The electromechanical acceptor is just a switch: when a coin passes, the switch closes and connects 3.3 V to COIN_SIG.
-- **Active-HIGH**: idle = 0 V (held by R64), coin present = 3.3 V.
+- **Active-HIGH**: idle = 0 V (held by R64), coin present = 3.3 V. Confirmed on real hardware (2026-07-04) with a raw edge logger: idle reads LOW, coins produced single HIGH pulses of 80–130 ms.
 
 Important asymmetries vs. the buttons (relevant to reliability, see the companion docs):
 - Opposite polarity (buttons are active-LOW, coin is active-HIGH).

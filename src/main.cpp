@@ -99,8 +99,8 @@ void TaskCoinDetector(void *pvParameters) {
   unsigned long lastCoinTime = 0;      // End of last accepted pulse, for cooldown
   unsigned long skippedSamples = 0;    // Mutex timeouts + I2C errors, for field diagnostics
 
-  // TEMPORARY DIAGNOSTIC: raw edge logger to establish the true polarity and
-  // pulse shape of COIN_SIG on real hardware. Remove once confirmed.
+  // Raw edge logger: reports every level change on COIN_SIG before any
+  // filtering, so polarity/pulse-shape issues are visible in field logs
   bool rawInit = false;
   bool rawLastHigh = false;
   unsigned long rawLastEdge = 0;
@@ -137,7 +137,6 @@ void TaskCoinDetector(void *pvParameters) {
 
     bool lineHigh = (portVal & (1 << COIN_SIG)) != 0;
 
-    // TEMPORARY DIAGNOSTIC: log every raw level change, unfiltered
     if (!rawInit) {
       rawInit = true;
       rawLastHigh = lineHigh;

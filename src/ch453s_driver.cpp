@@ -132,13 +132,15 @@ static uint8_t ch453_intensity_from_brightness(uint8_t brightness0_15) {
     // CH453 only supports 2-bit intensity selection (plus a "no limiter" mode),
     // so we map the 0-15 UI brightness into a reasonable default.
     // INTENS:
-    // - 00: duty 4/4 with internal current limiter enabled (brightest, recommended)
+    // - 00: duty 4/4 with internal current limiter enabled
     // - 01: duty 1/4 with limiter enabled
     // - 10: duty 2/4 with limiter enabled
-    // - 11: duty 4/4 but limiter disabled (needs external resistors)
+    // - 11: duty 4/4, limiter disabled - safe on this board only because the
+    //   schematic has 270R series resistors (R1-R8) on every segment line
     if (brightness0_15 <= 5) return 0x01;   // 1/4
     if (brightness0_15 <= 10) return 0x02;  // 2/4
-    return 0x00;                            // 4/4 (limiter enabled)
+    if (brightness0_15 <= 14) return 0x00;  // 4/4 (limiter enabled)
+    return 0x03;                            // 15: 4/4, limiter off (max possible)
 }
 
 // ============ End Software I2C ============

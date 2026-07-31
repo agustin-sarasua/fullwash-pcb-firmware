@@ -4,6 +4,11 @@
 > document is now implemented in `TaskCoinDetector` (`src/main.cpp`), together with
 > items 1–7 of the recommendations. The issue descriptions below refer to the code
 > as it was before that change and are kept as the rationale.
+>
+> **Field-verified (2026-07-04).** A raw edge logger on real hardware confirmed the
+> hardware contract below: COIN_SIG idles LOW and each coin produces a single clean
+> HIGH pulse — two test coins measured **130 ms and 80 ms** wide, well inside the
+> 20–500 ms acceptance window. (First data points for item 8's width distribution.)
 
 This document explains why coin detection is unreliable **at the firmware level**, assuming the electronics stay exactly as they are. Read `hardware-schematic-description.md` first for the circuit.
 
@@ -11,7 +16,7 @@ This document explains why coin detection is unreliable **at the firmware level*
 
 - COIN_SIG (TCA9535 P06) has a **10 kΩ pull-down (R64)** and the coin switch connects it to **3.3 V**.
 - Therefore: **idle = LOW (0), coin present = HIGH (1)**. The signal is **active-HIGH**.
-- A passing coin produces one HIGH pulse, typically tens of ms wide (depends on coin speed), with contact bounce on both edges.
+- A passing coin produces one HIGH pulse, typically tens of ms wide (depends on coin speed), with contact bounce on both edges. Measured on real hardware (2026-07-04): 80–130 ms, no visible bounce at 5 ms polling.
 
 ## Issue 1 (root cause): inverted polarity in `TaskCoinDetector`
 
