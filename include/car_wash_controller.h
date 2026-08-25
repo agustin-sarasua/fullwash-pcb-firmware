@@ -15,6 +15,16 @@
 // External reference to the MQTT publish queue (defined in main.cpp)
 extern QueueHandle_t xMqttPublishQueue;
 
+// A single debounced, edge-triggered button press event, produced by
+// TaskButtonDetector and consumed by CarWashController::handleButtons().
+struct ButtonEvent {
+    uint8_t buttonId;      // 0-4 = function buttons 1-5, 5 = STOP button
+    uint32_t pressedAtMs;  // millis() at edge detection
+};
+
+// External reference to the button event queue (defined in main.cpp)
+extern QueueHandle_t xButtonEventQueue;
+
 class CarWashController {
 public:
     CarWashController(MqttLteClient& client);
@@ -65,18 +75,19 @@ private:
     unsigned long gracePeriodStartTime; // Track when grace period started (for IDLE or PAUSED)
     bool gracePeriodActive; // Whether the grace period is currently active
     int tokensConsumedCount; // Track how many tokens have been consumed in current session
+    unsigned long lastSessionLoadTime; // millis() when the current session was loaded; used to
+                                        // discard stale ButtonEvents queued before this session existed
 
-    static const unsigned long DEBOUNCE_DELAY = 100;
     static const unsigned long PAUSE_RESUME_COOLDOWN = 500; // Minimum time between pause/resume (500ms)
     static const unsigned long FUNCTION_SWITCH_COOLDOWN = 500; // Minimum time after function switch before same button can pause (500ms)
+    static const unsigned long BOUNCE_DUPLICATE_WINDOW_MS = 200; // Window after activation/function-switch in which a duplicate button event is treated as a bounce, not a new press
     // Note: Coin detection constants moved to constants.h (COIN_STARTUP_DELAY, COIN_COOLDOWN_MS, etc.)
-    unsigned long lastDebounceTime[NUM_BUTTONS + 1];
-    int lastButtonState[NUM_BUTTONS + 1];
     unsigned long lastCoinProcessedTime; // Track when a coin was last successfully processed (informational)
 
     unsigned long lastStatePublishTime;
     const unsigned long STATE_PUBLISH_INTERVAL = 10000;
 
+    void processButtonEvent(const ButtonEvent& evt); // Handle one debounced button press event
     void processCoinInsertion(unsigned long currentTime);
     void autoConsumeToken(); // Automatically consume a token and transition to PAUSED
     void consumeNextToken(); // Consume next token when current one expires

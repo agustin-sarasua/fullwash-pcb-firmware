@@ -48,13 +48,7 @@ public:
     
     // Clear the coin signal flag
     void clearCoinSignalFlag();
-    
-    // Button detection methods
-    bool isButtonDetected();
-    uint8_t getDetectedButtonId();
-    void setButtonFlag(uint8_t buttonId, bool state);
-    void clearButtonFlag();
-    
+
     // Public coin counter for debugging
     unsigned int _intCnt;
     uint8_t _portVal;
@@ -67,13 +61,6 @@ private:
 
     bool _initialized;
     volatile bool _coinSignalDetected;
-    
-    // Button detection variables
-    volatile bool _buttonDetected;
-    volatile uint8_t _detectedButtonId;
-    unsigned long _lastButtonTime[6]; // 6 buttons max
-    
-    static const unsigned long DEBOUNCE_INTERVAL = 50; // 50ms debounce
 };
 
 #endif // IO_EXPANDER_H

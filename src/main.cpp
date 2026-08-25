@@ -67,6 +67,9 @@ SemaphoreHandle_t xI2CMutex = NULL;  // For Wire1 (LCD)
 // FreeRTOS queue for MQTT message publishing
 QueueHandle_t xMqttPublishQueue = NULL;
 
+// FreeRTOS queue of debounced button press events (TaskButtonDetector -> CarWashController)
+QueueHandle_t xButtonEventQueue = NULL;
+
 /**
  * FreeRTOS Task: Coin Detector
  *
@@ -216,37 +219,42 @@ void TaskCoinDetector(void *pvParameters) {
 
 /**
  * FreeRTOS Task: Button Detector
- * 
- * This task monitors all button pins (BUTTON1-6) for press events.
- * It runs independently with faster polling for responsive button detection.
- * 
+ *
+ * This task is the sole source of button input. It monitors all button pins
+ * (BUTTON1-6) for press events and is the only producer of ButtonEvents.
+ *
  * Detection Logic:
- * - Monitors INT_PIN (active LOW when button state changes)
- * - Reads PORT0 register to get current button states
+ * - Polls PORT0 register every 10ms to get current button states
  * - Detects button press events (HIGH->LOW transition, buttons are active LOW)
- * - Sets button flags with debouncing for controller to process
- * 
+ * - Applies a 50ms per-button debounce, then enqueues one ButtonEvent per
+ *   physical press onto xButtonEventQueue for CarWashController to consume
+ *
  * Thread Safety:
  * - Uses mutex protection when accessing ioExpander
+ * - xQueueSend is safe to call without additional locking
  */
 void TaskButtonDetector(void *pvParameters) {
     const TickType_t xDelay = 10 / portTICK_PERIOD_MS; // 10ms for very responsive button detection
+    const unsigned long BUTTON_DEBOUNCE_MS = 50;
     uint8_t lastPortValue = 0xFF; // All buttons released initially (active LOW)
-    
+    unsigned long lastPressTime[NUM_BUTTONS] = {0};
+
     // Wait for IO expander to be initialized
     vTaskDelay(1000 / portTICK_PERIOD_MS);
-    
+
     LOG_INFO("Button detector task started");
-    
+
     if (ENABLE_BUTTON_DIAGNOSTICS) {
         LOG_INFO("[BUTTON DIAG] Button detector task initialized");
     }
-    
+
     for(;;) {
         // CRITICAL FIX: Poll continuously, not just when INT_PIN is LOW
         // The interrupt pin may not fire reliably, so we poll every cycle
         // This ensures button presses are detected immediately
         uint8_t currentPortValue = 0;
+        uint8_t pendingButtons[NUM_BUTTONS];
+        int pendingCount = 0;
 
         // Protect IO expander access with mutex
         // Reduced timeout to 20ms for faster failure and better responsiveness
@@ -257,7 +265,8 @@ void TaskButtonDetector(void *pvParameters) {
 
             // Check if any button state changed
             if (readOk && currentPortValue != lastPortValue) {
-                
+                unsigned long now = millis();
+
                 // Check each button for press events (transition from HIGH to LOW)
                 for (int i = 0; i < NUM_BUTTONS; i++) {
                     int buttonPin;
@@ -266,29 +275,49 @@ void TaskButtonDetector(void *pvParameters) {
                     } else {
                         buttonPin = STOP_BUTTON_PIN;   // Stop button (BUTTON6)
                     }
-                    
+
                     bool currentButtonPressed = !(currentPortValue & (1 << buttonPin));
                     bool lastButtonPressed = !(lastPortValue & (1 << buttonPin));
-                    
+
                     // Detect button press (transition from released to pressed)
                     if (currentButtonPressed && !lastButtonPressed) {
-                        LOG_INFO("Button %d transition detected: HIGH->LOW (pressed)", i + 1);
-                        ioExpander.setButtonFlag(i, true);
+                        unsigned long timeSincePress = now - lastPressTime[i];
+                        if (timeSincePress > BUTTON_DEBOUNCE_MS) {
+                            LOG_INFO("Button %d transition detected: HIGH->LOW (pressed)", i + 1);
+                            lastPressTime[i] = now;
+                            pendingButtons[pendingCount++] = i;
+                        } else {
+                            LOG_DEBUG("Button %d press ignored - too soon (debounce: %lu ms since last, need %lu ms)",
+                                     i + 1, timeSincePress, BUTTON_DEBOUNCE_MS);
+                        }
                     } else if (!currentButtonPressed && lastButtonPressed) {
                         // Button released - log for debugging
                         LOG_DEBUG("Button %d transition detected: LOW->HIGH (released)", i + 1);
                     }
                 }
-                
+
                 lastPortValue = currentPortValue;
             }
-            
+
             xSemaphoreGive(xIoExpanderMutex);
         } else {
             // Mutex contention is normal - no logging needed
         }
         // Removed warning log to reduce overhead - mutex contention is normal
-        
+
+        // Enqueue outside the mutex to keep I2C mutex hold time minimal
+        for (int p = 0; p < pendingCount; p++) {
+            uint8_t buttonId = pendingButtons[p];
+            ButtonEvent evt{buttonId, millis()};
+            if (xButtonEventQueue != NULL) {
+                if (xQueueSend(xButtonEventQueue, &evt, 0) == pdTRUE) {
+                    LOG_INFO("Button %d press queued", buttonId + 1);
+                } else {
+                    LOG_WARNING("Button event queue full - dropping button %d press", buttonId + 1);
+                }
+            }
+        }
+
         vTaskDelay(xDelay); // Wait 10ms before next check
     }
 }
@@ -1263,7 +1292,19 @@ void setup() {
     } else {
         LOG_INFO("MQTT publish queue created successfully (size: %d)", MQTT_QUEUE_SIZE);
     }
-    
+
+    // Initialize FreeRTOS queue for debounced button press events.
+    // Sized above NUM_BUTTONS (6) so a burst where every button transitions
+    // in the same 10ms poll pass can still be fully enqueued without drops.
+    LOG_INFO("Initializing button event queue...");
+    xButtonEventQueue = xQueueCreate(8, sizeof(ButtonEvent));
+
+    if (xButtonEventQueue == NULL) {
+        LOG_ERROR("Failed to create button event queue!");
+    } else {
+        LOG_INFO("Button event queue created successfully (size: 8)");
+    }
+
     // Create FreeRTOS tasks for dedicated interrupt handling
     LOG_INFO("Creating FreeRTOS tasks for coin and button detection...");
     
