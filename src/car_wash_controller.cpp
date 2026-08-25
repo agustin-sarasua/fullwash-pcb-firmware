@@ -8,6 +8,12 @@
 // External mutex for ioExpander access (defined in main.cpp)
 extern SemaphoreHandle_t xIoExpanderMutex;
 
+// Wraparound-safe elapsed time in ms: how long ago `since` was, relative to
+// `now`. Correct across a millis() overflow (~49.7 days of uptime).
+static inline unsigned long elapsedMs(unsigned long now, unsigned long since) {
+    return (now >= since) ? (now - since) : (0xFFFFFFFFUL - since) + now + 1;
+}
+
 CarWashController::CarWashController(MqttLteClient& client)
     : mqttClient(client),
       currentState(STATE_FREE),
@@ -22,7 +28,8 @@ CarWashController::CarWashController(MqttLteClient& client)
       lastFunctionSwitchTime(0),
       gracePeriodStartTime(0),
       gracePeriodActive(false),
-      tokensConsumedCount(0) {
+      tokensConsumedCount(0),
+      lastSessionLoadTime(0) {
           
     // Coin detection (polarity, debouncing, startup arming, cooldown) is
     // owned entirely by TaskCoinDetector in main.cpp. COIN_SIG is ACTIVE-HIGH
@@ -49,16 +56,6 @@ CarWashController::CarWashController(MqttLteClient& client)
     // Initialize LED pins - using built-in LED
     pinMode(LED_PIN_INIT, OUTPUT);
     digitalWrite(LED_PIN_INIT, LOW);
-
-    // Initialize button debounce times - we'll use the IO expander to read buttons
-    for (int i = 0; i < NUM_BUTTONS; i++) {
-        lastDebounceTime[i] = 0;
-        lastButtonState[i] = HIGH;  // Buttons are active low
-    }
-
-    // Set up for the stop button (BUTTON6)
-    lastDebounceTime[NUM_BUTTONS-1] = 0;  // NUM_BUTTONS-1 is the index for the stop button
-    lastButtonState[NUM_BUTTONS-1] = HIGH;
 
     config.isLoaded = false;
     config.physicalTokens = 0;
@@ -128,6 +125,7 @@ void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payl
         config.isLoaded = true;
         currentState = STATE_IDLE;
         lastActionTime = millis();
+        lastSessionLoadTime = lastActionTime; // Mark session start so stale queued button events can be discarded
         gracePeriodStartTime = millis(); // Start 30-second grace period
         gracePeriodActive = true;
         // Reset token timing variables to ensure clean state
@@ -156,474 +154,225 @@ void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payl
 }
 
 void CarWashController::handleButtons() {
-    // Get reference to the IO expander (assumed to be a global or accessible)
-    extern IoExpander ioExpander;
-
-    // Fast path: consume button flags set by the ButtonDetector task
-    // This ensures short presses (that may be missed by raw polling) are handled
-    if (ioExpander.isButtonDetected()) {
-        uint8_t detectedId = ioExpander.getDetectedButtonId();
-        bool buttonProcessed = false;
-
-        LOG_INFO("Button flag detected: button %d, currentState=%d, activeButton=%d, isLoaded=%d, timestamp='%s'", 
-                detectedId + 1, currentState, activeButton, config.isLoaded, 
-                config.timestamp.length() > 0 ? config.timestamp.c_str() : "(empty)");
-
-        ioExpander.clearButtonFlag();
-
-        // Explicit check: Buttons should not work when machine is FREE
-        // This ensures buttons are ignored even if config.isLoaded is somehow true
-        if (currentState == STATE_FREE) {
-            LOG_WARNING("Button %d press ignored - machine is FREE (config.isLoaded=%d)", 
-                       detectedId + 1, config.isLoaded);
-            return; // Skip processing and raw polling
+    // Single source of truth for button input: TaskButtonDetector (main.cpp)
+    // edge-detects presses on the IO expander and enqueues one ButtonEvent per
+    // physical press. Receiving (at most) one event per update() cycle keeps
+    // each cycle to a single state transition; a full queue drains within a
+    // few cycles (~1ms each).
+    if (xButtonEventQueue == NULL) {
+        // Keep this visible in the logs (not just a one-time boot error): if
+        // the queue never got created, every physical button is silently
+        // non-functional, and that's important to keep surfacing.
+        static unsigned long lastQueueMissingWarnTime = 0;
+        unsigned long nowMs = millis();
+        if (nowMs - lastQueueMissingWarnTime > 5000) {
+            LOG_ERROR("Button event queue unavailable - all button input is disabled");
+            lastQueueMissingWarnTime = nowMs;
         }
-
-        // Function buttons (0..NUM_BUTTONS-2)
-        // Button 5 = index 4, NUM_BUTTONS = 6, so NUM_BUTTONS - 1 = 5
-        // So detectedId < 5 means buttons 0-4 (buttons 1-5)
-        if (detectedId < NUM_BUTTONS - 1) {
-            LOG_INFO("Processing function button %d (detectedId=%d, NUM_BUTTONS-1=%d)", 
-                    detectedId + 1, detectedId, NUM_BUTTONS - 1);
-            if (config.isLoaded) {
-                if (currentState == STATE_IDLE) {
-                    LOG_INFO("Activating button %d from IDLE state", detectedId + 1);
-                    activateButton(detectedId, MANUAL);
-                    buttonProcessed = true;
-                } else if (currentState == STATE_RUNNING) {
-                    // Same button pause the machine, different button switches function
-                    LOG_INFO("Button %d pressed while RUNNING (activeButton=%d)", 
-                            detectedId + 1, activeButton + 1);
-                    if (activeButton == -1 || (int)detectedId == activeButton) {
-                        // Same button pressed - pause the machine
-                        unsigned long currentTime = millis();
-                        
-                        // CRITICAL FIX: Check if this is the same button press that just activated the machine
-                        // If tokenStartTime was set very recently (within 200ms), this is likely the same press
-                        // that activated from IDLE, so we should ignore it to prevent immediate pause
-                        if (tokenStartTime != 0) {
-                            unsigned long timeSinceActivation;
-                            if (currentTime >= tokenStartTime) {
-                                timeSinceActivation = currentTime - tokenStartTime;
-                            } else {
-                                timeSinceActivation = (0xFFFFFFFFUL - tokenStartTime) + currentTime + 1;
-                            }
-                            
-                            // If activation happened very recently (within 200ms), ignore this pause request
-                            // This prevents the flag handler from stopping immediately after raw polling activated
-                            if (timeSinceActivation < 200) {
-                                LOG_INFO("Button %d pressed while RUNNING - ignoring (just activated %lu ms ago, likely same press)", 
-                                       detectedId + 1, timeSinceActivation);
-                                // Still reset inactivity timeout
-                                lastActionTime = currentTime;
-                                buttonProcessed = true;
-                                return; // Skip raw polling
-                            }
-                        }
-                        
-                        // CRITICAL FIX: Check if we just switched to this button - if so, ignore pause request
-                        // This prevents the same button press that triggered the switch from also triggering a pause
-                        unsigned long timeSinceFunctionSwitch;
-                        if (currentTime >= lastFunctionSwitchTime) {
-                            timeSinceFunctionSwitch = currentTime - lastFunctionSwitchTime;
-                        } else {
-                            timeSinceFunctionSwitch = (0xFFFFFFFFUL - lastFunctionSwitchTime) + currentTime + 1;
-                        }
-                        
-                        if (timeSinceFunctionSwitch < FUNCTION_SWITCH_COOLDOWN) {
-                            LOG_INFO("Button %d pressed while RUNNING - ignoring (just switched to this button %lu ms ago, likely same press)", 
-                                   detectedId + 1, timeSinceFunctionSwitch);
-                            // Still reset inactivity timeout
-                            lastActionTime = currentTime;
-                            buttonProcessed = true;
-                            return; // Skip raw polling
-                        }
-                        
-                        // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
-                        lastActionTime = currentTime;
-                        
-                        if (activeButton == -1) {
-                            LOG_WARNING("activeButton is -1 in RUNNING state - setting to pressed button %d", detectedId + 1);
-                            // Set activeButton to the pressed button to fix the tracking
-                            activeButton = detectedId;
-                        }
-                        LOG_INFO("Pausing machine - same button pressed while running");
-                        pauseMachine();
-                        buttonProcessed = true;
-                    } else {
-                        // Different button pressed - switch to new function (keep running, switch relay)
-                        lastActionTime = millis();
-                        LOG_INFO("Button %d pressed while RUNNING (activeButton=%d) - switching function", 
-                                   detectedId + 1, activeButton + 1);
-                        switchFunction(detectedId);
-                        buttonProcessed = true;
-                    }
-                } else if (currentState == STATE_PAUSED) {
-                    // Same button resumes, different button switches function and resumes
-                    unsigned long currentTime = millis();
-                    
-                    // CRITICAL FIX: Prevent rapid pause/resume toggling
-                    unsigned long timeSinceLastPauseResume;
-                    if (currentTime >= lastPauseResumeTime) {
-                        timeSinceLastPauseResume = currentTime - lastPauseResumeTime;
-                    } else {
-                        timeSinceLastPauseResume = (0xFFFFFFFFUL - lastPauseResumeTime) + currentTime + 1;
-                    }
-                    
-                    // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
-                    lastActionTime = currentTime;
-                    
-                    if (timeSinceLastPauseResume < PAUSE_RESUME_COOLDOWN) {
-                        LOG_WARNING("Button %d pressed while PAUSED - ignoring (cooldown: %lu ms < %lu ms)", 
-                                   detectedId + 1, timeSinceLastPauseResume, PAUSE_RESUME_COOLDOWN);
-                    } else {
-                        if (activeButton == -1 || (int)detectedId == activeButton) {
-                            // Same button (or no active button) - resume with same button
-                            if (activeButton == -1) {
-                                LOG_WARNING("activeButton is -1 in PAUSED state - allowing resume anyway (button %d)", detectedId + 1);
-                                // Set activeButton to the pressed button to fix the tracking
-                                activeButton = detectedId;
-                            }
-                            LOG_INFO("Button %d: Resuming from PAUSED state (same button)", detectedId + 1);
-                            resumeMachine(detectedId);
-                            lastPauseResumeTime = currentTime;
-                            buttonProcessed = true;
-                        } else {
-                            // Different button pressed - switch function and resume
-                            LOG_INFO("Button %d pressed while PAUSED (activeButton=%d) - switching function and resuming", 
-                                   detectedId + 1, activeButton + 1);
-                            // First deactivate the old relay if there was one
-                            if (activeButton >= 0) {
-                                extern IoExpander ioExpander;
-                                if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                                    ioExpander.setRelay(RELAY_INDICES[activeButton], false);
-                                    LOG_INFO("Deactivated relay %d (button %d)", activeButton + 1, activeButton + 1);
-                                    xSemaphoreGive(xIoExpanderMutex);
-                                }
-                            }
-                            // Now resume with the new button
-                            resumeMachine(detectedId);
-                            lastPauseResumeTime = currentTime;
-                            lastFunctionSwitchTime = currentTime;
-                            buttonProcessed = true;
-                        }
-                    }
-                } else {
-                    // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
-                    if (config.isLoaded && currentState != STATE_FREE) {
-                        lastActionTime = millis();
-                    }
-                    LOG_WARNING("Flag press on button %d ignored. State=%d, activeButton=%d",
-                                detectedId + 1, currentState, activeButton);
-                    // Flag already cleared above - no need to process
-                }
-            } else {
-                LOG_WARNING("Button %d press ignored - config not loaded", detectedId + 1);
-                // Flag already cleared above - no delayed processing
-            }
-        } else if (detectedId == NUM_BUTTONS - 1) {
-            // Stop button - should only pause when RUNNING, same behavior as pressing same button
-            // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
-            lastActionTime = millis();
-            if (config.isLoaded) {
-                if (currentState == STATE_RUNNING) {
-                    // Same behavior as pressing the same button when RUNNING - pause the machine
-                    unsigned long currentTime = millis();
-                    
-                    // CRITICAL FIX: Check if this is the same button press that just activated the machine
-                    // If tokenStartTime was set very recently (within 200ms), this is likely the same press
-                    // that activated from IDLE, so we should ignore it to prevent immediate pause
-                    if (tokenStartTime != 0) {
-                        unsigned long timeSinceActivation;
-                        if (currentTime >= tokenStartTime) {
-                            timeSinceActivation = currentTime - tokenStartTime;
-                        } else {
-                            timeSinceActivation = (0xFFFFFFFFUL - tokenStartTime) + currentTime + 1;
-                        }
-                        
-                        // If activation happened very recently (within 200ms), ignore this pause request
-                        if (timeSinceActivation < 200) {
-                            LOG_INFO("STOP button pressed while RUNNING - ignoring (just activated %lu ms ago, likely same press)", 
-                                   timeSinceActivation);
-                            buttonProcessed = true;
-                            return; // Skip raw polling
-                        }
-                    }
-                    
-                    // CRITICAL FIX: Check if we just switched to this button - if so, ignore pause request
-                    // This prevents the same button press that triggered the switch from also triggering a pause
-                    unsigned long timeSinceFunctionSwitch;
-                    if (currentTime >= lastFunctionSwitchTime) {
-                        timeSinceFunctionSwitch = currentTime - lastFunctionSwitchTime;
-                    } else {
-                        timeSinceFunctionSwitch = (0xFFFFFFFFUL - lastFunctionSwitchTime) + currentTime + 1;
-                    }
-                    
-                    if (timeSinceFunctionSwitch < FUNCTION_SWITCH_COOLDOWN) {
-                        LOG_INFO("STOP button pressed while RUNNING - ignoring (just switched function %lu ms ago, likely same press)", 
-                               timeSinceFunctionSwitch);
-                        buttonProcessed = true;
-                        return; // Skip raw polling
-                    }
-                    
-                    LOG_INFO("STOP button: Pausing machine (same behavior as pressing same button when RUNNING)");
-                    pauseMachine();
-                    buttonProcessed = true;
-                } else {
-                    // Not in RUNNING state - ignore stop button press
-                    LOG_INFO("STOP button pressed but machine is not RUNNING (state=%d) - ignoring", currentState);
-                    buttonProcessed = true;
-                }
-            } else {
-                LOG_WARNING("STOP button press ignored - config not loaded");
-                // Flag already cleared above - no delayed processing
-            }
-        }
-
-        // We've handled a flagged press; skip raw polling this cycle
         return;
     }
 
-    // Protect IO expander access with mutex
-    uint8_t rawPortValue0 = 0;
-    if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
-        xSemaphoreGive(xIoExpanderMutex);
-    } else {
-        LOG_WARNING("Failed to acquire IO expander mutex in handleButtons()");
-        return; // Skip button handling if mutex not available
+    ButtonEvent evt;
+    if (xQueueReceive(xButtonEventQueue, &evt, 0) == pdTRUE) {
+        processButtonEvent(evt);
     }
-    
-    // Print raw state for debugging
-    
-    // Read all 5 function buttons - using simple approach
-    for (int i = 0; i < NUM_BUTTONS-1; i++) {  // -1 because last button is STOP button
-        int buttonPin = BUTTON_INDICES[i];
-        
-        // Check if button is pressed (active LOW in the IO expander)
-        bool buttonPressed = !(rawPortValue0 & (1 << buttonPin));
-        
-      
-        // Handle button press with debouncing
-        if (buttonPressed) {
-            // If button wasn't pressed before or enough time has passed since last action
-            unsigned long timeSinceLastDebounce = millis() - lastDebounceTime[i];
-            bool wasReleased = (lastButtonState[i] == HIGH);
-            if (wasReleased || timeSinceLastDebounce > DEBOUNCE_DELAY * 5) {
-                
-                // Record time of this press
-                lastDebounceTime[i] = millis();
-                lastButtonState[i] = LOW;  // Now pressed (active LOW)
-                
-                LOG_INFO("Button %d raw polling: pressed (state transition: %s, time since last: %lu ms)", 
-                        i + 1, wasReleased ? "HIGH->LOW" : "repeat press", timeSinceLastDebounce);
-                
-                // Explicit check: Buttons should not work when machine is FREE
-                if (currentState == STATE_FREE) {
-                    LOG_DEBUG("Button %d ignored - machine is FREE", i + 1);
-                    continue; // Skip this button, check others
-                }
-                
-                // Process button action
-                if (config.isLoaded) {
-                    if (currentState == STATE_IDLE) {
-                        LOG_INFO("Button %d: Activating from IDLE state", i + 1);
-                        activateButton(i, MANUAL);
-                    } else if (currentState == STATE_RUNNING) {
-                        // Same button stops machine, different button switches function
-                        LOG_INFO("Button %d pressed while RUNNING (activeButton=%d) - raw polling", 
-                                i + 1, activeButton + 1);
-                        if (activeButton == -1 || i == activeButton) {
-                            // Same button pressed - stop the machine
-                            unsigned long currentTime = millis();
-                            
-                            // CRITICAL FIX: Check if this is the same button press that just activated the machine
-                            // If tokenStartTime was set very recently (within 200ms), this is likely the same press
-                            // that activated from IDLE, so we should ignore it to prevent immediate stop
-                            if (tokenStartTime != 0) {
-                                unsigned long timeSinceActivation;
-                                if (currentTime >= tokenStartTime) {
-                                    timeSinceActivation = currentTime - tokenStartTime;
-                                } else {
-                                    timeSinceActivation = (0xFFFFFFFFUL - tokenStartTime) + currentTime + 1;
-                                }
-                                
-                                // If activation happened very recently (within 200ms), ignore this stop request
-                                // This prevents double-processing of the same button press
-                                if (timeSinceActivation < 200) {
-                                    LOG_INFO("Button %d pressed while RUNNING - ignoring (just activated %lu ms ago, likely same press) - raw polling", 
-                                           i + 1, timeSinceActivation);
-                                    // Still reset inactivity timeout
-                                    lastActionTime = currentTime;
-                                    continue; // Skip to next button
-                                }
-                            }
-                            
-                            // CRITICAL FIX: Check if we just switched to this button - if so, ignore pause request
-                            // This prevents the same button press that triggered the switch from also triggering a pause
-                            unsigned long timeSinceFunctionSwitch;
-                            if (currentTime >= lastFunctionSwitchTime) {
-                                timeSinceFunctionSwitch = currentTime - lastFunctionSwitchTime;
-                            } else {
-                                timeSinceFunctionSwitch = (0xFFFFFFFFUL - lastFunctionSwitchTime) + currentTime + 1;
-                            }
-                            
-                            if (timeSinceFunctionSwitch < FUNCTION_SWITCH_COOLDOWN) {
-                                LOG_INFO("Button %d pressed while RUNNING - ignoring (just switched to this button %lu ms ago, likely same press) - raw polling", 
-                                       i + 1, timeSinceFunctionSwitch);
-                                // Still reset inactivity timeout
-                                lastActionTime = currentTime;
-                                continue; // Skip to next button
-                            }
-                            
-                            // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
-                            lastActionTime = currentTime;
-                            
-                            if (activeButton == -1) {
-                                LOG_WARNING("activeButton is -1 in RUNNING state - setting to pressed button %d - raw polling", i + 1);
-                                // Set activeButton to the pressed button to fix the tracking
-                                activeButton = i;
-                            }
-                            LOG_INFO("Pausing machine - same button pressed while running (raw polling)");
-                            pauseMachine();
-                        } else {
-                            // Different button pressed - switch to new function (keep running, switch relay)
-                            lastActionTime = millis();
-                            LOG_INFO("Button %d pressed while RUNNING (activeButton=%d) - switching function (raw polling)", 
-                                       i + 1, activeButton + 1);
-                            switchFunction(i);
-                        }
-                    } else if (currentState == STATE_PAUSED) {
-                        // Same button resumes, different button switches function and resumes
-                        unsigned long currentTime = millis();
-                        
-                        // CRITICAL FIX: Prevent rapid pause/resume toggling
-                        unsigned long timeSinceLastPauseResume;
-                        if (currentTime >= lastPauseResumeTime) {
-                            timeSinceLastPauseResume = currentTime - lastPauseResumeTime;
-                        } else {
-                            timeSinceLastPauseResume = (0xFFFFFFFFUL - lastPauseResumeTime) + currentTime + 1;
-                        }
-                        
-                        // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
-                        lastActionTime = currentTime;
-                        
-                        if (timeSinceLastPauseResume < PAUSE_RESUME_COOLDOWN) {
-                            LOG_WARNING("Button %d pressed while PAUSED - ignoring (cooldown: %lu ms < %lu ms) - raw polling", 
-                                       i + 1, timeSinceLastPauseResume, PAUSE_RESUME_COOLDOWN);
-                        } else {
-                            if (activeButton == -1 || i == activeButton) {
-                                // Same button (or no active button) - resume with same button
-                                if (activeButton == -1) {
-                                    LOG_WARNING("activeButton is -1 in PAUSED state - allowing resume anyway (button %d) - raw polling", i + 1);
-                                    // Set activeButton to the pressed button to fix the tracking
-                                    activeButton = i;
-                                }
-                                LOG_INFO("Button %d: Resuming from PAUSED state (same button) - raw polling", i + 1);
-                                resumeMachine(i);
-                                lastPauseResumeTime = currentTime;
-                            } else {
-                                // Different button pressed - switch function and resume
-                                LOG_INFO("Button %d pressed while PAUSED (activeButton=%d) - switching function and resuming (raw polling)", 
-                                       i + 1, activeButton + 1);
-                                // First deactivate the old relay if there was one
-                                extern IoExpander ioExpander;
-                                if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                                    ioExpander.setRelay(RELAY_INDICES[activeButton], false);
-                                    LOG_INFO("Deactivated relay %d (button %d)", activeButton + 1, activeButton + 1);
-                                    xSemaphoreGive(xIoExpanderMutex);
-                                }
-                                // Now resume with the new button
-                                resumeMachine(i);
-                                lastPauseResumeTime = currentTime;
-                                lastFunctionSwitchTime = currentTime;
-                            }
-                        }
-                    }
-                } else {
-                    LOG_WARNING("Button %d ignored - config not loaded", i + 1);
-                }
-            } else {
-                LOG_DEBUG("Button %d raw polling: pressed but debounced (time since last: %lu ms, need %lu ms)", 
-                         i + 1, timeSinceLastDebounce, DEBOUNCE_DELAY * 5);
-            }
-        } else {
-            // Button is released
-            if (lastButtonState[i] == LOW) {
-                LOG_DEBUG("Button %d raw polling: released (LOW->HIGH)", i + 1);
-            }
-            lastButtonState[i] = HIGH;  // Not pressed (idle HIGH)
-        }
+}
+
+void CarWashController::processButtonEvent(const ButtonEvent& evt) {
+    uint8_t detectedId = evt.buttonId;
+
+    unsigned long now = millis();
+    unsigned long queueLatency = elapsedMs(now, evt.pressedAtMs);
+    if (queueLatency > 2000) {
+        // The press is too old to safely act on: loop() was stalled long enough
+        // that machine state (activeButton, cooldown timers, even the session
+        // itself) may have moved on since the physical press happened.
+        LOG_WARNING("Button %d event was queued %lu ms ago - loop() may be stalled, discarding stale press",
+                   detectedId + 1, queueLatency);
+        return;
     }
 
-    // Handle stop button (BUTTON6) - should only pause when RUNNING, same behavior as pressing same button
-    bool stopButtonPressed = !(rawPortValue0 & (1 << STOP_BUTTON_PIN));
-    
-    // Print debug for stop button
-    // LOG_DEBUG("STOP Button (pin %d) state: %s\n", 
-    //              STOP_BUTTON_PIN, stopButtonPressed ? "PRESSED" : "RELEASED");
-    
-    // Handle stop button press with debouncing
-    if (stopButtonPressed) {
-        // If button wasn't pressed before or enough time has passed
-        if (lastButtonState[NUM_BUTTONS-1] == HIGH || 
-            (millis() - lastDebounceTime[NUM_BUTTONS-1]) > DEBOUNCE_DELAY * 5) {
-            
-            // Record time of this press
-            lastDebounceTime[NUM_BUTTONS-1] = millis();
-            lastButtonState[NUM_BUTTONS-1] = LOW;  // Now pressed (active LOW)
-            
-            // CRITICAL FIX: Reset inactivity timeout on ANY user action, even if ignored
-            lastActionTime = millis();
-            
-            // Process button action - stop button should only pause when RUNNING
-            if (config.isLoaded && currentState == STATE_RUNNING) {
-                unsigned long currentTime = millis();
-                
-                // CRITICAL FIX: Check if this is the same button press that just activated the machine
-                // If tokenStartTime was set very recently (within 200ms), this is likely the same press
-                // that activated from IDLE, so we should ignore it to prevent immediate pause
-                if (tokenStartTime != 0) {
-                    unsigned long timeSinceActivation;
-                    if (currentTime >= tokenStartTime) {
-                        timeSinceActivation = currentTime - tokenStartTime;
-                    } else {
-                        timeSinceActivation = (0xFFFFFFFFUL - tokenStartTime) + currentTime + 1;
+    LOG_INFO("Button event: button %d, currentState=%d, activeButton=%d, isLoaded=%d, timestamp='%s'",
+            detectedId + 1, currentState, activeButton, config.isLoaded,
+            config.timestamp.length() > 0 ? config.timestamp.c_str() : "(empty)");
+
+    // Explicit check: Buttons should not work when machine is FREE
+    // This ensures buttons are ignored even if config.isLoaded is somehow true
+    if (currentState == STATE_FREE) {
+        LOG_WARNING("Button %d press ignored - machine is FREE (config.isLoaded=%d)",
+                   detectedId + 1, config.isLoaded);
+        return;
+    }
+
+    // Discard events that were queued while the machine was FREE and are only
+    // now being dequeued after a new session has loaded (e.g. a bump/press
+    // right before a coin or BLE init completed). Without this check the
+    // stale press would be misinterpreted as a live press against the new
+    // session (e.g. auto-activating a relay the customer never selected).
+    if (lastSessionLoadTime != 0 && (int32_t)(evt.pressedAtMs - lastSessionLoadTime) < 0) {
+        LOG_WARNING("Button %d event predates current session load - discarding stale press",
+                   detectedId + 1);
+        return;
+    }
+
+    // Function buttons (0..NUM_BUTTONS-2)
+    // Button 5 = index 4, NUM_BUTTONS = 6, so NUM_BUTTONS - 1 = 5
+    // So detectedId < 5 means buttons 0-4 (buttons 1-5)
+    if (detectedId < NUM_BUTTONS - 1) {
+        LOG_INFO("Processing function button %d (detectedId=%d, NUM_BUTTONS-1=%d)",
+                detectedId + 1, detectedId, NUM_BUTTONS - 1);
+        if (config.isLoaded) {
+            if (currentState == STATE_IDLE) {
+                LOG_INFO("Activating button %d from IDLE state", detectedId + 1);
+                activateButton(detectedId, MANUAL);
+            } else if (currentState == STATE_RUNNING) {
+                // Same button pause the machine, different button switches function
+                LOG_INFO("Button %d pressed while RUNNING (activeButton=%d)",
+                        detectedId + 1, activeButton + 1);
+                if (activeButton == -1 || (int)detectedId == activeButton) {
+                    // Same button pressed - pause the machine
+                    unsigned long currentTime = now;
+
+                    // Guard against a bounce-duplicate event landing within
+                    // BOUNCE_DUPLICATE_WINDOW_MS of activation, which would
+                    // otherwise pause immediately after the very press that
+                    // started the machine
+                    if (tokenStartTime != 0) {
+                        unsigned long timeSinceActivation = elapsedMs(currentTime, tokenStartTime);
+
+                        if (timeSinceActivation < BOUNCE_DUPLICATE_WINDOW_MS) {
+                            LOG_INFO("Button %d pressed while RUNNING - ignoring (just activated %lu ms ago, likely bounce duplicate)",
+                                   detectedId + 1, timeSinceActivation);
+                            // Still reset inactivity timeout
+                            lastActionTime = currentTime;
+                            return;
+                        }
                     }
-                    
-                    // If activation happened very recently (within 200ms), ignore this pause request
-                    if (timeSinceActivation < 200) {
-                        LOG_INFO("STOP button pressed while RUNNING - ignoring (just activated %lu ms ago, likely same press)", 
-                               timeSinceActivation);
-                        return; // Skip processing
+
+                    // Guard against a bounce-duplicate event for the press that
+                    // just switched to this function, which would otherwise
+                    // pause immediately after the switch
+                    unsigned long timeSinceFunctionSwitch = elapsedMs(currentTime, lastFunctionSwitchTime);
+
+                    if (timeSinceFunctionSwitch < FUNCTION_SWITCH_COOLDOWN) {
+                        LOG_INFO("Button %d pressed while RUNNING - ignoring (just switched to this button %lu ms ago, likely bounce duplicate)",
+                               detectedId + 1, timeSinceFunctionSwitch);
+                        // Still reset inactivity timeout
+                        lastActionTime = currentTime;
+                        return;
                     }
-                }
-                
-                // CRITICAL FIX: Check if we just switched to this button - if so, ignore pause request
-                // This prevents the same button press that triggered the switch from also triggering a pause
-                unsigned long timeSinceFunctionSwitch;
-                if (currentTime >= lastFunctionSwitchTime) {
-                    timeSinceFunctionSwitch = currentTime - lastFunctionSwitchTime;
+
+                    // Reset inactivity timeout on ANY user action, even if ignored
+                    lastActionTime = currentTime;
+
+                    if (activeButton == -1) {
+                        LOG_WARNING("activeButton is -1 in RUNNING state - setting to pressed button %d", detectedId + 1);
+                        // Set activeButton to the pressed button to fix the tracking
+                        activeButton = detectedId;
+                    }
+                    LOG_INFO("Pausing machine - same button pressed while running");
+                    pauseMachine();
                 } else {
-                    timeSinceFunctionSwitch = (0xFFFFFFFFUL - lastFunctionSwitchTime) + currentTime + 1;
+                    // Different button pressed - switch to new function (keep running, switch relay)
+                    lastActionTime = now;
+                    LOG_INFO("Button %d pressed while RUNNING (activeButton=%d) - switching function",
+                               detectedId + 1, activeButton + 1);
+                    switchFunction(detectedId);
                 }
-                
+            } else if (currentState == STATE_PAUSED) {
+                // Same button resumes, different button switches function and resumes
+                unsigned long currentTime = now;
+
+                // Prevent rapid pause/resume toggling
+                unsigned long timeSinceLastPauseResume = elapsedMs(currentTime, lastPauseResumeTime);
+
+                // Reset inactivity timeout on ANY user action, even if ignored
+                lastActionTime = currentTime;
+
+                if (timeSinceLastPauseResume < PAUSE_RESUME_COOLDOWN) {
+                    LOG_WARNING("Button %d pressed while PAUSED - ignoring (cooldown: %lu ms < %lu ms)",
+                               detectedId + 1, timeSinceLastPauseResume, PAUSE_RESUME_COOLDOWN);
+                } else {
+                    if (activeButton == -1 || (int)detectedId == activeButton) {
+                        // Same button (or no active button) - resume with same button
+                        if (activeButton == -1) {
+                            LOG_WARNING("activeButton is -1 in PAUSED state - allowing resume anyway (button %d)", detectedId + 1);
+                            // Set activeButton to the pressed button to fix the tracking
+                            activeButton = detectedId;
+                        }
+                        LOG_INFO("Button %d: Resuming from PAUSED state (same button)", detectedId + 1);
+                        resumeMachine(detectedId);
+                        lastPauseResumeTime = currentTime;
+                    } else {
+                        // Different button pressed - switch function and resume
+                        LOG_INFO("Button %d pressed while PAUSED (activeButton=%d) - switching function and resuming",
+                               detectedId + 1, activeButton + 1);
+                        // First deactivate the old relay if there was one
+                        if (activeButton >= 0) {
+                            extern IoExpander ioExpander;
+                            if (xIoExpanderMutex != NULL && xSemaphoreTake(xIoExpanderMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                                ioExpander.setRelay(RELAY_INDICES[activeButton], false);
+                                LOG_INFO("Deactivated relay %d (button %d)", activeButton + 1, activeButton + 1);
+                                xSemaphoreGive(xIoExpanderMutex);
+                            }
+                        }
+                        // Now resume with the new button
+                        resumeMachine(detectedId);
+                        lastPauseResumeTime = currentTime;
+                        lastFunctionSwitchTime = currentTime;
+                    }
+                }
+            } else {
+                // Reset inactivity timeout on ANY user action, even if ignored
+                if (config.isLoaded && currentState != STATE_FREE) {
+                    lastActionTime = millis();
+                }
+                LOG_WARNING("Button press on button %d ignored. State=%d, activeButton=%d",
+                            detectedId + 1, currentState, activeButton);
+            }
+        } else {
+            LOG_WARNING("Button %d press ignored - config not loaded", detectedId + 1);
+        }
+    } else if (detectedId == NUM_BUTTONS - 1) {
+        // Stop button - should only pause when RUNNING, same behavior as pressing same button
+        // Reset inactivity timeout on ANY user action, even if ignored
+        lastActionTime = now;
+        if (config.isLoaded) {
+            if (currentState == STATE_RUNNING) {
+                // Same behavior as pressing the same button when RUNNING - pause the machine
+                unsigned long currentTime = now;
+
+                // Guard against a bounce-duplicate event landing within
+                // BOUNCE_DUPLICATE_WINDOW_MS of activation
+                if (tokenStartTime != 0) {
+                    unsigned long timeSinceActivation = elapsedMs(currentTime, tokenStartTime);
+
+                    if (timeSinceActivation < BOUNCE_DUPLICATE_WINDOW_MS) {
+                        LOG_INFO("STOP button pressed while RUNNING - ignoring (just activated %lu ms ago, likely bounce duplicate)",
+                               timeSinceActivation);
+                        return;
+                    }
+                }
+
+                // Guard against a bounce-duplicate event for a just-completed
+                // function switch
+                unsigned long timeSinceFunctionSwitch = elapsedMs(currentTime, lastFunctionSwitchTime);
+
                 if (timeSinceFunctionSwitch < FUNCTION_SWITCH_COOLDOWN) {
-                    LOG_INFO("STOP button pressed while RUNNING - ignoring (just switched function %lu ms ago, likely same press)", 
+                    LOG_INFO("STOP button pressed while RUNNING - ignoring (just switched function %lu ms ago, likely bounce duplicate)",
                            timeSinceFunctionSwitch);
-                    return; // Skip processing
+                    return;
                 }
-                
-                LOG_INFO("STOP button: Pausing machine (same behavior as pressing same button when RUNNING) - raw polling");
+
+                LOG_INFO("STOP button: Pausing machine (same behavior as pressing same button when RUNNING)");
                 pauseMachine();
-            } else if (config.isLoaded && currentState != STATE_RUNNING) {
+            } else {
                 // Not in RUNNING state - ignore stop button press
                 LOG_INFO("STOP button pressed but machine is not RUNNING (state=%d) - ignoring", currentState);
             }
+        } else {
+            LOG_WARNING("STOP button press ignored - config not loaded");
         }
-    } else {
-        // Button is released
-        lastButtonState[NUM_BUTTONS-1] = HIGH;  // Not pressed (idle HIGH)
     }
 }
 
@@ -1017,8 +766,9 @@ void CarWashController::processCoinInsertion(unsigned long currentTime) {
         config.tokens = 1;
         config.isLoaded = true;
         tokensConsumedCount = 0;
-        
+
         currentState = STATE_IDLE;
+        lastSessionLoadTime = currentTime; // Mark session start so stale queued button events can be discarded
         gracePeriodStartTime = currentTime; // Start 30-second grace period
         gracePeriodActive = true;
         digitalWrite(LED_PIN_INIT, HIGH);
@@ -1308,19 +1058,12 @@ void CarWashController::update() {
     
     // Always handle coin acceptor - coins can create anonymous sessions when machine is not loaded
     handleCoinAcceptor();
-    
-    // Only handle buttons when machine is loaded (buttons require a loaded session)
-    if (config.isLoaded) {
-        handleButtons();
-    } else {
-        // Log when buttons are skipped (only in debug mode to avoid spam)
-        static unsigned long lastSkipLog = 0;
-        if (currentTime - lastSkipLog > 5000) { // Log every 5 seconds max
-            LOG_DEBUG("Skipping button handling - machine not loaded (isLoaded=%d, timestamp empty=%d). Coins can still be inserted to create anonymous session.", 
-                     config.isLoaded, config.timestamp.length() == 0);
-            lastSkipLog = currentTime;
-        }
-    }
+
+    // Always drain the button event queue, even when not loaded: this
+    // discards (with a log) any press that arrives while the machine is
+    // FREE/unloaded, instead of leaving it to fire as a ghost press the
+    // moment a session loads.
+    handleButtons();
     
     currentTime = millis();
     

@@ -3,12 +3,7 @@
 
 IoExpander::IoExpander(uint8_t address, int sdaPin, int sclPin, int intPin)
     : _address(address), _sdaPin(sdaPin), _sclPin(sclPin), _intPin(intPin),
-      _initialized(false), _coinSignalDetected(false),
-      _buttonDetected(false), _detectedButtonId(255), _intCnt(0), _portVal(0) {
-    // Initialize button timing arrays
-    for (int i = 0; i < 6; i++) {
-        _lastButtonTime[i] = 0;
-    }
+      _initialized(false), _coinSignalDetected(false), _intCnt(0), _portVal(0) {
 }
 
 bool IoExpander::begin() {
@@ -270,44 +265,4 @@ void IoExpander::clearCoinSignalFlag() {
     if (oldState) {
         LOG_INFO("IO EXP: Coin signal flag CLEARED (was SET, now CLEAR)");
     }
-}
-
-// Button detection methods implementation
-bool IoExpander::isButtonDetected() {
-    return _buttonDetected;
-}
-
-uint8_t IoExpander::getDetectedButtonId() {
-    return _detectedButtonId;
-}
-
-void IoExpander::setButtonFlag(uint8_t buttonId, bool state) {
-    if (buttonId < 6) {
-        unsigned long currentTime = millis();
-        unsigned long timeSinceLastPress = currentTime - _lastButtonTime[buttonId];
-        // Simple debouncing - only set if enough time has passed
-        if (state && (timeSinceLastPress > DEBOUNCE_INTERVAL)) {
-            // CRITICAL FIX: Allow setting flag for the same button even if flag is already set
-            // This enables pause/resume functionality - same button can be pressed multiple times
-            // Also allow setting flag if no flag is currently set (for different buttons)
-            if (!_buttonDetected || _detectedButtonId == buttonId) {
-                _buttonDetected = true;
-                _detectedButtonId = buttonId;
-                _lastButtonTime[buttonId] = currentTime;
-                LOG_INFO("Button %d flag set (debounced, time since last: %lu ms)", 
-                        buttonId + 1, timeSinceLastPress);
-            } else {
-                LOG_DEBUG("Button %d flag already set (previous button %d), not overwriting", 
-                         buttonId + 1, _detectedButtonId + 1);
-            }
-        } else if (state) {
-            LOG_DEBUG("Button %d press ignored - too soon (debounce: %lu ms since last, need %lu ms)", 
-                     buttonId + 1, timeSinceLastPress, DEBOUNCE_INTERVAL);
-        }
-    }
-}
-
-void IoExpander::clearButtonFlag() {
-    _buttonDetected = false;
-    _detectedButtonId = 255; // Invalid button ID
 }
