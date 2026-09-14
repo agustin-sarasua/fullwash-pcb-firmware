@@ -1,12 +1,7 @@
 #ifndef UTILITIES_H
 #define UTILITIES_H
 
-// Define modem model for TinyGSM
-#define TINY_GSM_MODEM_SIM7600
-// #define TINY_GSM_RX_BUFFER 1024  // Set RX buffer to 1Kb
-
-#include <TinyGsmClient.h>
-// TCA9535 I2C address 
+// TCA9535 I2C address
 // Scanner found the device at address 0x24
 #define TCA9535_ADDR 0x24
 
@@ -27,20 +22,6 @@
 
 // Define a built-in LED pin for visual debugging
 #define LED_PIN          12   // Blue LED connected to IO12 per schematic
-
-// SIM7600G pin definitions (from your PCB documentation)
-#define MODEM_TX         26  // ESP32 RXD connected to SIM7600 TXD
-#define MODEM_RX         27  // ESP32 TXD connected to SIM7600 RXD
-#define MODEM_PWRKEY     4   // Power key pin
-#define MODEM_DTR        32  // DTR pin
-#define MODEM_FLIGHT     25  // Flight mode control pin
-
-// Define the serial console for debug prints
-#define SerialMon Serial
-// Set serial for AT commands (to the module)
-#define SerialAT Serial1
-
-
 
 // Define button and relay pins on TCA9535 (Port 0, active LOW, per schematic)
 #define BUTTON1          5   // BT1 is on P05
@@ -63,8 +44,6 @@
 #define RELAY5           4   // P14 - inflatable
 #define RELAY6           5   // P15 - disinfect
 #define RELAY7           6   // P16 - lighting
-
-#define GSM_PIN          "3846"
 
 // 7-Segment Display Configuration (CH453S driver)
 // The CH453S uses a command-based protocol; base address is 0x40

@@ -47,8 +47,21 @@ static void sda_low() {
 
 static void scl_high() {
     pinMode(_sclPin, INPUT_PULLUP);  // Release SCL (pulled high)
-    // Wait for clock stretching
-    while (digitalRead(_sclPin) == LOW);
+    // Wait for clock stretching, but bounded: this used to be an unconditional
+    // `while (digitalRead(_sclPin) == LOW);`. The display cable leaves the board on a
+    // screw terminal, so a short-to-ground or a disconnected wire would hang this
+    // forever - and it's called from TaskDisplayUpdate (priority 3, core 0) while
+    // holding the I2C mutex, which starves the core-0 idle task and trips the task
+    // watchdog into a reboot loop. 5ms is generous for CH453S clock stretching; timing
+    // out just means this I2C transaction fails (logged, and the caller's ACK check
+    // already tolerates failures), not that the task hangs.
+    unsigned long waitStart = micros();
+    while (digitalRead(_sclPin) == LOW) {
+        if (micros() - waitStart > 5000UL) {
+            LOG_WARNING("CH453S: SCL held low >5ms (cable fault?), aborting wait");
+            break;
+        }
+    }
 }
 
 static void scl_low() {

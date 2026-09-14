@@ -3,37 +3,15 @@
 #include <Preferences.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include "mqtt_lte_client.h"
 #include "io_expander.h"
 #include "utilities.h"
 #include "constants.h"
 #include "car_wash_controller.h"
 #include "logger.h"
 #include "display_manager.h"
-#include "ble_config_manager.h"
 #include "ble_machine_loader.h"
 
-// LTE/MQTT functionality commented out - using BLE only
-// #include "certs/AmazonRootCA.h"
-// #include "certs/AWSClientCertificate.h"
-// #include "certs/AWSClientPrivateKey.h"
-
 // Wire1 is already defined in the ESP32 Arduino framework
-
-// Server details
-const char* AWS_BROKER = "a3foc0mc6v7ap0-ats.iot.us-east-1.amazonaws.com";
-String AWS_CLIENT_ID = "fullwash-machine-001";  // Will be updated dynamically based on BLE config
-const uint16_t AWS_BROKER_PORT = 8883;
-
-// GSM connection settings
-// const char apn[] = "internet";
-const char apn[] = "antel.lte"; // Replace with your carrier's APN if needed
-const char gprsUser[] = "";
-const char gprsPass[] = "";
-const char pin[] = "0281";
-
-// Create MQTT LTE client
-MqttLteClient mqttClient(SerialAT, MODEM_PWRKEY, MODEM_DTR, MODEM_FLIGHT, MODEM_TX, MODEM_RX);
 
 // Create IO Expander
 IoExpander ioExpander(TCA9535_ADDR, I2C_SDA_PIN, I2C_SCL_PIN, INT_PIN);
@@ -45,27 +23,19 @@ CarWashController* controller;
 // Create display manager
 DisplayManager* display;
 
-// Create BLE config manager
-BLEConfigManager* bleConfigManager;
-
 // Create BLE machine loader
 BLEMachineLoader* bleMachineLoader;
 
 // FreeRTOS task handles
 TaskHandle_t TaskCoinDetectorHandle = NULL;
 TaskHandle_t TaskButtonDetectorHandle = NULL;
-TaskHandle_t TaskNetworkManagerHandle = NULL;
 TaskHandle_t TaskWatchdogHandle = NULL;
 TaskHandle_t TaskDisplayUpdateHandle = NULL;
-TaskHandle_t TaskMqttPublisherHandle = NULL;
 
 // FreeRTOS mutexes for shared resources
 SemaphoreHandle_t xIoExpanderMutex = NULL;
 SemaphoreHandle_t xControllerMutex = NULL;
 SemaphoreHandle_t xI2CMutex = NULL;  // For Wire1 (LCD)
-
-// FreeRTOS queue for MQTT message publishing
-QueueHandle_t xMqttPublishQueue = NULL;
 
 // FreeRTOS queue of debounced button press events (TaskButtonDetector -> CarWashController)
 QueueHandle_t xButtonEventQueue = NULL;
@@ -322,197 +292,6 @@ void TaskButtonDetector(void *pvParameters) {
     }
 }
 
-/**
- * FreeRTOS Task: Network Manager
- * 
- * COMMENTED OUT - Using BLE only, no LTE/MQTT
- * 
- * This task handles all network and MQTT operations to prevent blocking the main loop.
- * It manages:
- * - Network connection monitoring
- * - MQTT connection and reconnection
- * - MQTT message processing
- * - Network status updates
- * 
- * Priority: 2 (Medium priority - important but not critical like hardware tasks)
- */
-/* DISABLED - BLE ONLY MODE
-void TaskNetworkManager(void *pvParameters) {
-    // SMART CONNECTIVITY CHECKING: Check less frequently when things are working
-    // Network checks are now handled by smart checking in mqtt_lte_client
-    // - When connected: check every 120 seconds (reduced from 45s)
-    // - When disconnected: check every 30 seconds
-    const TickType_t xNetworkCheckDelayConnected = pdMS_TO_TICKS(120000);  // 2 minutes when connected
-    const TickType_t xNetworkCheckDelayDisconnected = pdMS_TO_TICKS(30000);  // 30 seconds when disconnected
-    const TickType_t xMqttCheckDelay = pdMS_TO_TICKS(15000);      // Check MQTT every 15 seconds (reduced frequency)
-    const TickType_t xReconnectDelay = pdMS_TO_TICKS(60000);     // Reconnect attempt interval
-    
-    unsigned long lastNetworkCheck = 0;
-    unsigned long lastConnectionAttempt = 0;
-    unsigned long lastMqttReconnectAttempt = 0;
-    unsigned long lastStatusCheck = 0;
-    bool wasNetworkConnected = false;  // Track previous state for adaptive checking
-    
-    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
-        LOG_INFO("Network manager task started");
-    }
-    
-    // Wait a bit for system to initialize
-    vTaskDelay(2000 / portTICK_PERIOD_MS);
-    
-    for(;;) {
-        unsigned long currentTime = millis();
-        
-        // SMART CONNECTIVITY CHECKING: Adaptive check interval based on connection state
-        // Check less frequently when connected to reduce mutex contention
-        TickType_t networkCheckInterval = wasNetworkConnected ? 
-            xNetworkCheckDelayConnected : xNetworkCheckDelayDisconnected;
-        
-        // Check network status periodically - reduced frequency when connected
-        // The mqtt_lte_client now handles smart checking based on publish failures
-        if (currentTime - lastNetworkCheck > networkCheckInterval) {
-            lastNetworkCheck = currentTime;
-            
-            // Yield before potentially long network operations
-            vTaskDelay(pdMS_TO_TICKS(50));
-            
-            bool networkConnected = mqttClient.isNetworkConnected();
-            wasNetworkConnected = networkConnected;  // Update state tracking
-            
-            if (!networkConnected) {
-                if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
-                    LOG_WARNING("Lost cellular network connection");
-                }
-                
-                // Only attempt reconnection every 60 seconds
-                if (currentTime - lastConnectionAttempt > 60000) {
-                    lastConnectionAttempt = currentTime;
-                    
-                    if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
-                        LOG_INFO("Attempting to reconnect to cellular network...");
-                    }
-                    
-                    // Yield before network operation to let IDLE task run
-                    vTaskDelay(pdMS_TO_TICKS(100));
-                    
-                    // Try to recover the modem connection
-                    if (mqttClient.begin(apn, gprsUser, gprsPass, pin)) {
-                        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
-                            LOG_INFO("Successfully reconnected to cellular network!");
-                        }
-                        
-                        // Validate IP address
-                        String ip = mqttClient.getLocalIP();
-                        if (mqttClient.isValidIP(ip)) {
-                            // IP is valid, continue
-                        } else {
-                            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
-                                LOG_ERROR("Invalid IP address: %s - skipping MQTT connection attempt", ip.c_str());
-                            }
-                            vTaskDelay(10000 / portTICK_PERIOD_MS); // Wait 10s before retry
-                            continue; // Skip to next iteration
-                        }
-                        
-                        // Cleanup SSL client since network was lost (old SSL session is invalid)
-                        mqttClient.cleanupSSLClient();
-                        vTaskDelay(500 / portTICK_PERIOD_MS); // Reduced from 1000ms to prevent watchdog timeout
-                        
-                        // Reconfigure SSL certificates
-                        mqttClient.setCACert(AmazonRootCA);
-                        mqttClient.setCertificate(AWSClientCertificate);
-                        mqttClient.setPrivateKey(AWSClientPrivateKey);
-                        
-                        // Yield before SSL connection (this can take several seconds)
-                        vTaskDelay(pdMS_TO_TICKS(100));
-                        
-                        // Connect to MQTT broker with improved error handling
-                        if (mqttClient.connect(AWS_BROKER, AWS_BROKER_PORT, AWS_CLIENT_ID.c_str())) {
-                            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
-                                LOG_INFO("MQTT broker connection restored!");
-                            }
-                            
-                            mqttClient.subscribe(INIT_TOPIC.c_str());
-                            mqttClient.subscribe(CONFIG_TOPIC.c_str());
-                            mqttClient.subscribe(COMMAND_TOPIC.c_str());
-                            mqttClient.subscribe(GET_STATE_TOPIC.c_str());
-                            
-                            // Notify that we're back online
-                            if (controller) {
-                                vTaskDelay(4000 / portTICK_PERIOD_MS);
-                                controller->publishMachineSetupActionEvent();
-                            }
-                        } else {
-                            if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
-                                LOG_ERROR("Failed to connect to MQTT broker after network recovery");
-                            }
-                            vTaskDelay(30000 / portTICK_PERIOD_MS); // Wait 30s after SSL failure
-                        }
-                    } else {
-                        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
-                            LOG_ERROR("Failed to reconnect to cellular network");
-                        }
-                        vTaskDelay(10000 / portTICK_PERIOD_MS); // Wait 10s before retry
-                    }
-                }
-            } else {
-                // Network is connected, but check MQTT connection
-                if (!mqttClient.isConnected()) {
-                    // Only attempt MQTT reconnection every 15 seconds
-                    if (currentTime - lastMqttReconnectAttempt > 15000) {
-                        lastMqttReconnectAttempt = currentTime;
-                        if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS) {
-                            LOG_WARNING("Network connected but MQTT disconnected, attempting to reconnect...");
-                        }
-                        
-                        // Yield before reconnection attempt (SSL operations can block)
-                        vTaskDelay(pdMS_TO_TICKS(50));
-                        mqttClient.reconnect();
-                    }
-                }
-            }
-        }
-        
-        // Yield periodically even when not checking network
-        vTaskDelay(pdMS_TO_TICKS(100));
-        
-        // Process MQTT messages if connected
-        // SMART CONNECTIVITY CHECKING: Call loop() less frequently to reduce mutex contention
-        // - When connected: call every 15 seconds (increased from 5s to reduce mutex contention)
-        // - Skip loop() if publisher queue has messages waiting (publisher has priority)
-        // - loop() handles its own smart checking internally
-        static unsigned long lastLoopCall = 0;
-        unsigned long now = millis();
-        if (wasNetworkConnected && (now - lastLoopCall > 15000)) {
-            // Check if publisher queue has messages waiting - if so, skip loop() to let publisher run first
-            UBaseType_t queueDepth = 0;
-            if (xMqttPublishQueue != NULL) {
-                queueDepth = uxQueueMessagesWaiting(xMqttPublishQueue);
-            }
-            
-            // Only call loop() if publisher queue is empty or very low
-            // This prevents blocking the publisher task when it has work to do
-            if (queueDepth == 0) {
-                lastLoopCall = now;
-                // Yield to higher priority tasks (publisher) before potentially blocking operation
-                vTaskDelay(pdMS_TO_TICKS(50));
-                
-                mqttClient.loop();
-            } else {
-                // Publisher has messages waiting - skip loop() this time
-                // Will try again on next iteration (after 15s delay)
-                if (ENABLE_NETWORK_MANAGER_DIAGNOSTICS && queueDepth > 3) {
-                    LOG_DEBUG("Skipping MQTT loop() - publisher queue has %d messages waiting", queueDepth);
-                }
-            }
-        }
-        
-        // Longer delay to prevent task from consuming too much CPU
-        // This allows lower priority tasks (including IDLE task) to run
-        // CRITICAL: Must delay here to prevent watchdog timeout
-        vTaskDelay(pdMS_TO_TICKS(200));  // Increased to 200ms to give more time for IDLE task
-    }
-}
-*/ // END DISABLED - BLE ONLY MODE
 
 /**
  * FreeRTOS Task: Display Update
@@ -549,199 +328,6 @@ void TaskDisplayUpdate(void *pvParameters) {
     }
 }
 
-/**
- * FreeRTOS Task: MQTT Publisher
- * 
- * COMMENTED OUT - Using BLE only, no LTE/MQTT
- * 
- * This task handles all MQTT message publishing in a dedicated task to prevent
- * blocking the main loop and other critical tasks. It:
- * - Consumes messages from xMqttPublishQueue
- * - Publishes messages when MQTT connection is available
- * - Buffers critical messages when disconnected (up to queue limit)
- * - Implements retry logic for failed publishes
- * 
- * Priority: 2 (Medium priority - important for data delivery)
- */
-/* DISABLED - BLE ONLY MODE
-void TaskMqttPublisher(void *pvParameters) {
-    const TickType_t xQueueWaitTime = pdMS_TO_TICKS(100);  // Wait up to 100ms for messages
-    const int MAX_RETRY_COUNT = 3;  // Maximum retry attempts for critical messages
-    MqttMessage msg;
-    
-    LOG_INFO("MQTT Publisher task started");
-    
-    // Wait for MQTT client to be initialized
-    vTaskDelay(3000 / portTICK_PERIOD_MS);
-    
-    // Statistics counters
-    unsigned long messagesPublished = 0;
-    unsigned long messagesDropped = 0;
-    unsigned long lastStatsLog = 0;
-    
-    // Track retry count per message using timestamp as identifier
-    unsigned long lastMessageTimestamp = 0;
-    int currentRetryCount = 0;
-    
-    for(;;) {
-        // Check if there are messages waiting - process them quickly if queue is building up
-        UBaseType_t queueDepth = 0;
-        if (xMqttPublishQueue != NULL) {
-            queueDepth = uxQueueMessagesWaiting(xMqttPublishQueue);
-        }
-        
-        // Try to receive a message from the queue
-        // Use shorter timeout if queue is building up to process faster
-        // Reduced threshold from 10 to 3 to catch queue buildup earlier
-        TickType_t waitTime = (queueDepth > 3) ? pdMS_TO_TICKS(5) : xQueueWaitTime;
-        if (xQueueReceive(xMqttPublishQueue, &msg, waitTime) == pdTRUE) {
-            // Check if this is a retry of the same message
-            bool isRetry = (msg.timestamp == lastMessageTimestamp);
-            if (!isRetry) {
-                // New message - reset retry counter
-                currentRetryCount = 0;
-                lastMessageTimestamp = msg.timestamp;
-            }
-            // Note: retry count is incremented when re-queuing, not here
-            
-            // Check if MQTT is connected
-            if (mqttClient.isConnected()) {
-                // CRITICAL FIX: Use shorter timeout (50ms) to prevent blocking loop()
-                // If mutex is held by loop(), we'll fail fast and retry
-                // This prevents the publisher from monopolizing the mutex
-                bool published = mqttClient.publishNonBlocking(msg.topic, msg.payload, msg.qos, 50);
-                
-                if (published) {
-                    messagesPublished++;
-                    LOG_DEBUG("Published MQTT message to %s (QoS: %d)", msg.topic, msg.qos);
-                    // Reset retry tracking on success
-                    lastMessageTimestamp = 0;
-                    currentRetryCount = 0;
-                } else {
-                    // Publish failed - could be due to mutex contention or actual failure
-                    // Re-queue the message to retry (both critical and non-critical)
-                    // This handles mutex contention gracefully
-                    if (currentRetryCount < MAX_RETRY_COUNT) {
-                        // Try to re-queue for retry (put back at front for faster retry)
-                        if (uxQueueSpacesAvailable(xMqttPublishQueue) > 0) {
-                            if (xQueueSendToFront(xMqttPublishQueue, &msg, 0) == pdTRUE) {
-                                currentRetryCount++;  // Increment retry count when re-queuing
-                                if (msg.isCritical) {
-                                    LOG_INFO("Re-queued critical message for retry (%d/%d) - mutex may have been busy", 
-                                            currentRetryCount, MAX_RETRY_COUNT);
-                                } else {
-                                    LOG_DEBUG("Re-queued message for retry (%d/%d) - mutex may have been busy", 
-                                            currentRetryCount, MAX_RETRY_COUNT);
-                                }
-                                // Update lastMessageTimestamp so we recognize this as a retry next time
-                                lastMessageTimestamp = msg.timestamp;
-                                // CRITICAL: Longer delay (200ms) to give loop() priority to acquire mutex
-                                // This prevents publisher from immediately re-acquiring and blocking loop()
-                                vTaskDelay(pdMS_TO_TICKS(200));
-                            } else {
-                                messagesDropped++;
-                                LOG_WARNING("Failed to re-queue message");
-                            }
-                        } else {
-                            messagesDropped++;
-                            LOG_WARNING("Queue full, cannot retry message");
-                        }
-                    } else {
-                        // Max retries reached
-                        messagesDropped++;
-                        if (msg.isCritical) {
-                            LOG_WARNING("Critical message dropped after %d retries: %s", 
-                                       currentRetryCount, msg.topic);
-                        } else {
-                            LOG_DEBUG("Non-critical message dropped after %d retries: %s", 
-                                     currentRetryCount, msg.topic);
-                        }
-                        // Reset retry tracking
-                        lastMessageTimestamp = 0;
-                        currentRetryCount = 0;
-                    }
-                }
-            } else {
-                // MQTT not connected - buffer critical messages only
-                if (msg.isCritical && currentRetryCount < MAX_RETRY_COUNT) {
-                    // Try to re-queue critical messages if there's space
-                    if (uxQueueSpacesAvailable(xMqttPublishQueue) > (MQTT_QUEUE_SIZE / 4)) {
-                        // Only buffer if queue is less than 75% full
-                        if (xQueueSendToBack(xMqttPublishQueue, &msg, 0) == pdTRUE) {
-                            LOG_DEBUG("Buffered critical message (MQTT disconnected, retry %d/%d)", 
-                                     currentRetryCount + 1, MAX_RETRY_COUNT);
-                        } else {
-                            messagesDropped++;
-                            LOG_WARNING("Failed to buffer critical message");
-                        }
-                    } else {
-                        messagesDropped++;
-                        LOG_WARNING("Queue too full (>75%%), dropping message to prevent overflow");
-                        lastMessageTimestamp = 0;
-                        currentRetryCount = 0;
-                    }
-                } else {
-                    // Non-critical or max retries reached
-                    messagesDropped++;
-                    if (msg.isCritical) {
-                        LOG_WARNING("Critical message dropped (disconnected, max retries)");
-                    } else {
-                        LOG_DEBUG("Non-critical message dropped (MQTT disconnected)");
-                    }
-                    lastMessageTimestamp = 0;
-                    currentRetryCount = 0;
-                }
-                
-                // Wait longer when disconnected to reduce queue pressure
-                vTaskDelay(pdMS_TO_TICKS(2000));
-            }
-            
-            // Re-check queue depth after processing (message was dequeued, so depth decreased)
-            UBaseType_t remainingQueueDepth = 0;
-            if (xMqttPublishQueue != NULL) {
-                remainingQueueDepth = uxQueueMessagesWaiting(xMqttPublishQueue);
-            }
-            
-            // CRITICAL FIX: Always yield significantly to give loop() a chance to acquire mutex
-            // The old logic tried to process messages too fast, monopolizing the mutex
-            // Now we prioritize letting loop() run to process incoming messages
-            if (remainingQueueDepth > 5) {
-                vTaskDelay(pdMS_TO_TICKS(10));  // Still delay to let loop() run
-            } else if (remainingQueueDepth > 0) {
-                vTaskDelay(pdMS_TO_TICKS(50));  // Longer delay to prioritize loop()
-            } else {
-                vTaskDelay(pdMS_TO_TICKS(100));  // Even longer when queue is empty
-            }
-        } else {
-            // No message received - re-check queue depth in case it changed
-            UBaseType_t currentQueueDepth = 0;
-            if (xMqttPublishQueue != NULL) {
-                currentQueueDepth = uxQueueMessagesWaiting(xMqttPublishQueue);
-            }
-            
-            // If queue is building up, don't wait - check again immediately
-            if (currentQueueDepth > 0) {
-                // Queue has messages - process them quickly
-                vTaskDelay(pdMS_TO_TICKS(1));
-            } else {
-                // No messages - normal periodic delay
-                vTaskDelay(pdMS_TO_TICKS(50));
-            }
-        }
-        
-        // Periodic statistics logging (every 60 seconds)
-        unsigned long now = millis();
-        if (now - lastStatsLog > 60000) {
-            lastStatsLog = now;
-            UBaseType_t currentQueueDepth = (xMqttPublishQueue != NULL) ? 
-                uxQueueMessagesWaiting(xMqttPublishQueue) : 0;
-            LOG_INFO("MQTT Publisher stats: Published=%lu, Dropped=%lu, Queue=%d/%d", 
-                    messagesPublished, messagesDropped, 
-                    currentQueueDepth, MQTT_QUEUE_SIZE);
-        }
-    }
-}
-*/ // END DISABLED - BLE ONLY MODE
 
 /**
  * FreeRTOS Task: System Watchdog
@@ -789,41 +375,6 @@ void TaskWatchdog(void *pvParameters) {
                 }
             }
         }
-        
-        // Check network manager task
-        if (TaskNetworkManagerHandle != NULL) {
-            eTaskState networkTaskState = eTaskGetState(TaskNetworkManagerHandle);
-            if (networkTaskState == eDeleted || networkTaskState == eInvalid) {
-                LOG_ERROR("Network manager task died! State: %d", networkTaskState);
-            } else {
-                UBaseType_t stackHighWater = uxTaskGetStackHighWaterMark(TaskNetworkManagerHandle);
-                if (stackHighWater < 1024) {  // Network task needs more headroom for SSL/TLS
-                    LOG_WARNING("Network manager task stack low: %d bytes remaining", stackHighWater);
-                }
-            }
-        }
-        
-        // Check MQTT publisher task
-        if (TaskMqttPublisherHandle != NULL) {
-            eTaskState mqttTaskState = eTaskGetState(TaskMqttPublisherHandle);
-            if (mqttTaskState == eDeleted || mqttTaskState == eInvalid) {
-                LOG_ERROR("MQTT Publisher task died! State: %d", mqttTaskState);
-            } else {
-                UBaseType_t stackHighWater = uxTaskGetStackHighWaterMark(TaskMqttPublisherHandle);
-                if (stackHighWater < 512) {
-                    LOG_WARNING("MQTT Publisher task stack low: %d bytes remaining", stackHighWater);
-                }
-            }
-        }
-        
-        // Monitor MQTT queue depth
-        if (xMqttPublishQueue != NULL) {
-            UBaseType_t queueDepth = uxQueueMessagesWaiting(xMqttPublishQueue);
-            if (queueDepth > (MQTT_QUEUE_SIZE * 0.8)) {  // More than 80% full
-                LOG_WARNING("MQTT queue nearly full: %d/%d messages", queueDepth, MQTT_QUEUE_SIZE);
-            }
-        }
-        
         // Monitor heap usage
         size_t freeHeap = ESP.getFreeHeap();
         size_t minFreeHeap = ESP.getMinFreeHeap();
@@ -845,187 +396,6 @@ void TaskWatchdog(void *pvParameters) {
     }
 }
 
-/* DISABLED - BLE ONLY MODE
-void mqtt_callback(char *topic, byte *payload, unsigned int len) {
-    // MQTT message received - handled by controller
-    
-    // Handle command topic specially for changing log level or debug commands
-    if (String(topic) == COMMAND_TOPIC) {
-        // Parse command JSON
-        StaticJsonDocument<256> doc;
-        DeserializationError error = deserializeJson(doc, payload, len);
-        
-        if (!error && doc.containsKey("command")) {
-            String command = doc["command"].as<String>();
-            
-            if (command == "set_log_level" && doc.containsKey("level")) {
-                String level = doc["level"].as<String>();
-                
-                if (level == "DEBUG") {
-                    controller->setLogLevel(LOG_DEBUG);
-                } else if (level == "INFO") {
-                    controller->setLogLevel(LOG_INFO);
-                } else if (level == "WARNING") {
-                    controller->setLogLevel(LOG_WARNING);
-                } else if (level == "ERROR") {
-                } else if (level == "NONE") {
-                    controller->setLogLevel(LOG_NONE);
-                }
-            }
-            // Add test command for simulating coin insertion
-            else if (command == "simulate_coin") {
-                LOG_INFO("Received command to simulate coin insertion");
-                controller->simulateCoinInsertion();
-            }
-            // Add advanced coin signal simulation options
-            else if (command == "test_coin_signal" && doc.containsKey("pattern")) {
-                String pattern = doc["pattern"].as<String>();
-                LOG_INFO("Testing coin acceptor with pattern: %s", pattern.c_str());
-                
-                extern IoExpander ioExpander;
-                
-                if (pattern == "high_low_high") {
-                    // Simulate a SIG pin toggling HIGH->LOW->HIGH
-                    LOG_INFO("Simulating HIGH->LOW->HIGH pattern");
-                    // We can't directly set input pins, so this is for testing only
-                    controller->simulateCoinInsertion();
-                }
-                else if (pattern == "toggle") {
-                    // Just toggle the coin trigger function
-                    LOG_INFO("Simply toggling the coin detector");
-                    controller->simulateCoinInsertion();
-                }
-                else if (pattern == "counter") {
-                    // Trigger based on CNT pin
-                    LOG_INFO("Simulating coin counter pulse");
-                    controller->simulateCoinInsertion();
-                }
-                else if (pattern == "debug") {
-                    // Special diagnostic mode to read the raw coin signals
-                    LOG_INFO("=== COIN ACCEPTOR DIAGNOSTIC ===");
-                    
-                    // Read raw port value
-                    uint8_t rawPortValue0 = ioExpander.readRegister(INPUT_PORT0);
-                    
-                    // Log the raw values in different formats
-                    LOG_INFO("Raw port value: 0x%02X | Binary: %d%d%d%d%d%d%d%d", 
-                           rawPortValue0,
-                           (rawPortValue0 & 0x80) ? 1 : 0, (rawPortValue0 & 0x40) ? 1 : 0,
-                           (rawPortValue0 & 0x20) ? 1 : 0, (rawPortValue0 & 0x10) ? 1 : 0,
-                           (rawPortValue0 & 0x08) ? 1 : 0, (rawPortValue0 & 0x04) ? 1 : 0,
-                           (rawPortValue0 & 0x02) ? 1 : 0, (rawPortValue0 & 0x01) ? 1 : 0);
-                    
-                    // Check the COIN_SIG bit specifically
-                    bool coin_bit = (rawPortValue0 & (1 << COIN_SIG)) ? 1 : 0;
-                    LOG_INFO("COIN_SIG (bit %d) = %d", COIN_SIG, coin_bit);
-
-                    // Hardware (see schematic): R64 10k pull-DOWN on COIN_SIG,
-                    // acceptor switch feeds 3.3V while a coin passes
-                    bool coinActive = ((rawPortValue0 & (1 << COIN_SIG)) != 0);
-
-                    LOG_INFO("Current coin state: %s",
-                            coinActive ? "ACTIVE (coin present, HIGH/1)" : "INACTIVE (no coin, LOW/0)");
-
-                    // Explain hardware configuration
-                    LOG_INFO("Hardware config: 10kOhm pull-down resistor (R64)");
-                    LOG_INFO("- Default state (no coin): Pin pulled LOW (bit=0) = INACTIVE");
-                    LOG_INFO("- Coin passing: Switch connects 3.3V (bit=1) = ACTIVE");
-                }
-            }
-            // Add debug command to print IO expander state
-            else if (command == "debug_io") {
-                LOG_INFO("Printing IO expander debug info");
-                extern IoExpander ioExpander;
-                ioExpander.printDebugInfo();
-            }
-            // Add command to get network diagnostics
-            else if (command == "debug_network") {
-                LOG_INFO("Printing network diagnostics");
-                extern MqttLteClient mqttClient;
-                mqttClient.printNetworkDiagnostics();
-            }
-            // Add command to get BLE configuration status
-            else if (command == "debug_ble") {
-                LOG_INFO("=== Configuration Status ===");
-                extern BLEConfigManager* bleConfigManager;
-                
-                // Read from persistent storage
-                Preferences debugPrefs;
-                debugPrefs.begin(PREFS_NAMESPACE, true);
-                String storedMachineNum = debugPrefs.getString(PREFS_MACHINE_NUM, "99");
-                String storedEnv = debugPrefs.getString(PREFS_ENVIRONMENT, "prod");
-                debugPrefs.end();
-                
-                LOG_INFO("Stored Machine Number: %s", storedMachineNum.c_str());
-                LOG_INFO("Stored Environment: %s", storedEnv.c_str());
-                LOG_INFO("Current MACHINE_ID: %s", MACHINE_ID.c_str());
-                LOG_INFO("Current AWS_CLIENT_ID: %s", AWS_CLIENT_ID.c_str());
-                LOG_INFO("BLE Status: %s", bleConfigManager && bleConfigManager->isInitialized() ? "Active" : "Deinitialized (saves memory)");
-                LOG_INFO("Free Heap: %d bytes", ESP.getFreeHeap());
-                LOG_INFO("============================");
-            }
-            // Add command to remotely update machine number (for authorized users)
-            else if (command == "set_machine_number" && doc.containsKey("number")) {
-                String newNumber = doc["number"].as<String>();
-                LOG_INFO("Remote machine number change requested: %s", newNumber.c_str());
-                
-                // Update directly in Preferences (BLE might be deinitialized)
-                Preferences updatePrefs;
-                updatePrefs.begin(PREFS_NAMESPACE, false);
-                
-                // Get current environment
-                String currentEnv = updatePrefs.getString(PREFS_ENVIRONMENT, "prod");
-                
-                // Update machine number
-                size_t written = updatePrefs.putString(PREFS_MACHINE_NUM, newNumber);
-                updatePrefs.end();
-                
-                if (written > 0) {
-                    LOG_INFO("Machine number updated successfully in storage: %s", newNumber.c_str());
-                    LOG_INFO("*** RESTART REQUIRED FOR CHANGES TO TAKE EFFECT ***");
-                    
-                    // Update runtime variables (will be lost on restart, but good for immediate use)
-                    updateMQTTTopics(newNumber, currentEnv);
-                    AWS_CLIENT_ID = String("fullwash-machine-") + newNumber;
-                    LOG_INFO("AWS Client ID updated to: %s", AWS_CLIENT_ID.c_str());
-                    LOG_INFO("NOTE: Restart device to fully apply changes");
-                } else {
-                    LOG_ERROR("Failed to update machine number in storage");
-                }
-            }
-            // Add command to remotely update environment (for authorized users)
-            else if (command == "set_environment" && doc.containsKey("environment")) {
-                String newEnv = doc["environment"].as<String>();
-                LOG_INFO("Remote environment change requested: %s", newEnv.c_str());
-                
-                // Update directly in Preferences (BLE might be deinitialized)
-                Preferences updatePrefs;
-                updatePrefs.begin(PREFS_NAMESPACE, false);
-                
-                // Get current machine number
-                String currentMachineNum = updatePrefs.getString(PREFS_MACHINE_NUM, "99");
-                
-                // Update environment
-                size_t written = updatePrefs.putString(PREFS_ENVIRONMENT, newEnv);
-                updatePrefs.end();
-                
-                if (written > 0) {
-                    LOG_INFO("Environment updated successfully in storage: %s", newEnv.c_str());
-                    LOG_INFO("*** RESTART REQUIRED FOR CHANGES TO TAKE EFFECT ***");
-                    
-                    // Update runtime variables (will be lost on restart, but good for immediate use)
-                    updateMQTTTopics(currentMachineNum, newEnv);
-                    LOG_INFO("NOTE: Restart device to fully apply changes");
-                } else {
-                    LOG_ERROR("Failed to update environment in storage");
-                }
-            }
-        }
-    } else if (controller) {
-        controller->handleMqttMessage(topic, payload, len);
-    }
-}
-*/ // END DISABLED - BLE ONLY MODE
 
 // =============================================================================
 // DOUBLE-TAP RESET DETECTION FOR FACTORY RESET
@@ -1152,64 +522,26 @@ void setup() {
   
   // Check if machine is already configured by loading from preferences
   LOG_INFO("=== Checking Machine Configuration ===");
-  bleConfigManager = new BLEConfigManager();
-  
-  // Load configuration without initializing BLE yet
+
+  // Machine number / environment provisioning goes entirely through the BLE Machine
+  // Loader's machine-99 setup path (see car_wash_controller.cpp, the
+  // `MACHINE_ID == "99"` branch of handleMqttMessage) - there used to be a second,
+  // separate provisioning service here (BLEConfigManager, a distinct GATT service at
+  // 4fafc201-...) but its begin() was never actually called, so that service never
+  // advertised and tools/ble_config_tool.py (which targeted it) never worked against
+  // this firmware. Removed rather than wired up, to avoid two competing provisioning
+  // paths.
   Preferences prefs;
   prefs.begin(PREFS_NAMESPACE, true); // Read-only mode
   String machineNum = prefs.getString(PREFS_MACHINE_NUM, "99");
   String environment = prefs.getString(PREFS_ENVIRONMENT, "prod");
   prefs.end();
-  
-//   bool needsConfiguration = (machineNum == "99"); // Default value means not configured
-  
-//   if (needsConfiguration) {
-//     LOG_INFO("Machine NOT configured (machine number: %s)", machineNum.c_str());
-//     LOG_INFO("=== INITIAL SETUP MODE ===");
-//     LOG_INFO("Starting BLE for initial configuration...");
-    
-//     // Initialize BLE and wait for configuration
-//     if (bleConfigManager->begin()) {
-//       LOG_INFO("BLE is now advertising. Please connect to configure the machine.");
-//       LOG_INFO("Device name: %s", BLE_DEVICE_NAME);
-//       LOG_INFO("Use password: %s (default - should be changed)", DEFAULT_MASTER_PASSWORD);
-//       LOG_INFO("Waiting for configuration... MQTT will connect after setup.");
-      
-//       // Wait for machine number to be changed from default
-//       LOG_INFO("Setup will continue once machine number is set via BLE.");
-//       unsigned long bleStartTime = millis();
-//       // const unsigned long BLE_SETUP_TIMEOUT = 150000; // 2.5 minutes timeout
-//       const unsigned long BLE_SETUP_TIMEOUT = 10000; // 10 seconds timeout
-      
-//       while (bleConfigManager->getMachineNumber() == "99") {
-//         bleConfigManager->update();
-//         delay(1000);
-        
-//         // Timeout check
-//         if (millis() - bleStartTime > BLE_SETUP_TIMEOUT) {
-//           LOG_WARNING("BLE setup timeout after 5 minutes. Using default configuration.");
-//           break;
-//         }
-//       }
-      
-//       // Configuration complete
-//       machineNum = bleConfigManager->getMachineNumber();
-//       environment = bleConfigManager->getEnvironment();
-//       LOG_INFO("Configuration received! Machine: %s, Environment: %s", 
-//                machineNum.c_str(), environment.c_str());
-//     } else {
-//       LOG_ERROR("Failed to initialize BLE - using defaults");
-//     }
-//   } else {
-//     LOG_INFO("Machine already configured: %s (environment: %s)", 
-//              machineNum.c_str(), environment.c_str());
-//     LOG_INFO("Skipping BLE initialization to save memory for MQTT.");
-//   }
-  
-  // Update MQTT topics with the configuration
+
+  // Sets INIT_TOPIC/CONFIG_TOPIC/etc (constants.cpp) - a naming leftover from the MQTT
+  // days, but still live: ble_machine_loader.cpp's processLoadCommand() constructs a
+  // local INIT payload and passes it to handleMqttMessage(INIT_TOPIC, ...) to reuse the
+  // existing load logic, so INIT_TOPIC must still be set correctly per machine/environment.
   updateMQTTTopics(machineNum, environment);
-  AWS_CLIENT_ID = String("fullwash-machine-") + machineNum;
-  LOG_INFO("AWS Client ID set to: %s", AWS_CLIENT_ID.c_str());
   LOG_INFO("====================================");
   
   // Set up the built-in LED
@@ -1219,19 +551,48 @@ void setup() {
   // Initialize the I/O expander
   LOG_INFO("Trying to initialize TCA9535...");
   bool initSuccess = ioExpander.begin();
-  
+
+  // Retry a few times before giving up - a genuine wiring/hardware fault won't heal by
+  // retrying, but a transient I2C bus glitch at power-on might.
+  for (int attempt = 0; !initSuccess && attempt < 5; attempt++) {
+    LOG_WARNING("TCA9535 init attempt %d failed, retrying...", attempt + 1);
+    delay(200);
+    initSuccess = ioExpander.begin();
+  }
+
   if (!initSuccess) {
-    LOG_ERROR("Failed to initialize TCA9535!");
-    LOG_WARNING("Will continue without initialization. Check connections.");
-    
-    // Blink LED rapidly to indicate error
-    for (int i = 0; i < 10; i++) {
-      digitalWrite(LED_PIN, !digitalRead(LED_PIN));
-      delay(100);
+    // Previously this logged an error and fell through to "continue anyway", which
+    // meant the mutexes, the button/coin queues, and the detector tasks below were
+    // never created. The machine then silently: (1) accepted coins mechanically with
+    // no software able to detect or credit them, since TaskCoinDetector never started;
+    // (2) ignored every button press, since TaskButtonDetector never started; (3) gave
+    // no signal to the operator that anything was wrong beyond a log line nobody was
+    // watching. A device that dispenses a paid service must fail loudly, not run in a
+    // half-working state indefinitely. So: halt here. setup() never returns, so loop()
+    // and every FreeRTOS task below never start - no relay control, no coin
+    // acceptance, no button response - while blinking a distinct fault pattern so a
+    // technician on site can tell this apart from a healthy boot, and keep retrying in
+    // case the fault is transient (e.g. a connector reseated after a power cycle).
+    LOG_ERROR("TCA9535 initialization failed after retries - halting, will not accept coins or serve washes.");
+    while (true) {
+      // Fault pattern: 3 fast blinks, pause. A healthy boot's LED is solid on.
+      for (int i = 0; i < 3; i++) {
+        digitalWrite(LED_PIN, HIGH);
+        delay(80);
+        digitalWrite(LED_PIN, LOW);
+        delay(80);
+      }
+      delay(1500);
+
+      LOG_WARNING("Retrying TCA9535 initialization...");
+      if (ioExpander.begin()) {
+        LOG_INFO("TCA9535 recovered - restarting to reinitialize cleanly.");
+        ESP.restart();
+      }
     }
-    
-    // Continue anyway - don't get stuck in a loop
-  } else {
+  }
+
+  {
     LOG_INFO("TCA9535 initialization successful!");
     
     // Configure Port 0 (buttons) as inputs (1 = input, 0 = output)
@@ -1283,16 +644,6 @@ void setup() {
         LOG_INFO("Mutexes created successfully");
     }
     
-    // Initialize FreeRTOS queue for MQTT message publishing
-    LOG_INFO("Initializing MQTT publish queue...");
-    xMqttPublishQueue = xQueueCreate(MQTT_QUEUE_SIZE, sizeof(MqttMessage));
-    
-    if (xMqttPublishQueue == NULL) {
-        LOG_ERROR("Failed to create MQTT publish queue!");
-    } else {
-        LOG_INFO("MQTT publish queue created successfully (size: %d)", MQTT_QUEUE_SIZE);
-    }
-
     // Initialize FreeRTOS queue for debounced button press events.
     // Sized above NUM_BUTTONS (6) so a burst where every button transitions
     // in the same 10ms poll pass can still be fully enqueued without drops.
@@ -1338,47 +689,13 @@ void setup() {
   Wire1.setClock(100000); // Set I2C clock to 100kHz (standard mode)
   
   // Initialize the controller
-  controller = new CarWashController(mqttClient);
+  controller = new CarWashController();
   
   // Initialize the 7-segment display
   display = new DisplayManager(DISPLAY_SDA_PIN, DISPLAY_SCL_PIN);
   // Set I2C mutex for display manager
   display->setI2CMutex(xI2CMutex);
   
-  // MQTT initialization commented out - using BLE only
-  /* DISABLED - BLE ONLY MODE
-  // Initialize MQTT client with callback
-  mqttClient.setCallback(mqtt_callback);
-  mqttClient.setBufferSize(512);
-
-  // Initialize modem and connect to network (in setup, network task will handle reconnections)
-  LOG_INFO("Initializing modem and connecting to network...");
-  if (mqttClient.begin(apn, gprsUser, gprsPass, pin)) {
-    // Configure SSL certificates
-    mqttClient.setCACert(AmazonRootCA);
-    mqttClient.setCertificate(AWSClientCertificate);
-    mqttClient.setPrivateKey(AWSClientPrivateKey);
-    
-    // Connect to MQTT broker
-    LOG_INFO("Connecting to MQTT broker...");
-    if (mqttClient.connect(AWS_BROKER, AWS_BROKER_PORT, AWS_CLIENT_ID.c_str())) {
-      LOG_INFO("Connected to MQTT broker!");
-      
-      mqttClient.subscribe(INIT_TOPIC.c_str());
-      mqttClient.subscribe(CONFIG_TOPIC.c_str());
-      mqttClient.subscribe(COMMAND_TOPIC.c_str());
-      mqttClient.subscribe(GET_STATE_TOPIC.c_str());
-      
-      delay(4000);
-      LOG_INFO("Publishing Setup Action Event...");
-      controller->publishMachineSetupActionEvent();
-    } else {
-      LOG_ERROR("Failed to connect to MQTT broker");
-    }
-  } else {
-    LOG_ERROR("Failed to initialize modem");
-  }
-  */ // END DISABLED - BLE ONLY MODE
   
   // Initialize BLE Machine Loader for direct machine loading
   LOG_INFO("Initializing BLE Machine Loader...");
@@ -1390,21 +707,6 @@ void setup() {
   } else {
     LOG_ERROR("Failed to initialize BLE Machine Loader");
   }
-  
-  // Network Manager task commented out - using BLE only
-  /* DISABLED - BLE ONLY MODE
-  // Create Network Manager task (handles all network/MQTT operations)
-  LOG_INFO("Creating Network Manager task...");
-  xTaskCreatePinnedToCore(
-      TaskNetworkManager,           // Task function
-      "NetworkManager",             // Task name
-      16384,                        // Stack size (bytes) - SSL/TLS requires large stack (16KB)
-      NULL,                         // Task parameters
-      2,                            // Priority (2 = medium priority)
-      &TaskNetworkManagerHandle,    // Task handle
-      1                             // Pin to core 1 (APP CPU)
-  );
-  */ // END DISABLED - BLE ONLY MODE
   
   // Create Watchdog task (monitors system health)
   LOG_INFO("Creating Watchdog task...");
@@ -1430,20 +732,6 @@ void setup() {
       0                             // Pin to core 0 (PRO CPU) - keep display responsive
   );
   
-  // MQTT Publisher task commented out - using BLE only
-  /* DISABLED - BLE ONLY MODE
-  // Create MQTT Publisher task (handles all MQTT publishing)
-  LOG_INFO("Creating MQTT Publisher task...");
-  xTaskCreatePinnedToCore(
-      TaskMqttPublisher,            // Task function
-      "MqttPublisher",              // Task name
-      8192,                         // Stack size (bytes) - needs space for MQTT operations
-      NULL,                         // Task parameters
-      2,                            // Priority (2 = SAME as NetworkManager, not higher - prevents monopolizing mutex)
-      &TaskMqttPublisherHandle,     // Task handle
-      1                             // Pin to core 1 (APP CPU) - same as network operations
-  );
-  */ // END DISABLED - BLE ONLY MODE
   
   LOG_INFO("All FreeRTOS tasks created successfully");
   
