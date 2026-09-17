@@ -65,25 +65,7 @@ extern String STATE_TOPIC;
 extern String COMMAND_TOPIC;
 extern String GET_STATE_TOPIC;
 
-// QoS Levels
-const uint32_t QOS0_AT_MOST_ONCE = 0;
-const uint32_t QOS1_AT_LEAST_ONCE = 1;
-
-// MQTT Message Queue Configuration
-const int MQTT_QUEUE_SIZE = 100;  // Maximum number of messages to buffer (increased to handle bursts)
-const int MQTT_MESSAGE_MAX_SIZE = 512;  // Maximum size for topic + payload
-
-// MQTT Message Structure for Queue
-struct MqttMessage {
-    char topic[128];        // Topic name
-    char payload[384];      // Message payload (JSON)
-    uint8_t qos;           // Quality of Service (0 or 1)
-    bool isCritical;       // Flag for message priority
-    unsigned long timestamp;  // When message was created
-};
-
 // Diagnostic flags
-const bool ENABLE_NETWORK_MANAGER_DIAGNOSTICS = true; // Set to true to enable diagnostic messages in Network Manager task and MQTT client
 const bool ENABLE_BUTTON_DIAGNOSTICS = false; // Set to true to enable diagnostic messages for button detection and handling
 
 #endif // CONSTANTS_H

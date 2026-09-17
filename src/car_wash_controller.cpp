@@ -14,13 +14,11 @@ static inline unsigned long elapsedMs(unsigned long now, unsigned long since) {
     return (now >= since) ? (now - since) : (0xFFFFFFFFUL - since) + now + 1;
 }
 
-CarWashController::CarWashController(MqttLteClient& client)
-    : mqttClient(client),
-      currentState(STATE_FREE),
+CarWashController::CarWashController()
+    : currentState(STATE_FREE),
       lastActionTime(0),
       activeButton(-1),
       tokenStartTime(0),
-      lastStatePublishTime(0),
       tokenTimeElapsed(0),
       pauseStartTime(0),
       lastCoinProcessedTime(0),
@@ -62,21 +60,21 @@ CarWashController::CarWashController(MqttLteClient& client)
 }
 
 
-void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payload, unsigned len) {
+bool CarWashController::handleMqttMessage(const char* topic, const uint8_t* payload, unsigned len) {
     // Handle get_state topic first (doesn't require JSON parsing)
     if (String(topic) == GET_STATE_TOPIC) {
         LOG_INFO("Received get_state request, publishing state on demand");
         // Publish state on demand with high priority when get_state message is received
         // publishStateOnDemand();
-        return;
+        return false;
     }
-    
+
     // Other topics require JSON parsing
     StaticJsonDocument<512> doc;
     DeserializationError error = deserializeJson(doc, payload, len);
     if (error) {
         LOG_ERROR("Failed to parse JSON");
-        return;
+        return false;
     }
     if (String(topic) == INIT_TOPIC) {
         // Check if machine ID is 99 (factory default) and this is the first load
@@ -103,7 +101,7 @@ void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payl
             
             // Return early - do NOT load tokens or initialize the machine
             // The tokens were only used to determine the new machine ID
-            return;
+            return false;
         }
         
         // Normal initialization flow (machine ID is not 99)
@@ -142,14 +140,17 @@ void CarWashController::handleMqttMessage(const char* topic, const uint8_t* payl
         // CRITICAL: Publish state immediately after loading with high priority (QOS1)
         // This ensures the backend receives the IDLE state quickly so the app can detect it
         // publishStateOnDemand();
+        return true;
     } else if (String(topic) == CONFIG_TOPIC) {
         LOG_INFO("Received config message from server");
         config.timestamp = doc["timestamp"].as<String>();
-        
+
         // Note: Config no longer clears session data
         // Session is only cleared on STOP action or timeout
+        return false;
     } else {
         LOG_WARNING("Unknown topic: %s", topic);
+        return false;
     }
 }
 
@@ -777,9 +778,6 @@ void CarWashController::processCoinInsertion(unsigned long currentTime) {
                 config.sessionId.c_str(), config.tokens);
         LOG_INFO("COIN: Grace period started - 30 seconds to press button");
     }
-    
-    // DISABLED - BLE ONLY MODE (no MQTT)
-    // publishCoinInsertedEvent();
 }
 
 void CarWashController::autoConsumeToken() {
@@ -1141,12 +1139,6 @@ void CarWashController::update() {
     // - A message is received on /get_state topic
 }
 
-void CarWashController::publishMachineSetupActionEvent() {
-    // DISABLED - BLE ONLY MODE (no MQTT)
-    // This function is kept for API compatibility but does nothing
-    LOG_DEBUG("publishMachineSetupActionEvent called but MQTT is disabled");
-}
-
 unsigned long CarWashController::getSecondsLeft() {
     // Return token time for IDLE (with active token), RUNNING, or PAUSED states
     if (currentState != STATE_IDLE && currentState != STATE_RUNNING && currentState != STATE_PAUSED) {
@@ -1219,12 +1211,6 @@ unsigned long CarWashController::getSecondsLeft() {
 String CarWashController::getTimestamp() {
     // Return default timestamp (using millis() for relative time tracking)
     return "2000-01-01T00:00:00.000Z";
-}
-
-void CarWashController::publishCoinInsertedEvent() {
-    // DISABLED - BLE ONLY MODE (no MQTT)
-    // This function is kept for API compatibility but does nothing
-    LOG_DEBUG("publishCoinInsertedEvent called but MQTT is disabled");
 }
 
 // Debug method to directly simulate a coin insertion
@@ -1366,17 +1352,3 @@ unsigned long CarWashController::getGracePeriodSecondsLeft() const {
 
 // getTokensLeft and getUserName are implemented as inline methods in the header
 
-/**
- * Helper method to queue MQTT messages for the dedicated publisher task
- * 
- * DISABLED - BLE ONLY MODE (no MQTT)
- * This function is kept for API compatibility but does nothing
- */
-bool CarWashController::queueMqttMessage(const char* topic, const char* payload, uint8_t qos, bool isCritical) {
-    // MQTT is disabled - BLE only mode
-    (void)topic;
-    (void)payload;
-    (void)qos;
-    (void)isCritical;
-    return false;
-}

@@ -1,7 +1,6 @@
 #ifndef CAR_WASH_CONTROLLER_H
 #define CAR_WASH_CONTROLLER_H
 
-#include "mqtt_lte_client.h"
 #include "utilities.h"
 #include <ArduinoJson.h>
 #include <algorithm>
@@ -10,10 +9,6 @@
 #include "logger.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
-
-
-// External reference to the MQTT publish queue (defined in main.cpp)
-extern QueueHandle_t xMqttPublishQueue;
 
 // A single debounced, edge-triggered button press event, produced by
 // TaskButtonDetector and consumed by CarWashController::handleButtons().
@@ -27,8 +22,17 @@ extern QueueHandle_t xButtonEventQueue;
 
 class CarWashController {
 public:
-    CarWashController(MqttLteClient& client);
-    void handleMqttMessage(const char* topic, const uint8_t* payload, uint32_t len);
+    CarWashController();
+    // Returns true if this call actually loaded the machine with tokens (a real wash
+    // session started), false otherwise — in particular, false for the machine-99
+    // "set new machine ID" setup path, which intentionally does not load tokens. The BLE
+    // loader (ble_machine_loader.cpp) uses this to avoid reporting "Success: Machine
+    // loaded" back over BLE when nothing was actually loaded.
+    //
+    // Named handleMqttMessage() for historical reasons: this used to be invoked from an
+    // MQTT subscription callback. That transport is gone (BLE-only now); the BLE loader
+    // is the only remaining caller, using a locally-built INIT payload.
+    bool handleMqttMessage(const char* topic, const uint8_t* payload, uint32_t len);
     void handleButtons();
     void handleCoinAcceptor();
     void pauseMachine();
@@ -37,9 +41,7 @@ public:
     void activateButton(int buttonIndex, TriggerType triggerType = MANUAL);
     void tokenExpired();
     void update();
-    void publishMachineSetupActionEvent();
-    void publishCoinInsertedEvent();
-    
+
     // Debug method to simulate a coin insertion
     void simulateCoinInsertion();
     
@@ -61,7 +63,6 @@ public:
     int getActiveButton() const { return activeButton; } // Get current active button index (-1 if none)
 
 private:
-    MqttLteClient& mqttClient;
     MachineState currentState;
     MachineConfig config;
     
@@ -84,9 +85,6 @@ private:
     // Note: Coin detection constants moved to constants.h (COIN_STARTUP_DELAY, COIN_COOLDOWN_MS, etc.)
     unsigned long lastCoinProcessedTime; // Track when a coin was last successfully processed (informational)
 
-    unsigned long lastStatePublishTime;
-    const unsigned long STATE_PUBLISH_INTERVAL = 10000;
-
     void processButtonEvent(const ButtonEvent& evt); // Handle one debounced button press event
     void processCoinInsertion(unsigned long currentTime);
     void autoConsumeToken(); // Automatically consume a token and transition to PAUSED
@@ -94,12 +92,6 @@ private:
     void switchFunction(int newButtonIndex); // Switch to a different function while RUNNING
     unsigned long getInactivityTimeout() const; // Calculate dynamic inactivity timeout based on tokens
 
-    // void publishActionEvent(int buttonIndex, MachineAction machineAction, TriggerType triggerType = MANUAL);
-    // void publishPeriodicState(bool force = false);
-    // void publishStateOnDemand();  // Publish state on demand with high priority (QOS1)
-    
-    // Helper method to queue MQTT messages for the dedicated publisher task
-    bool queueMqttMessage(const char* topic, const char* payload, uint8_t qos, bool isCritical);
 };
 
 #endif

@@ -150,7 +150,20 @@ bool BLEMachineLoader::begin(const String& machineId, CarWashController* ctrl) {
     
     // Mark as initialized before starting advertising
     bleInitialized = true;
-    
+
+    // One-time advertising configuration. This used to live inside startAdvertising()
+    // and run on every call — startAdvertising() is invoked on every FREE transition and
+    // on every disconnect, and BLEAdvertising::addServiceUUID() appends to its internal
+    // list rather than replacing it, so the 31-byte advertisement payload grew a little
+    // more on every session until it overflowed and advertising silently stopped working
+    // until the next reboot. This is very likely the field-reported "machine not found"
+    // failure mode.
+    BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
+    pAdvertising->addServiceUUID(MACHINE_LOAD_SERVICE_UUID);
+    pAdvertising->setScanResponse(true);
+    pAdvertising->setMinPreferred(0x06);
+    pAdvertising->setMinPreferred(0x12);
+
     // Start advertising only if machine is FREE
     if (controller && controller->getCurrentState() == STATE_FREE) {
         startAdvertising();
@@ -169,14 +182,13 @@ void BLEMachineLoader::startAdvertising() {
         LOG_WARNING("Cannot start advertising - BLE not initialized");
         return;
     }
-    
-    BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
-    pAdvertising->addServiceUUID(MACHINE_LOAD_SERVICE_UUID);
-    pAdvertising->setScanResponse(true);
-    pAdvertising->setMinPreferred(0x06);
-    pAdvertising->setMinPreferred(0x12);
+
+    // Advertising parameters (service UUID, scan response, preferred connection
+    // interval) are configured once in begin() — see the comment there. Calling
+    // addServiceUUID() again here on every FREE transition/disconnect is exactly what
+    // used to grow the advertisement payload until it overflowed.
     BLEDevice::startAdvertising();
-    
+
     LOG_INFO("BLE advertising started for machine loading");
 }
 
@@ -361,13 +373,23 @@ void BLEMachineLoader::processLoadCommand() {
     // Call handleMqttMessage with INIT topic to load the machine
     // Note: This is a bit of a hack - ideally we'd have a dedicated loadMachine() method
     extern String INIT_TOPIC;
-    controller->handleMqttMessage(INIT_TOPIC.c_str(), (const uint8_t*)jsonString.c_str(), jsonString.length());
-    
+    bool machineLoaded = controller->handleMqttMessage(
+        INIT_TOPIC.c_str(), (const uint8_t*)jsonString.c_str(), jsonString.length());
+
+    // handleMqttMessage() returns false for the machine-99 "set new machine ID" setup
+    // path — it deliberately does not load tokens there. This used to be ignored, so a
+    // setup request was always reported back over BLE as "Success: Machine loaded" even
+    // though nothing was actually loaded and the machine never started a wash session.
     loadData.loadComplete = true;
-    updateLoadStatusCharacteristic("Success: Machine loaded");
-    LOG_INFO("Machine loaded successfully via BLE");
-    
-    // Stop advertising since machine is now loaded
+    if (machineLoaded) {
+        updateLoadStatusCharacteristic("Success: Machine loaded");
+        LOG_INFO("Machine loaded successfully via BLE");
+    } else {
+        updateLoadStatusCharacteristic("Success: Machine configured");
+        LOG_INFO("Machine configured (new machine ID set) via BLE - no tokens loaded");
+    }
+
+    // Stop advertising since machine is now loaded/configured
     stopAdvertising();
 }
 

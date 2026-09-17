@@ -134,7 +134,7 @@ echo ""
 set +e
 "$PYTHON" -m esptool --chip esp32 --port "$PORT" --baud 921600 \
   --before default_reset --after hard_reset write_flash -z \
-  --flash_mode dio --flash_freq 40m --flash_size 4MB \
+  --flash_mode dio --flash_freq 40m --flash_size detect \
   0x1000 "$FIRMWARE_DIR/bootloader.bin" \
   0x8000 "$FIRMWARE_DIR/partitions.bin" \
   0xe000 "$FIRMWARE_DIR/boot_app0.bin" \
