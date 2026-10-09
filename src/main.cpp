@@ -431,13 +431,11 @@ void performFactoryReset() {
   configPrefs.clear();  // Clear all keys in the namespace
   configPrefs.putString(PREFS_MACHINE_NUM, "99");
   configPrefs.putString(PREFS_ENVIRONMENT, "prod");
-  configPrefs.putString(PREFS_BLE_PASSWORD, DEFAULT_MASTER_PASSWORD);
   configPrefs.end();
   
   Serial.println("Configuration reset complete!");
   Serial.println("Machine ID set to: 99 (installation mode)");
   Serial.println("Environment set to: prod");
-  Serial.println("BLE password reset to default");
   Serial.println("==============================================");
   Serial.println("Rebooting in 2 seconds...");
   Serial.println("==============================================\n");

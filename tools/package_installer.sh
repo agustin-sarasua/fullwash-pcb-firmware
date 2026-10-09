@@ -16,7 +16,11 @@ needs_build=false
 if [[ ! -f "$BUILD_DIR/firmware.bin" ]]; then
   needs_build=true
 else
-  newest_src="$(find "$PROJECT_ROOT/src" -type f -name '*.cpp' -o -name '*.h' -print0 \
+  # The parentheses matter: without them -print0 only binds to the last -name, so a
+  # change to a .cpp file alone was never seen as stale and the installer shipped the
+  # previous firmware.bin. Headers in include/ and build flags in platformio.ini count too.
+  newest_src="$(find "$PROJECT_ROOT/src" "$PROJECT_ROOT/include" "$PROJECT_ROOT/platformio.ini" \
+    -type f \( -name '*.cpp' -o -name '*.h' -o -name 'platformio.ini' \) -print0 \
     | xargs -0 stat -f '%m' 2>/dev/null | sort -nr | head -1 || echo 0)"
   firmware_mtime="$(stat -f '%m' "$BUILD_DIR/firmware.bin")"
   if [[ "$newest_src" -gt "$firmware_mtime" ]]; then
