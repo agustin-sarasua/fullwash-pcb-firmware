@@ -422,6 +422,12 @@ void BLEMachineLoader::resetLoadData() {
     loadData.errorMessage = "";
 }
 
+static String stripLeadingZeros(const String& id) {
+    int i = 0;
+    while (i < (int)id.length() - 1 && id.charAt(i) == '0') i++;
+    return id.substring(i);
+}
+
 bool BLEMachineLoader::validateAuthToken(const String& token, const String& userId, const String& machineId, int tokens) {
     // Token format: userId|machineId|tokens|timestamp|signature
     // Split by |
@@ -453,7 +459,13 @@ bool BLEMachineLoader::validateAuthToken(const String& token, const String& user
         return false;
     }
     
-    if (tokenMachineId != machineId) {
+    // Compare ignoring leading zeros: this machine stores its ID as String(int) ("7"),
+    // but the app finds it with a leading-zero-insensitive match, so a token minted for
+    // "07" used to be rejected here as "Invalid or expired authorization token" — after
+    // the backend had already reserved the user's tokens. The backend now normalizes
+    // too; this keeps older backends/apps working. The signature still covers the exact
+    // string the backend signed, so this does not weaken the check.
+    if (stripLeadingZeros(tokenMachineId) != stripLeadingZeros(machineId)) {
         LOG_ERROR("Token machineId mismatch: expected %s, got %s", machineId.c_str(), tokenMachineId.c_str());
         return false;
     }

@@ -3,7 +3,6 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <Preferences.h>
-#include "ble_config_manager.h"
 
 // External mutex for ioExpander access (defined in main.cpp)
 extern SemaphoreHandle_t xIoExpanderMutex;

@@ -65,6 +65,15 @@ extern String STATE_TOPIC;
 extern String COMMAND_TOPIC;
 extern String GET_STATE_TOPIC;
 
+// Preferences (NVS) namespace and keys holding the machine's persistent config. These
+// used to live in ble_config_manager.h, which was deleted along with the BLE config
+// service while main.cpp and car_wash_controller.cpp still used them, so the firmware
+// stopped compiling. The values must never change: boards in the field already store
+// their assigned machine number under exactly these keys.
+#define PREFS_NAMESPACE "fullwash"
+#define PREFS_MACHINE_NUM "machine_num"
+#define PREFS_ENVIRONMENT "environment"
+
 // Diagnostic flags
 const bool ENABLE_BUTTON_DIAGNOSTICS = false; // Set to true to enable diagnostic messages for button detection and handling
 

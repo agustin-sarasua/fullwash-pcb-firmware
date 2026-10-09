@@ -45,7 +45,7 @@ tools/package_installer.sh
 
 This script (`tools/package_installer.sh`):
 
-1. **Builds firmware if needed.** It compares the newest `.cpp`/`.h` file mtime under `src/` against
+1. **Builds firmware if needed.** It compares the newest `.cpp`/`.h` file mtime under `src/` and `include/` (and `platformio.ini`) against
    `.pio/build/T-SIM7600X/firmware.bin`'s mtime. If the build is missing or stale, it runs
    `pio run -e T-SIM7600X` for you (see [docs/platformio-commands.md](platformio-commands.md)).
    Otherwise it reuses the existing build — so if you want to force a fresh build, run
